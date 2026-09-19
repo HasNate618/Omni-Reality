@@ -5,6 +5,15 @@ using UnityEngine.SceneManagement;
 
 public static class BuildAndroid
 {
+    public static void SetupOnly()
+    {
+        const string scenePath = "Assets/Scenes/SampleScene.unity";
+        EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Single);
+        XRSetup.EnsureXR();
+        ARSetup.EnsureAR();
+        Debug.Log("SETUP ONLY DONE");
+    }
+
     public static void Build()
     {
         const string scenePath = "Assets/Scenes/SampleScene.unity";
@@ -21,12 +30,47 @@ public static class BuildAndroid
 
         XRSetup.EnsureXR();
 
+        // OVR project config: declare passthrough support so the manifest
+        // preprocessor injects com.oculus.feature.PASSTHROUGH (without it the
+        // runtime never initializes Insight passthrough: black background).
+        var ovrCfg = OVRProjectConfig.CachedProjectConfig;
+        if (ovrCfg != null && ovrCfg.insightPassthroughSupport == OVRProjectConfig.FeatureSupport.None)
+        {
+            ovrCfg.insightPassthroughSupport = OVRProjectConfig.FeatureSupport.Supported;
+            UnityEditor.EditorUtility.SetDirty(ovrCfg);
+            UnityEditor.AssetDatabase.SaveAssets();
+            Debug.Log("BuildAndroid: OVRProjectConfig.insightPassthroughSupport = Supported");
+        }
+
+        // Ensure Meta Quest + Meta XR bridge features are enabled.
+        // MetaQuestFeature activates Quest extensions; MetaXRFeature is the
+        // OVRPlugin bridge (tracking/passthrough/anchors through OpenXR).
+        // The SDK's auto-enable dialog never fires in batchmode, so do it here.
+        var oxrSettings = UnityEngine.XR.OpenXR.OpenXRSettings.GetSettingsForBuildTargetGroup(BuildTargetGroup.Android);
+        if (oxrSettings != null)
+        {
+            foreach (var f in oxrSettings.GetFeatures())
+            {
+                if (f == null || f.enabled)
+                    continue;
+                var t = f.GetType().Name;
+                if (t == "MetaQuestFeature" || t == "MetaXRFeature")
+                {
+                    f.enabled = true;
+                    Debug.Log("BuildAndroid: enabled " + t + " for Android");
+                }
+            }
+        }
+
+        ARSetup.EnsureAR();
+
         EditorBuildSettings.scenes = new[] { new EditorBuildSettingsScene(scenePath, true) };
 
         PlayerSettings.companyName = "omni";
         PlayerSettings.productName = "QuestDemo";
         PlayerSettings.SetApplicationIdentifier(BuildTargetGroup.Android, "com.omni.questdemo");
         PlayerSettings.Android.minSdkVersion = AndroidSdkVersions.AndroidApiLevel32;
+        PlayerSettings.Android.targetArchitectures = AndroidArchitecture.ARM64;
         PlayerSettings.runInBackground = true;
 
         EditorUserBuildSettings.SwitchActiveBuildTarget(BuildTargetGroup.Android, BuildTarget.Android);
