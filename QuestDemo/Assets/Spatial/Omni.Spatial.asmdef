@@ -1,3 +1,4 @@
 {
-  "name": "Omni.Spatial"
+  "name": "Omni.Spatial",
+  "references": ["meta.xr.mrutilitykit", "Oculus.VR"]
 }

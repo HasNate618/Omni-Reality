@@ -1,3 +1,5 @@
+using Meta.XR;
+using Meta.XR.EnvironmentDepth;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -21,7 +23,7 @@ public static class ARSetup
         "LeftHandOnControllerAnchor", "RightHandOnControllerAnchor",
         "LeftControllerInHandAnchor", "RightControllerInHandAnchor",
         "LeftHandAnchorDetached", "RightHandAnchorDetached",
-        "PassthroughLayer", "CameraQuad", "ARDirector",
+        "PassthroughLayer", "CameraQuad", "ARDirector", "EnvironmentDepth", "EnvRaycast",
     };
 
     public static void EnsureAR()
@@ -41,6 +43,22 @@ public static class ARSetup
         }
 
         var scene = EditorSceneManager.GetActiveScene();
+
+        // 0a. Scene (spatial data) support: lets Meta's manifest preprocessor
+        //     emit the Scene permission entry so a fresh install can grant
+        //     depth/environment raycast. No manifest or package file is
+        //     touched; this is the sanctioned project-config lever.
+        var projectConfig = OVRProjectConfig.CachedProjectConfig;
+        if (projectConfig == null)
+        {
+            Debug.LogWarning("ARSetup: OVRProjectConfig unavailable, Scene manifest entry not declared");
+        }
+        else if (projectConfig.sceneSupport == OVRProjectConfig.FeatureSupport.None)
+        {
+            projectConfig.sceneSupport = OVRProjectConfig.FeatureSupport.Supported;
+            OVRProjectConfig.CommitProjectConfig(projectConfig);
+            Debug.Log("ARSetup: OVRProjectConfig.sceneSupport=Supported");
+        }
 
         // 0. Wipe AR remnants so a half-present rig can never survive.
         foreach (var name in k_Remnants)
@@ -70,6 +88,19 @@ public static class ARSetup
         if (ovrManager == null)
             ovrManager = rig.AddComponent<OVRManager>();
         ovrManager.isInsightPassthroughEnabled = true;
+
+        // Floor-stage contract: every emitted pose/ray/hint is labelled
+        // openxr_floor_stage, so the rig must be floor-based. The prefab
+        // default is eye-level; configure FloorLevel and fail loudly if an
+        // eye-level rig would survive — it must never pass setup.
+        ovrManager.trackingOriginType = OVRManager.TrackingOrigin.FloorLevel;
+        if (ovrManager.trackingOriginType == OVRManager.TrackingOrigin.EyeLevel)
+        {
+            Debug.LogError("ARSetup: eye-level tracking origin cannot satisfy openxr_floor_stage. Aborting, scene NOT saved.");
+            EditorApplication.Exit(1);
+            return;
+        }
+        Debug.Log("ARSetup: tracking origin floor-based (" + ovrManager.trackingOriginType + ")");
 
         // 2. Passthrough underlay layer.
         var layerGO = new GameObject("PassthroughLayer");
@@ -117,7 +148,45 @@ public static class ARSetup
             Debug.Log("ARSetup: OVRSpatialAnchor added to DemoCube");
         }
 
-        // 7. Camera-texture quad + director (camera API demo, deferred).
+        // 7. AR director: left PCA camera, depth + raycast, capture runtime.
+        //    Slice 1 capture envelope source of truth; see SpatialRuntime.
+        var director = GameObject.Find("ARDirector");
+        if (director == null)
+            director = new GameObject("ARDirector");
+        var pca = director.GetComponent<PassthroughCameraAccess>();
+        if (pca == null)
+            pca = director.AddComponent<PassthroughCameraAccess>();
+        pca.CameraPosition = PassthroughCameraAccess.CameraPositionType.Left;
+        pca.RequestedResolution = new Vector2Int(1280, 960);
+        Debug.Log("ARSetup: PassthroughCameraAccess left 1280x960");
+
+        var depthGO = GameObject.Find("EnvironmentDepth");
+        if (depthGO == null)
+        {
+            depthGO = new GameObject("EnvironmentDepth");
+            depthGO.transform.SetParent(director.transform, false);
+        }
+        if (depthGO.GetComponent<EnvironmentDepthManager>() == null)
+            depthGO.AddComponent<EnvironmentDepthManager>();
+        Debug.Log("ARSetup: EnvironmentDepthManager added");
+
+        var rayGO = GameObject.Find("EnvRaycast");
+        if (rayGO == null)
+        {
+            rayGO = new GameObject("EnvRaycast");
+            rayGO.transform.SetParent(director.transform, false);
+        }
+        if (rayGO.GetComponent<EnvironmentRaycastManager>() == null)
+            rayGO.AddComponent<EnvironmentRaycastManager>();
+        Debug.Log("ARSetup: EnvironmentRaycastManager added");
+
+        if (director.GetComponent<ARRuntime>() == null)
+            director.AddComponent<ARRuntime>();
+        if (director.GetComponent<SpatialRuntime>() == null)
+            director.AddComponent<SpatialRuntime>();
+        Debug.Log("ARSetup: ARRuntime + SpatialRuntime on ARDirector");
+
+        // 8. Camera-texture quad + director (camera API demo, deferred).
         //    Skipped for now — passthrough background is the priority.
 
         EditorSceneManager.MarkSceneDirty(scene);
