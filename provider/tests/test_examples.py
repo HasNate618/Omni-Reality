@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 from summarize_usage import summarize
 from yibu_audit import append_audit_record, normalize_usage, require_env_api_key
-from yibu_http import build_omni_messages, extract_text
+from yibu_http import build_omni_messages, chat_completion, extract_text, extract_tool_calls
 
 
 class UsageTests(unittest.TestCase):
@@ -41,6 +41,54 @@ class HttpShapeTests(unittest.TestCase):
 
     def test_extract_text(self) -> None:
         self.assertEqual(extract_text({"choices": [{"message": {"content": "ok"}}]}), "ok")
+
+    def test_extract_tool_calls_parses_arguments_json(self) -> None:
+        payload = {
+            "choices": [{
+                "message": {
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "inspect_objects",
+                            "arguments": "{\"frame_id\":\"01k00000000000000000000001\"}",
+                        },
+                    }],
+                }
+            }]
+        }
+        calls = extract_tool_calls(payload)
+        self.assertEqual(calls[0]["name"], "inspect_objects")
+        self.assertEqual(calls[0]["arguments"]["frame_id"], "01k00000000000000000000001")
+
+    def test_chat_completion_sends_tools_array(self) -> None:
+        tools = [{"type": "function", "function": {"name": "inspect_objects", "parameters": {"type": "object"}}}]
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"choices": [{"message": {"content": ""}}], "usage": {}}
+        response.raise_for_status = MagicMock()
+        captured = {}
+
+        def fake_post(url, headers=None, json=None):
+            captured["json"] = json
+            return response
+
+        fake_client = MagicMock()
+        fake_client.__enter__.return_value.post = fake_post
+        fake_client.__exit__.return_value = False
+        with patch("yibu_http.httpx.Client", return_value=fake_client):
+            with patch("yibu_http.append_audit_record", return_value={"call_id": "x"}):
+                chat_completion(
+                    api_key="unit-key",
+                    model="qwen3.8-omni-flash",
+                    messages=[{"role": "user", "content": "hi"}],
+                    purpose="unit-tools",
+                    tools=tools,
+                    tool_choice="auto",
+                )
+        self.assertEqual(captured["json"]["tools"], tools)
+        self.assertEqual(captured["json"]["tool_choice"], "auto")
 
 
 class ArchiveTests(unittest.TestCase):
