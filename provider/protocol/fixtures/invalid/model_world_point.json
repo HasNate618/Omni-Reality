@@ -1,0 +1,8 @@
+{
+  "kind": "mark",
+  "target": {
+    "type": "world_point",
+    "px": 0, "py": 0, "pz": 0,
+    "frame": "openxr_floor_stage"
+  }
+}

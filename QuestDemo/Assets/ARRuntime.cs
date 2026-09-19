@@ -5,6 +5,9 @@ using UnityEngine;
 
 /// <summary>
 /// Runtime AR director: camera permission, camera-texture quad, cube anchor.
+/// Task 4 contract: DemoCube is scenery, never the capture pin. Capture pins
+/// come only from SpatialRuntime world_hint (capture-time ray + depth hit);
+/// a miss records null world_hint and no pin is planted anywhere here.
 /// </summary>
 public class ARRuntime : MonoBehaviour
 {
@@ -25,6 +28,18 @@ public class ARRuntime : MonoBehaviour
             OVRPermissionsRequester.Request(new List<OVRPermissionsRequester.Permission>
             {
                 OVRPermissionsRequester.Permission.PassthroughCameraAccess
+            });
+        }
+        // Scene (spatial data) permission is requested independently: depth
+        // and environment raycast stay NotReady without it, and captures
+        // remain honest misses until it is granted. Never bundle the two
+        // requests; each grant is tracked on its own.
+        if (!OVRPermissionsRequester.IsPermissionGranted(OVRPermissionsRequester.Permission.Scene))
+        {
+            Debug.Log("ARRuntime: requesting Scene permission");
+            OVRPermissionsRequester.Request(new List<OVRPermissionsRequester.Permission>
+            {
+                OVRPermissionsRequester.Permission.Scene
             });
         }
         StartCoroutine(SaveAnchorWhenReady());
