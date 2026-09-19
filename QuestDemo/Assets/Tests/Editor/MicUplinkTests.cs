@@ -1,7 +1,57 @@
+using System.Collections.Generic;
 using NUnit.Framework;
 
 public class MicUplinkTests
 {
+    static List<short> Chunk(short amplitude)
+    {
+        var chunk = new List<short>(VoiceActivityGate.ChunkSamples);
+        for (int i = 0; i < VoiceActivityGate.ChunkSamples; i++)
+            chunk.Add(amplitude);
+        return chunk;
+    }
+
+    static VoiceActivityGate StartedGate()
+    {
+        var gate = new VoiceActivityGate();
+        gate.Observe(Chunk(0));
+        gate.Observe(Chunk(0));
+        gate.Observe(Chunk(0));
+        gate.Observe(Chunk(1000));
+        return gate;
+    }
+
+    [Test]
+    public void SpeechOnsetReturnsThreeChunkPrerollThenOnset()
+    {
+        var gate = new VoiceActivityGate();
+        gate.Observe(Chunk(0));
+        gate.Observe(Chunk(0));
+        gate.Observe(Chunk(0));
+        VoiceActivityDecision start = gate.Observe(Chunk(1000));
+        Assert.AreEqual(VoiceActivityState.Started, start.State);
+        Assert.AreEqual(4, start.Chunks.Count);
+    }
+
+    [Test]
+    public void EightSilentChunksEndAnOpenUtterance()
+    {
+        var gate = StartedGate();
+        for (int i = 0; i < 7; i++)
+            Assert.AreEqual(VoiceActivityState.Streaming, gate.Observe(Chunk(0)).State);
+        Assert.AreEqual(VoiceActivityState.Ended, gate.Observe(Chunk(0)).State);
+    }
+
+    [Test]
+    public void EightyChunksEndAnOpenUtteranceEvenWhenSpeechContinues()
+    {
+        var gate = StartedGate();
+        VoiceActivityDecision decision = default;
+        for (int i = 0; i < 79; i++)
+            decision = gate.Observe(Chunk(1000));
+        Assert.AreEqual(VoiceActivityState.Ended, decision.State);
+    }
+
     [Test]
     public void AudioChunkCarriesUtteranceAndPcmShape()
     {
