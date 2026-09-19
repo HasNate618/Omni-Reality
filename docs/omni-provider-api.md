@@ -82,6 +82,18 @@ Takeaways:
 - With no image the model may invent one. The planner adds no ops when no JPEG was sent, whatever the model says.
 - The model said "I've marked…" despite the prompt. The coordinator only speaks that line after an ACK `placed`, so the claim stays honest.
 
+## LAN coordinator voice planners (`coordinator/server.py`)
+
+The offline LAN WebSocket coordinator can run voice turns with `--planner stub|yibu|voice-stub` (plus the legacy `--planner mark` hardcoded mark path). These modes sit beside the grounded voice path above: `--planner yibu` without `--voice-only` still sends JPEG when Quest provides a frame, binds Omni worker tools, and may emit up to three scene ops after ACKs. The bootstrap modes below prove mic transport or live audio-only conversation without spatial ops.
+
+| CLI | Credit | Model / speech | Scene ops | Audit `purpose` labels |
+| --- | --- | --- | --- | --- |
+| `--planner voice-stub` | none | Fixed caption plus a deterministic **non-speech** 16 kHz mono PCM test tone (`voice/test_tone.py`) — transport check only, not Omni speech | none | none (no yibu calls) |
+| `--planner yibu --voice-only` | yes (plan + TTS) | Buffered mic PCM → WAV → `qwen3.8-omni-flash` HTTP omni **without** JPEG or tools; reply text → Gemini Live cloud PCM for playback | none | `voice-only-turn` (omni), `voice-only-speak` (TTS) |
+| `--planner yibu` (default voice) | yes | PCM + optional JPEG, tool loop, spatial prompts | up to 3 after ACK | `voice-turn`, `voice-speak` |
+
+`--voice-only` is rejected unless `--planner yibu`. Direct `YibuPlanner(voice_only=True)` defaults `purpose` to `voice-only-turn`; grounded turns keep `voice-turn`. Live backends load lazily inside `plan()` / synthesizer — offline unit tests inject fakes and spend no credit.
+
 ## Known gap: multi-turn + interruption
 
 The WS scripts record single-turn usage only and have no barge-in handling. Planned conversation work needs: session reuse across turns, per-event usage classification (per-response vs cumulative — verify, never double-count), missing-usage retention, retry dedupe, TTS cancellation on interruption, and stale-frame pose discipline (late replies use capture-time pose). Extend `yibu_audit.py`; see AGENTS.md doc procedure before adding new scripts.

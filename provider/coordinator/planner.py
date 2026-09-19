@@ -225,7 +225,7 @@ class YibuPlanner:
         self,
         *,
         model: str = "qwen3.8-omni-flash",
-        purpose: str = "voice-turn",
+        purpose: str | None = None,
         max_tokens: int = 256,
         audio_as: str = "data_url",
         voice_only: bool = False,
@@ -233,6 +233,8 @@ class YibuPlanner:
         execute_fn: Any | None = None,
     ) -> None:
         self.model = model
+        if purpose is None:
+            purpose = "voice-only-turn" if voice_only else "voice-turn"
         self.purpose = purpose
         self.max_tokens = max_tokens
         self.audio_as = audio_as

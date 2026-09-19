@@ -60,6 +60,14 @@ class VoiceStubTurnTests(unittest.TestCase):
 
 
 class VoiceOnlyYibuTests(unittest.TestCase):
+    def test_voice_only_direct_construction_uses_voice_only_turn_purpose(self) -> None:
+        planner = YibuPlanner(voice_only=True, complete_fn=lambda *a, **k: _text_response("hi"))
+        self.assertEqual(planner.purpose, "voice-only-turn")
+
+    def test_yibu_without_voice_only_keeps_voice_turn_purpose(self) -> None:
+        planner = YibuPlanner(complete_fn=lambda *a, **k: _text_response("hi"))
+        self.assertEqual(planner.purpose, "voice-turn")
+
     def test_voice_only_yibu_uses_audio_without_tools_or_ops(self) -> None:
         flags: list[bool] = []
 
