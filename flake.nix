@@ -48,6 +48,9 @@
           # libxml2 is now 2.15 (SONAME .so.16), so pin libxml2_13 too.
           libxml2
           libxml2_13
+          sqlite
+          icu
+          ncurses
           zlib
           glib
           gtk3
@@ -71,24 +74,27 @@
           curl
           stdenv.cc.cc.lib
 
-          xorg.libX11
-          xorg.libXcomposite
-          xorg.libXdamage
-          xorg.libXext
-          xorg.libXfixes
-          xorg.libXrandr
-          xorg.libxcb
-          xorg.libXScrnSaver
-          xorg.libXtst
-          xorg.libXi
-          xorg.libXcursor
-          xorg.libXrender
+          libx11
+          libxcomposite
+          libxdamage
+          libxext
+          libxfixes
+          libxrandr
+          libxcb
+          libxscrnsaver
+          libxtst
+          libxi
+          libxcursor
+          libxrender
         ];
         multiPkgs = pkgs_: [ pkgs_.zlib ];
         runScript = "bash";
         profile = ''
           export SHELL=${pkgs.bash}/bin/bash
           export UNITY_EDITOR_6000="$HOME/Unity/Hub/Editor/6000.6.2f1/Editor/Unity"
+          # The FHS ld.so.cache misses some libs (e.g. libtinfo.so.6, which the
+          # UnityShaderCompiler needs). Belt-and-suspenders via LD_LIBRARY_PATH.
+          export LD_LIBRARY_PATH="${pkgs.ncurses.out}/lib"''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
           echo "=== omni Unity FHS shell ==="
           echo "adb: $(adb --version 2>/dev/null | head -n 1)"
           adb devices -l 2>/dev/null || true
