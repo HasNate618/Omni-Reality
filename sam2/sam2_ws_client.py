@@ -13,10 +13,16 @@ from websockets.sync.client import connect
 SEND_MAX_SIDE = 1024
 MASK_ALPHA = 0.5
 COLORS = [(0, 255, 0), (255, 0, 0), (0, 0, 255), (0, 255, 255), (255, 0, 255)]
+# Motion compensation: a mask arrives ~one server round-trip after its frame
+# was captured. Shift it by the global camera motion since then, estimated by
+# phase correlation on small grayscale thumbnails (~1 ms).
+THUMB_W = 160
+MIN_CORRELATION = 0.1  # below this the shift estimate is noise; don't move the mask
 
 # Shared global state
 latest_frame = None
-latest_overlay = None  # (colored_mask, [(text, (x, y), color)], object_count)
+latest_overlay = None  # (colored_mask, [(text, (x, y), color)], object_count, sent_thumb)
+motion_comp = True
 click_points = []
 next_obj_id = 1
 running = True
@@ -30,6 +36,27 @@ def mouse_click(event, x, y, flags, param):
         with lock:
             click_points.append((x, y, next_obj_id))
             next_obj_id += 1
+
+def thumbnail(frame):
+    h, w = frame.shape[:2]
+    small = cv2.resize(frame, (THUMB_W, max(1, round(h * THUMB_W / w))), interpolation=cv2.INTER_AREA)
+    return np.float32(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY))
+
+_hanning = {}
+
+def camera_shift(sent_thumb, current_frame):
+    """Global (dx, dy) in display pixels from the sent frame to the current one, or None."""
+    current = thumbnail(current_frame)
+    if current.shape != sent_thumb.shape:
+        return None
+    window = _hanning.get(current.shape)
+    if window is None:
+        window = _hanning[current.shape] = cv2.createHanningWindow(current.shape[::-1], cv2.CV_32F)
+    (dx, dy), response = cv2.phaseCorrelate(sent_thumb, current, window)
+    if response < MIN_CORRELATION:
+        return None
+    scale = current_frame.shape[1] / THUMB_W
+    return dx * scale, dy * scale
 
 def build_overlay(objects, display_shape):
     """Decode masks once per server result into a colour layer plus ID labels."""
@@ -100,7 +127,8 @@ def network_worker(uri):
 
                     if response.get("type") == "result":
                         # 5. Decode here, once, not in the 30 FPS UI loop
-                        overlay = build_overlay(response.get("objects", []), frame_to_send.shape)
+                        colored_mask, labels, count = build_overlay(response.get("objects", []), frame_to_send.shape)
+                        overlay = (colored_mask, labels, count, thumbnail(frame_to_send))
                         with lock:
                             latest_overlay = overlay
                 except Exception as e:
@@ -116,7 +144,7 @@ def network_worker(uri):
             running = False
 
 def main():
-    global latest_frame, running
+    global latest_frame, running, motion_comp
 
     # Start the network thread (SAM2_WS_URL points at a server on another machine)
     uri = os.environ.get("SAM2_WS_URL", "ws://localhost:8765")
@@ -156,8 +184,14 @@ def main():
         display_frame = frame
         object_count = 0
         if overlay is not None:
-            colored_mask, labels, object_count = overlay
+            colored_mask, labels, object_count, sent_thumb = overlay
             if colored_mask.shape == frame.shape:
+                shift = camera_shift(sent_thumb, frame) if motion_comp and object_count else None
+                if shift is not None and max(abs(shift[0]), abs(shift[1])) >= 1:
+                    dx, dy = shift
+                    move = np.float32([[1, 0, dx], [0, 1, dy]])
+                    colored_mask = cv2.warpAffine(colored_mask, move, (frame.shape[1], frame.shape[0]))
+                    labels = [(t, (int(x + dx), int(y + dy)), c) for t, (x, y), c in labels]
                 display_frame = cv2.addWeighted(frame, 1, colored_mask, MASK_ALPHA, 0)
                 for text, origin, color in labels:
                     cv2.putText(display_frame, text, origin, cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
@@ -171,9 +205,14 @@ def main():
 
         cv2.putText(display_frame, f"Camera FPS: {fps:.1f}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(display_frame, f"Motion comp: {'on' if motion_comp else 'off'} (m)", (10, 90),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         cv2.imshow("SAM 2 Real-Time Client", display_frame)
-        if cv2.waitKey(1) & 0xFF == 27:
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("m"):
+            motion_comp = not motion_comp
+        if key == 27:
             with lock:
                 running = False
             break
