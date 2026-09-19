@@ -205,7 +205,7 @@ public class MicUtterance : MonoBehaviour
 
     bool CanOpenUtterance()
     {
-        if (_client == null || !_client.ConnectRequested || _utteranceId != null)
+        if (_client == null || !_client.IsConnected || _utteranceId != null)
             return false;
         SpeakCloudPlayer player = _client.SpeakPlayer;
         return player == null || !player.IsPlaying;

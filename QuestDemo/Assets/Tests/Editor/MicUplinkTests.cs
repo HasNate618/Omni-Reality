@@ -1,8 +1,41 @@
 using System.Collections.Generic;
+using System.Reflection;
 using NUnit.Framework;
+using UnityEngine;
 
 public class MicUplinkTests
 {
+    static void SetConnectRequested(CoordinatorClient client, bool requested)
+    {
+        typeof(CoordinatorClient)
+            .GetField("_beginRequested", BindingFlags.NonPublic | BindingFlags.Instance)
+            .SetValue(client, requested);
+    }
+
+    static bool CoordinatorIsOpen(CoordinatorClient client)
+    {
+        var prop = typeof(CoordinatorClient).GetProperty(
+            "IsOpen",
+            BindingFlags.NonPublic | BindingFlags.Instance);
+        return prop != null && (bool)prop.GetValue(client);
+    }
+
+    static int OutboxCount(CoordinatorClient client)
+    {
+        object queue = typeof(CoordinatorClient)
+            .GetField("_outbox", BindingFlags.NonPublic | BindingFlags.Instance)
+            .GetValue(client);
+        return (int)queue.GetType().GetProperty("Count").GetValue(queue);
+    }
+
+    static void RunAwake(MicUtterance mic)
+    {
+        typeof(MicUtterance).GetMethod(
+                "Awake",
+                BindingFlags.NonPublic | BindingFlags.Instance)
+            .Invoke(mic, null);
+    }
+
     static List<short> Chunk(short amplitude)
     {
         var chunk = new List<short>(VoiceActivityGate.ChunkSamples);
@@ -88,5 +121,55 @@ public class MicUplinkTests
     public void PlayerReportsPlaybackState()
     {
         Assert.IsNotNull(typeof(SpeakCloudPlayer).GetProperty("IsPlaying"));
+    }
+
+    [Test]
+    public void AutoVadOpensOnlyWhenSocketConnectedAndPlaybackInactive()
+    {
+        var go = new GameObject("MicVadGate");
+        var client = go.AddComponent<CoordinatorClient>();
+        var player = go.AddComponent<SpeakCloudPlayer>();
+        typeof(SpeakCloudPlayer).GetMethod(
+                "Awake",
+                BindingFlags.NonPublic | BindingFlags.Instance)
+            .Invoke(player, null);
+        typeof(CoordinatorClient)
+            .GetField("SpeakPlayer", BindingFlags.NonPublic | BindingFlags.Instance)
+            .SetValue(client, player);
+        var mic = go.AddComponent<MicUtterance>();
+        RunAwake(mic);
+        SetConnectRequested(client, true);
+        Assert.IsFalse(CoordinatorIsOpen(client));
+        Assert.IsTrue((bool)typeof(CoordinatorClient)
+            .GetField("_beginRequested", BindingFlags.NonPublic | BindingFlags.Instance)
+            .GetValue(client));
+
+        var canOpen = typeof(MicUtterance).GetMethod(
+            "CanOpenUtterance",
+            BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.IsNotNull(canOpen);
+        Assert.IsFalse((bool)canOpen.Invoke(mic, null));
+
+        Object.DestroyImmediate(go);
+    }
+
+    [Test]
+    public void AudioChunkAndUtteranceEndDroppedWhileOffline()
+    {
+        var go = new GameObject("CoordOffline");
+        var client = go.AddComponent<CoordinatorClient>();
+        SetConnectRequested(client, true);
+        Assert.IsFalse(CoordinatorIsOpen(client));
+
+        string b64 = System.Convert.ToBase64String(new byte[3200]);
+        client.EnqueueAudioChunk("utt-offline", b64);
+        Assert.AreEqual(0, OutboxCount(client));
+
+        client.OpenUtteranceId = "utt-offline";
+        client.EnqueueUtteranceEnd("utt-offline");
+        Assert.AreEqual(0, OutboxCount(client));
+        Assert.IsNull(client.OpenUtteranceId);
+
+        Object.DestroyImmediate(go);
     }
 }

@@ -603,7 +603,7 @@ public class CoordinatorClient : MonoBehaviour
 
     public void EnqueueAudioChunk(string utteranceId, string dataB64)
     {
-        if (string.IsNullOrEmpty(utteranceId) || string.IsNullOrEmpty(dataB64))
+        if (string.IsNullOrEmpty(utteranceId) || string.IsNullOrEmpty(dataB64) || !IsOpen)
             return;
         _outbox.Enqueue(PriorityAudioChunk,
             ProtocolJson.BuildAudioChunk(_sessionId, utteranceId, dataB64));
@@ -615,6 +615,8 @@ public class CoordinatorClient : MonoBehaviour
             return;
         if (OpenUtteranceId == utteranceId)
             OpenUtteranceId = null;
+        if (!IsOpen)
+            return;
         _outbox.Enqueue(PriorityUtteranceEnd,
             ProtocolJson.BuildUtteranceEnd(_sessionId, utteranceId));
     }
