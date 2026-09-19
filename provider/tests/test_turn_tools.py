@@ -25,6 +25,14 @@ class AcceptOpsTests(unittest.TestCase):
         self.assertEqual(len(ops), 3)
         self.assertTrue(all(op["kind"] == "ghost" for op in ops))
 
+    def test_second_place_procedural_drops(self) -> None:
+        proc = load_fixture("valid", "scene_op_procedural.json")
+        ops = accept_model_ops([proc, dict(proc), {"kind": "undo"}])
+        self.assertEqual(len(ops), 2)
+        self.assertEqual(
+            [op["kind"] for op in ops], ["place_procedural", "undo"]
+        )
+
 
 class SpeakGateTests(unittest.TestCase):
     def test_no_speak_on_reject_stale_or_timeout(self) -> None:

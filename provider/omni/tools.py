@@ -45,7 +45,7 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "emit_scene_ops",
-            "description": "Propose up to three scene operations (ghost/mark only).",
+            "description": "Propose up to three scene operations (mark/label/ghost/connect/place_procedural/revise_procedural).",
             "parameters": {
                 "type": "object",
                 "additionalProperties": False,
@@ -62,14 +62,22 @@ _COORDINATOR_KINDS = frozenset({"place_generated", "place_known"})
 
 
 def accept_model_ops(raw_ops: list, *, max_ops: int = 3) -> list[dict]:
-    """Validate model ops; drop mesh placement kinds and cap count."""
+    """Validate model ops; drop mesh placement kinds and cap count.
+
+    At most one `place_procedural` per turn (voice spec §3.1); extras drop.
+    """
     accepted: list[dict] = []
+    seen_procedural = False
     for item in raw_ops:
         if not isinstance(item, dict):
             continue
         kind = item.get("kind")
         if kind in _COORDINATOR_KINDS:
             continue
+        if kind == "place_procedural":
+            if seen_procedural:
+                continue
+            seen_procedural = True
         try:
             validate_instance("model_scene_op", item)
         except ValidationError:

@@ -100,6 +100,20 @@ class PlannerToolLoopTests(unittest.TestCase):
         self.assertEqual(plan.ops, [])
         self.assertEqual(plan.text, "Hello.")
 
+    def test_second_place_procedural_drops(self) -> None:
+        from coordinator.planner import accept_model_ops as planner_accept
+
+        frame_id = new_ulid()
+        proc = {
+            "kind": "place_procedural",
+            "target": {"type": "capture_hint", "frame_id": frame_id},
+            "elements": [
+                {"element": "cube", "color": "cyan", "size": "small", "material": "solid"}
+            ],
+        }
+        ops = planner_accept([proc, dict(proc), {"kind": "undo"}], frame_id)
+        self.assertEqual([op["kind"] for op in ops], ["place_procedural", "undo"])
+
     def test_default_wires_live_backend_lazily(self) -> None:
         planner = YibuPlanner()
         # Backend present but does no I/O until plan() runs.

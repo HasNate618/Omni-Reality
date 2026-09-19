@@ -65,13 +65,21 @@ def fill_frame_id(op: dict, frame_id: str | None) -> dict:
 
 
 def accept_model_ops(raw_ops: object, frame_id: str | None) -> list[dict]:
-    """Keep schema-valid ModelSceneOps (never repaired), capped at 3."""
+    """Keep schema-valid ModelSceneOps (never repaired), capped at 3.
+
+    At most one `place_procedural` per turn (voice spec §3.1); extras drop.
+    """
     if not isinstance(raw_ops, list):
         return []
     kept: list[dict] = []
+    seen_procedural = False
     for op in raw_ops:
         if not isinstance(op, dict):
             continue
+        if op.get("kind") == "place_procedural":
+            if seen_procedural:
+                continue
+            seen_procedural = True
         op = fill_frame_id(dict(op), frame_id)
         try:
             validate_instance("model_scene_op", op)
@@ -148,7 +156,16 @@ Rules:
 - Only add ops when the user asks you to show, mark, point at, or find something.
 - If you cannot tell which object they mean, add no ops and ask them to point or look closer.
 - Do not say a mark was placed; the headset confirms placement after you.
-- Never guess safety-critical facts (live power, load ratings, food doneness)."""
+- Never guess safety-critical facts (live power, load ratings, food doneness).
+- Procedural generation (at most one per turn): {"kind": "place_procedural",
+  "target": {...}, "elements": [1-6 of {"element": "arrow"|"pointer"|"panel"|
+  "cube"|"sphere"|"cylinder", "color": "cyan"|"amber"|"green"|"magenta"|
+  "white"|"slate", "size": "small"|"medium"|"large",
+  "material": "solid"|"translucent"|"glow", optional "text" (panel/pointer
+  only, max 40 chars)}]}. Revise a procedural drawing only by drawing_id:
+  {"kind": "revise_procedural", "drawing_id": "...", "action":
+  "enlarge"|"shrink"|"rotate_cw"|"rotate_ccw"|"nudge"|"remove",
+  "direction": "left"|"right"|"up"|"down"|"forward"|"back" (nudge only)}."""
 
 
 def _extract_json_object(text: str) -> dict | None:

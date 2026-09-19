@@ -152,6 +152,125 @@ public class DrawingStore : MonoBehaviour
         }
     }
 
+    /// <summary>Procedural composition record for revise ops (voice spec §3.2).</summary>
+    sealed class ProceduralRecord
+    {
+        public GameObject Root;
+        public float BaseBoundingM;
+    }
+
+    readonly Dictionary<string, ProceduralRecord> _procedural = new Dictionary<string, ProceduralRecord>();
+
+    public GameObject PlaceProcedural(
+        Vector3 point, Vector3 normal, string drawingId,
+        System.Collections.Generic.List<ProtocolJson.ProceduralElement> elements)
+    {
+        Prune();
+        EvictIfNeeded();
+        GameObject root = ProceduralFactory.BuildComposition(drawingId, elements);
+        root.transform.position = point;
+        Vector3 n = normal.sqrMagnitude < 1e-6f ? Vector3.up : normal.normalized;
+        root.transform.rotation = Quaternion.FromToRotation(Vector3.up, n);
+        root.transform.SetParent(null, true);
+        TryAddAnchor(root);
+        _marks.Add(root);
+        _procedural[drawingId] = new ProceduralRecord
+        {
+            Root = root,
+            BaseBoundingM = EstimateBounding(root),
+        };
+        return root;
+    }
+
+    static float EstimateBounding(GameObject root)
+    {
+        var renderers = root.GetComponentsInChildren<Renderer>();
+        if (renderers.Length == 0)
+            return 0.1f;
+        var bounds = new Bounds(root.transform.position, Vector3.zero);
+        foreach (var rend in renderers)
+            bounds.Encapsulate(rend.bounds);
+        return Mathf.Max(bounds.size.x, Mathf.Max(bounds.size.y, bounds.size.z));
+    }
+
+    /// <summary>Apply one semantic revision; false with an ACK reason on reject.</summary>
+    public bool ApplyProceduralRevision(string drawingId, string action, string direction, out string error)
+    {
+        error = null;
+        ProceduralRecord rec;
+        if (string.IsNullOrEmpty(drawingId) || !_procedural.TryGetValue(drawingId, out rec) || rec.Root == null)
+        {
+            if (rec != null && rec.Root == null)
+                _procedural.Remove(drawingId);
+            error = "invalid";
+            return false;
+        }
+        Transform t = rec.Root.transform;
+        if (action == "enlarge" || action == "shrink")
+        {
+            float factor = action == "enlarge"
+                ? ProceduralFactory.EnlargeFactor
+                : ProceduralFactory.ShrinkFactor;
+            Vector3 next = t.localScale * factor;
+            float bounding = rec.BaseBoundingM * next.x;
+            if (bounding > ProceduralFactory.BoundingDiameterM || next.x <= 0f)
+            {
+                error = "invalid";
+                return false;
+            }
+            t.localScale = next;
+            return true;
+        }
+        if (action == "rotate_cw" || action == "rotate_ccw")
+        {
+            float step = action == "rotate_cw"
+                ? -ProceduralFactory.RotateStepDeg
+                : ProceduralFactory.RotateStepDeg;
+            t.Rotate(Vector3.up, step, Space.Self);
+            return true;
+        }
+        if (action == "nudge")
+        {
+            Vector3 dir;
+            if (!NudgeDirection(direction, t, out dir))
+            {
+                error = "invalid";
+                return false;
+            }
+            t.position += dir * ProceduralFactory.NudgeStepM;
+            return true;
+        }
+        error = "invalid";
+        return false;
+    }
+
+    static bool NudgeDirection(string direction, Transform frame, out Vector3 dir)
+    {
+        switch (direction)
+        {
+            case "left": dir = -frame.right; return true;
+            case "right": dir = frame.right; return true;
+            case "up": dir = frame.up; return true;
+            case "down": dir = -frame.up; return true;
+            case "forward": dir = frame.forward; return true;
+            case "back": dir = -frame.forward; return true;
+            default: dir = Vector3.zero; return false;
+        }
+    }
+
+    /// <summary>Delete a procedural drawing; false when unknown.</summary>
+    public bool RemoveProcedural(string drawingId)
+    {
+        ProceduralRecord rec;
+        if (string.IsNullOrEmpty(drawingId) || !_procedural.TryGetValue(drawingId, out rec))
+            return false;
+        _procedural.Remove(drawingId);
+        _marks.Remove(rec.Root);
+        if (rec.Root != null)
+            DestroyMark(rec.Root);
+        return true;
+    }
+
     /// <summary>Remove all marks (later clear_session binding).</summary>
     public void Clear()
     {
@@ -161,6 +280,7 @@ public class DrawingStore : MonoBehaviour
                 DestroyMark(mark);
         }
         _marks.Clear();
+        _procedural.Clear();
     }
 
     /// <summary>Pure cap seam: true once the store holds MaxDrawings. Test-covered.</summary>

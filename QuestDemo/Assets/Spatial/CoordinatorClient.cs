@@ -409,6 +409,13 @@ public class CoordinatorClient : MonoBehaviour
                 GhostLabelConnect.TryHandle(this, op);
                 return;
             }
+            if (op.Kind == "place_procedural" || op.Kind == "revise_procedural")
+            {
+                if (!PrepareSceneOp(op))
+                    return;
+                ProceduralFactory.TryHandle(this, op);
+                return;
+            }
             HandleMark(op);
             return;
         }

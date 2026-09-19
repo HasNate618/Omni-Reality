@@ -352,12 +352,25 @@ public static class ProtocolJson
         public string FromTargetFrameId;
         public string ToTargetFrameId;
         public string Text;
+        public string ElementsJson;
+        public string Action;
+        public string Direction;
         public string MotionKind;
         public string MotionAxis;
         public float MotionAngleDeg;
         public float MotionDistanceM;
         public bool HasMotion;
         public float MotionPeriodS;
+    }
+
+    /// <summary>One closed-grammar procedural element (voice spec §3.1).</summary>
+    public sealed class ProceduralElement
+    {
+        public string Element;
+        public string Color;
+        public string Size;
+        public string Material;
+        public string Text;
     }
 
     public sealed class SpeakMsg
@@ -405,6 +418,19 @@ public static class ProtocolJson
             parsed.DrawingId = s;
         if (TryGetStringOrNull(payloadJson, "text", out s, out found) && found)
             parsed.Text = s;
+        if (TryGetStringOrNull(payloadJson, "action", out s, out found) && found)
+            parsed.Action = s;
+        if (TryGetStringOrNull(payloadJson, "direction", out s, out found) && found)
+            parsed.Direction = s;
+        int elementsAt = IndexOfKey(payloadJson, "elements", 0);
+        if (elementsAt >= 0)
+        {
+            int bracketAt = payloadJson.IndexOf('[', elementsAt);
+            string arr;
+            int endAt;
+            if (bracketAt >= 0 && ExtractBracketed(payloadJson, bracketAt, out arr, out endAt))
+                parsed.ElementsJson = arr;
+        }
         TryGetTargetFrameId(payloadJson, "target", out parsed.TargetFrameId);
         TryGetTargetFrameId(payloadJson, "from", out parsed.FromTargetFrameId);
         TryGetTargetFrameId(payloadJson, "to", out parsed.ToTargetFrameId);
@@ -637,6 +663,81 @@ public static class ProtocolJson
             }
             sb.Append(c);
             i++;
+        }
+        return false;
+    }
+
+    /// <summary>Parse a procedural elements array into element records.</summary>
+    public static bool TryParseProceduralElements(string arrayJson, out System.Collections.Generic.List<ProceduralElement> elements)
+    {
+        elements = null;
+        if (string.IsNullOrEmpty(arrayJson))
+            return false;
+        var list = new System.Collections.Generic.List<ProceduralElement>();
+        int i = 0;
+        while (i < arrayJson.Length)
+        {
+            int braceAt = arrayJson.IndexOf('{', i);
+            if (braceAt < 0)
+                break;
+            string obj;
+            int endAt;
+            if (!ExtractBraced(arrayJson, braceAt, out obj, out endAt))
+                return false;
+            var el = new ProceduralElement();
+            string v;
+            bool f;
+            if (TryGetStringOrNull(obj, "element", out v, out f) && f)
+                el.Element = v;
+            if (TryGetStringOrNull(obj, "color", out v, out f) && f)
+                el.Color = v;
+            if (TryGetStringOrNull(obj, "size", out v, out f) && f)
+                el.Size = v;
+            if (TryGetStringOrNull(obj, "material", out v, out f) && f)
+                el.Material = v;
+            if (TryGetStringOrNull(obj, "text", out v, out f) && f)
+                el.Text = v;
+            list.Add(el);
+            i = endAt + 1;
+        }
+        elements = list;
+        return true;
+    }
+
+    static bool ExtractBracketed(string json, int bracketAt, out string arr, out int endAt)
+    {
+        arr = null;
+        endAt = -1;
+        int depth = 0;
+        bool inString = false;
+        bool escape = false;
+        for (int i = bracketAt; i < json.Length; i++)
+        {
+            char c = json[i];
+            if (inString)
+            {
+                if (escape)
+                    escape = false;
+                else if (c == '\\')
+                    escape = true;
+                else if (c == '"')
+                    inString = false;
+                continue;
+            }
+            if (c == '"')
+                inString = true;
+            else if (c == '[')
+                depth++;
+            else if (c == ']')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    arr = json.Substring(bracketAt, i - bracketAt + 1);
+                    endAt = i;
+                    return true;
+                }
+            }
         }
         return false;
     }
