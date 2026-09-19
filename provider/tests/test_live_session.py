@@ -93,13 +93,15 @@ class LiveSessionTests(unittest.IsolatedAsyncioTestCase):
         session, _ = make_session(self)
         self.fake.incoming.put_nowait(json.dumps({'setupComplete': {}}))
         await asyncio.wait_for(session.connect(), 2)
-        await session.start_image_turn(JPEG, 'Answer in one sentence.')
+        await session.start_image_turn(JPEG, b'\x00\x01' * 800, 'Answer in one sentence.')
         frame = json.loads(self.fake.sent[-1])
         self.assertTrue(frame['clientContent']['turnComplete'])
         parts = frame['clientContent']['turns'][0]['parts']
         self.assertEqual(parts[0]['text'], 'Answer in one sentence.')
         self.assertEqual(parts[1]['inlineData']['mimeType'], 'image/jpeg')
         self.assertEqual(base64.b64decode(parts[1]['inlineData']['data']), JPEG)
+        self.assertEqual(parts[2]['inlineData']['mimeType'], 'audio/pcm;rate=16000')
+        self.assertEqual(base64.b64decode(parts[2]['inlineData']['data']), b'\x00\x01' * 800)
         await session.close()
 
     async def test_receive_dispatches_audio_transcripts_interruption_usage(self):

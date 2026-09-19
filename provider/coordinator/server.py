@@ -257,15 +257,9 @@ def _live_mode(state: CoordinatorState) -> bool:
 async def _handle_audio_chunk(ws: Any, state: CoordinatorState, message: dict) -> None:
     if state.planner is None:
         return
+    # Buffered only: mic audio travels inside the explicit image turn.
+    # (Streaming it live wedges the session behind an implicit VAD turn.)
     ingest_audio_chunk(state, message["utterance_id"], message["payload"])
-    if _live_mode(state):
-        from coordinator import live_turn as live_mod
-        try:
-            audio = message["payload"].get("audio") or {}
-            pcm = base64.b64decode(audio.get("data_b64") or "", validate=True)
-        except (binascii.Error, ValueError):
-            return
-        await live_mod.forward_audio(state, pcm)
 
 
 async def _handle_utterance_end(ws: Any, state: CoordinatorState, message: dict) -> None:

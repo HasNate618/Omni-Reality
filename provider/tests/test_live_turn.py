@@ -28,8 +28,8 @@ class FakeLive:
     async def send_audio(self, pcm):
         self.sent_audio.append(bytes(pcm))
 
-    async def start_image_turn(self, jpeg, text):
-        self.image_turns.append((bytes(jpeg), str(text)))
+    async def start_image_turn(self, jpeg, pcm, text):
+        self.image_turns.append((bytes(jpeg), bytes(pcm), str(text)))
 
     async def close(self):
         self.is_open = False
@@ -60,14 +60,6 @@ class LiveTurnTests(unittest.IsolatedAsyncioTestCase):
         await live_turn.speak_recovery(state, lambda *a: sent.append(a) or asyncio.sleep(0), 1, 'u1')
         self.assertEqual(sent[0][0], 'speak')
 
-    async def test_audio_chunks_forward_in_order(self):
-        from coordinator import live_turn
-        state = make_state(self)
-        await live_turn.ensure_live_session(state)
-        await live_turn.forward_audio(state, b'\x01' * 3200)
-        await live_turn.forward_audio(state, b'\x02' * 3200)
-        self.assertEqual(state.live.sent_audio, [b'\x01' * 3200, b'\x02' * 3200])
-
     async def test_utterance_end_sends_image_turn(self):
         from coordinator import live_turn
         state = make_state(self)
@@ -84,8 +76,9 @@ class LiveTurnTests(unittest.IsolatedAsyncioTestCase):
         live.emit('on_turn_end')
         await asyncio.wait_for(task, 5)
         self.assertEqual(len(live.image_turns), 1)
-        self.assertEqual(state.live.image_turns[0][0], JPEG)
-        self.assertIn('twenty-five', state.live.image_turns[0][1])
+        self.assertEqual(live.image_turns[0][0], JPEG)
+        self.assertEqual(live.image_turns[0][1], PCM_06S)
+        self.assertIn('twenty-five', live.image_turns[0][2])
         self.assertEqual(sent[0][0], 'turn_started')
 
     async def test_missing_image_never_calls_session(self):
@@ -152,6 +145,50 @@ class LiveTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('stop_speak', kinds)
         self.assertNotIn('speak_chunk', kinds)
         self.assertNotIn('speak_final', kinds)
+
+    async def test_silent_session_times_out_and_recycles(self):
+        from coordinator import live_turn
+        from unittest.mock import patch
+        state = make_state(self)
+        await live_turn.ensure_live_session(state)
+        buf = UtteranceBuffer(pcm=bytearray(PCM_06S), jpeg=JPEG,
+                              envelope={'frame_id': 'f', 'stage_epoch': 0,
+                                        'sent_w': 16, 'sent_h': 12})
+        sent = []
+        async def send(mtype, turn_id, payload, uid):
+            sent.append((mtype, payload))
+        with patch.object(live_turn, 'LIVE_TURN_TIMEOUT_S', 0.05):
+            turn_id = await live_turn.start_live_turn(state, send, 'u1', buf)
+        self.assertEqual(turn_id, 1)
+        speaks = [p for t, p in sent if t == 'speak']
+        self.assertEqual(len(speaks), 1)
+        self.assertIn("couldn't reach", speaks[0]['text'])
+        self.assertIsNone(state.live)
+        self.assertIsNone(state._live_turn)
+
+    async def test_new_utterance_preempts_stale_turn(self):
+        from coordinator import live_turn
+        state = make_state(self)
+        await live_turn.ensure_live_session(state)
+        buf = UtteranceBuffer(pcm=bytearray(PCM_06S), jpeg=JPEG,
+                              envelope={'frame_id': 'f', 'stage_epoch': 0,
+                                        'sent_w': 16, 'sent_h': 12})
+        sent = []
+        async def send(mtype, turn_id, payload, uid):
+            sent.append((mtype, payload))
+        first = asyncio.create_task(live_turn.start_live_turn(state, send, 'u1', buf))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(live_turn.start_live_turn(state, send, 'u2', buf))
+        first_id = await asyncio.wait_for(first, 5)
+        self.assertEqual(first_id, 1)
+        live = state.live
+        live.emit('on_audio', b'\x11\x22' * 24000)
+        live.emit('on_turn_end')
+        await asyncio.wait_for(second, 5)
+        tagged = [(t, p.get('turn_id')) for t, p in sent]
+        self.assertIn(('stop_speak', 1), tagged)
+        self.assertNotIn(('speak_final', 1), tagged)
+        self.assertIn(('speak_final', 2), tagged)
 
     async def test_usage_deltas_audited_per_turn(self):
         from coordinator import live_turn

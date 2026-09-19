@@ -21,6 +21,7 @@ from yibu_audit import append_audit_record
 logger = logging.getLogger(__name__)
 
 WINDOW_24K = 48000  # 1 s of 24 kHz mono s16le per speak_chunk
+LIVE_TURN_TIMEOUT_S = 12.0
 NO_IMAGE_RECOVERY = ("I couldn't get a camera image. "
                      "Check camera access or lighting, then ask again.")
 SESSION_DOWN_RECOVERY = "Sorry, I couldn't reach the model. Try again."
@@ -75,20 +76,21 @@ async def ensure_live_session(state: CoordinatorState) -> bool:
     return True
 
 
-async def forward_audio(state: CoordinatorState, pcm: bytes) -> None:
-    live = getattr(state, "live", None)
-    if live is None or not live.is_open or not pcm:
-        return
-    try:
-        await live.send_audio(bytes(pcm))
-    except Exception as exc:
-        logger.info("live audio forward failed exception_class=%s", type(exc).__name__)
-
-
 async def speak_recovery(state: CoordinatorState, send: Any, turn_id: int,
                          utterance_id: str, text: str = SESSION_DOWN_RECOVERY) -> None:
     await send("speak", turn_id,
                {"turn_id": turn_id, "text": text, "audio": None}, utterance_id)
+
+
+async def _recycle_session(state: CoordinatorState) -> None:
+    """Drop a silent session so the next hello/utterance warms a fresh one."""
+    live = getattr(state, "live", None)
+    state.live = None
+    if live is not None:
+        try:
+            await live.close()
+        except Exception:
+            pass
 
 
 async def speak_down(state: CoordinatorState, send: Any, utterance_id: str) -> int:
@@ -105,9 +107,19 @@ async def start_live_turn(state: CoordinatorState, send: Any,
                           utterance_id: str, buf: Any) -> int | None:
     """Run one utterance through the live session. Returns turn_id or None."""
     from voice.bootstrap_diagnostics import turn_started as log_turn_started
-    if getattr(state, "_live_turn", None) is not None:
-        logger.info("VoiceBootstrap component=coordinator event=utterance_dropped reason=turn_busy")
-        return None
+    previous = getattr(state, "_live_turn", None)
+    if previous is not None:
+        # Voice preemption: the wearer spoke over the reply. Stop the old
+        # audio on Quest, tombstone the turn (late audio drops, no final).
+        previous.tombstoned = True
+        previous.event.set()
+        try:
+            await send("stop_speak", previous.turn_id,
+                       {"turn_id": previous.turn_id}, previous.utterance_id)
+        except Exception:
+            pass
+        logger.info("VoiceBootstrap component=coordinator event=turn_preempted "
+                    "turn_id=%d", previous.turn_id)
     state.turn_id += 1
     turn_id = state.turn_id
     log_turn_started(turn_id=turn_id, mode="live_session", pcm_bytes=len(buf.pcm))
@@ -123,8 +135,20 @@ async def start_live_turn(state: CoordinatorState, send: Any,
             perception_frame("perception_degraded", reason=reason)
             await speak_recovery(state, send, turn_id, utterance_id, NO_IMAGE_RECOVERY)
             return turn_id
-        await state.live.start_image_turn(bytes(buf.jpeg), IMAGE_TURN_PROMPT)
-        await turn.event.wait()
+        await state.live.start_image_turn(bytes(buf.jpeg), bytes(buf.pcm), IMAGE_TURN_PROMPT)
+        try:
+            await asyncio.wait_for(turn.event.wait(), LIVE_TURN_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            live = getattr(state, "live", None)
+            logger.info(
+                "VoiceBootstrap component=coordinator event=live_turn_timeout "
+                "turn_id=%d sent_frames=%d received_events=%d",
+                turn_id,
+                getattr(live, "sent_frames", -1),
+                getattr(live, "received_events", -1))
+            await _recycle_session(state)
+            await speak_recovery(state, send, turn_id, utterance_id)
+            return turn_id
     except LiveSessionError as exc:
         logger.info("live turn failed exception_class=%s", type(exc).__name__)
         await speak_recovery(state, send, turn_id, utterance_id)
@@ -138,6 +162,9 @@ async def start_live_turn(state: CoordinatorState, send: Any,
 
 
 def _current(state: CoordinatorState) -> _Turn | None:
+    # Late events from a preempted turn may land here while the new turn
+    # runs (the session tags nothing). Rare and mild: a few extra chunks
+    # at most, since turns serialize seconds apart and process in order.
     return getattr(state, "_live_turn", None)
 
 

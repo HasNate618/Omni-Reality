@@ -56,6 +56,8 @@ class LiveSession:
         self._ws: Any | None = None
         self._send_lock = asyncio.Lock()
         self._recv_task: asyncio.Task | None = None
+        self.sent_frames = 0
+        self.received_events = 0
 
     @property
     def is_open(self) -> bool:
@@ -107,10 +109,11 @@ class LiveSession:
         try:
             async with self._send_lock:
                 await ws.send(json.dumps(frame))
+            self.sent_frames += 1
         except Exception:
             self._ws = None
 
-    async def start_image_turn(self, jpeg: bytes, text: str) -> None:
+    async def start_image_turn(self, jpeg: bytes, pcm: bytes, text: str) -> None:
         ws = self._ws
         if ws is None:
             raise LiveSessionError("session closed")
@@ -118,10 +121,13 @@ class LiveSession:
             "turns": [{"role": "user", "parts": [
                 {"text": text},
                 {"inlineData": {"mimeType": "image/jpeg",
-                                "data": base64.b64encode(jpeg).decode("ascii")}}]}],
+                                "data": base64.b64encode(jpeg).decode("ascii")}},
+                {"inlineData": {"mimeType": "audio/pcm;rate=16000",
+                                "data": base64.b64encode(pcm).decode("ascii")}}]}],
             "turnComplete": True}}
         async with self._send_lock:
             await ws.send(json.dumps(frame))
+        self.sent_frames += 1
 
     async def _receive_loop(self) -> None:
         ws = self._ws
@@ -131,6 +137,7 @@ class LiveSession:
                     raw = await ws.recv()
                 except Exception:
                     return
+                self.received_events += 1
                 try:
                     self._dispatch(json.loads(raw))
                 except Exception as exc:
@@ -142,6 +149,11 @@ class LiveSession:
     def _dispatch(self, event: dict) -> None:
         if not isinstance(event, dict):
             return
+        # Type names only (never content): reveals wedges like GoAway/errors.
+        known = {"setupComplete", "serverContent"}
+        for key in event:
+            if key not in known and key != "usageMetadata":
+                logger.info("live session event type=%s", str(key)[:32])
         if isinstance(event.get("usageMetadata"), dict):
             self._guard(self._on_usage, dict(event["usageMetadata"]))
         server = event.get("serverContent")

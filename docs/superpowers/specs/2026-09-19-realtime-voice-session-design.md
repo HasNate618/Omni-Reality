@@ -29,13 +29,15 @@ twin (no session, test tone).
 
 ## 3. Media flow
 
-- Mic: Quest 16 kHz chunks stream as today and the coordinator
-  forwards them immediately as Live `realtimeInput` audio (16 kHz PCM —
-  no input resample). The model hears speech incrementally.
-- Image: on `utterance_end`, after validation, the coordinator sends
-  one `clientContent` turn carrying the JPEG plus a short text
-  ("answer what I just asked about this image, at most twenty-five
-  words"). The speech is already in context; it is never re-sent.
+- Mic: Quest 16 kHz chunks stream and buffer as today, but are never
+  sent as Live `realtimeInput`: streamed audio opens an implicit VAD
+  turn that wedges explicit turns behind it with zero server events
+  (measured). The buffered PCM travels inside the explicit turn below.
+- Question: on `utterance_end`, after validation, the coordinator sends
+  one `clientContent` turn carrying the JPEG, the full buffered PCM as
+  `audio/pcm;rate=16000` inline data, and a short text ("answer what I
+  just asked about this image, at most twenty-five words"). One
+  persistent session keeps the ~1 s warm-turn latency without streaming.
 - Voice: model audio (24 kHz PCM) streams out, is resampled to the
   16 kHz Quest contract via laptop `ffmpeg` as today, and is forwarded
   as ordered `speak_chunk {turn_id, seq, data_b64}` frames plus one
@@ -55,12 +57,12 @@ The VAD stays open during playback with a dedicated barge-in threshold
 (`0.05` RMS initial constant, device-tuned against speaker leakage —
 measure mic RMS during speaker playback vs live voice on device; if the
 speaker trips it, raise the constant rather than adding filtering):
-onset stops local playback immediately and the streamed audio
-continues to the session; the server `INTERRUPTED` event is ground
-truth and makes the coordinator emit `stop_speak` (idempotent —
-already-stopped playback stays stopped) and tombstone the turn. Late
-model audio for tombstoned turns is dropped, never played. No
-controller binding exists anywhere in this path.
+onset stops local playback immediately; the completed utterance then
+preempts the running turn (see below). The server `INTERRUPTED` event
+remains a backstop for true mid-speech overlap. Preemption sends
+`stop_speak` (idempotent) and tombstones the old turn: late model
+audio drops, no final speaks. No controller binding exists anywhere
+in this path.
 
 ## 5. Usage and audit
 
@@ -76,7 +78,9 @@ ledger. Failures append failure records.
 Session connect failure, mid-turn socket loss, image rejection, and
 empty replies all produce the existing honest recovery lines and
 visible recovery hints, never invented vision and never a silent stall.
-A turn with no reply within 45 s fails visibly and frees the mic gate.
+A turn with no reply within 12 s fails visibly (honest recovery line),
+recycles the session, and frees the mic gate. The Quest-side 45 s reply
+timeout remains the outer bound.
 Blips (under three voiced 100 ms windows) and speaker echo (envelope
 correlation against the just-played reply) never become turns: the
 utterance drops with `utterance_dropped` plus the echo score, and a
