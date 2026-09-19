@@ -197,7 +197,7 @@ public class DrawingStore : MonoBehaviour
     public bool ApplyProceduralRevision(string drawingId, string action, string direction, out string error)
     {
         error = null;
-        ProceduralRecord rec;
+        ProceduralRecord rec = null;
         if (string.IsNullOrEmpty(drawingId) || !_procedural.TryGetValue(drawingId, out rec) || rec.Root == null)
         {
             if (rec != null && rec.Root == null)
@@ -261,7 +261,7 @@ public class DrawingStore : MonoBehaviour
     /// <summary>Delete a procedural drawing; false when unknown.</summary>
     public bool RemoveProcedural(string drawingId)
     {
-        ProceduralRecord rec;
+        ProceduralRecord rec = null;
         if (string.IsNullOrEmpty(drawingId) || !_procedural.TryGetValue(drawingId, out rec))
             return false;
         _procedural.Remove(drawingId);
