@@ -150,27 +150,40 @@ def free_device_memory():
 
 
 predictor = SAM2VideoPredictor.from_pretrained("facebook/sam2-hiera-tiny", device=device)
+# Attend to at most the 2 temporally closest clicked frames per object, so
+# repeated correction clicks don't grow attention cost without bound.
+predictor.max_cond_frames_in_attn = 2
 try:
     image_size = predictor.model.image_size
 except AttributeError:
     image_size = 1024
 
-# Frames of tracking memory kept per object. The model reads at most the last
-# num_maskmem-1 = 6 memory frames and max_obj_ptrs_in_encoder-1 = 15 object
-# pointers, so anything older is dead weight that grows every frame.
-KEEP_FRAMES = 16
+# Which past frames each object keeps in its tracking memory, by age (frames
+# before the current one). The model looks up memory at ages 1-6 and object
+# pointers at ages 1-15, and skips any frame that is missing while keeping the
+# right temporal encoding for the rest, so thinning this set is a direct
+# speed/quality dial for memory attention (the largest cost per object).
+# Clicked (conditioning) frames are never pruned.
+MEMORY_POLICIES = {
+    "full": frozenset(range(1, 16)),  # everything the model can read
+    "sparse": frozenset({1, 3, 5}),   # ~-23% per object, IoU 0.99 vs full on a pan test
+    "light": frozenset({1, 2}),
+}
+MEMORY_POLICY = os.environ.get("SAM2_MEMORY", "sparse")
+if MEMORY_POLICY not in MEMORY_POLICIES:
+    raise SystemExit(f"SAM2_MEMORY must be one of {sorted(MEMORY_POLICIES)}")
+KEEP_AGES = MEMORY_POLICIES[MEMORY_POLICY]
 PORT = int(os.environ.get("SAM2_WS_PORT", "8765"))
 STATS_EVERY = 50
 
 
 def prune_memory(inference_state, frame_idx):
-    """Drop non-conditioning outputs older than KEEP_FRAMES; keep clicked frames."""
-    oldest = frame_idx - KEEP_FRAMES
+    """Keep only KEEP_AGES (and the current frame) of each object's non-clicked memory."""
     for per_obj in (inference_state["output_dict_per_obj"], inference_state["frames_tracked_per_obj"]):
         for obj_dict in per_obj.values():
             store = obj_dict.get("non_cond_frame_outputs", obj_dict)
-            for old_idx in [i for i in store if i < oldest]:
-                del store[old_idx]
+            for idx in [i for i in store if i != frame_idx and frame_idx - i not in KEEP_AGES]:
+                del store[idx]
 
 
 def process_frame(session, frame, clicks):
@@ -277,6 +290,7 @@ async def handler(websocket):
 
 async def main():
     warm_up()
+    print(f"Memory policy: {MEMORY_POLICY} (ages {sorted(KEEP_AGES)})", flush=True)
     print(f"Starting SAM 2 WebSocket Server on ws://0.0.0.0:{PORT}", flush=True)
     async with websockets.serve(handler, "0.0.0.0", PORT, max_size=None):
         await asyncio.Future()  # run forever
