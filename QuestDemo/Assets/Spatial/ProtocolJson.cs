@@ -253,11 +253,19 @@ public static class ProtocolJson
     /// </summary>
     public static string BuildFrame(string sessionId, CaptureEnvelope env)
     {
+        return BuildFrame(sessionId, env, null);
+    }
+
+    /// <summary>Frame wrapper tagged with an open utterance_id (voice turn).</summary>
+    public static string BuildFrame(string sessionId, CaptureEnvelope env, string utteranceId)
+    {
         var sb = new StringBuilder(640);
         sb.Append("{\"envelope\":");
         sb.Append(ToSpecJson(env));
         sb.Append('}');
-        return WrapMessage("frame", sessionId, 0, sb.ToString());
+        if (string.IsNullOrEmpty(utteranceId))
+            return WrapMessage("frame", sessionId, 0, sb.ToString());
+        return WrapUtteranceMessage("frame", sessionId, utteranceId, sb.ToString());
     }
 
     /// <summary>
@@ -286,6 +294,45 @@ public static class ProtocolJson
         AppendNullable(sb, pin);
         sb.Append('}');
         return WrapMessage("ack", sessionId, turnId, sb.ToString());
+    }
+
+    /// <summary>Wrap a voice message carrying a top-level utterance_id.</summary>
+    public static string WrapUtteranceMessage(string type, string sessionId, string utteranceId, string payloadJson)
+    {
+        var sb = new StringBuilder(128);
+        sb.Append("{\"v\":1,\"type\":\"");
+        AppendEscaped(sb, type);
+        sb.Append("\",\"session_id\":");
+        AppendSessionId(sb, sessionId);
+        sb.Append(",\"turn_id\":0,\"utterance_id\":\"");
+        AppendEscaped(sb, utteranceId);
+        sb.Append("\",\"payload\":");
+        sb.Append(payloadJson);
+        sb.Append('}');
+        return sb.ToString();
+    }
+
+    /// <summary>~100 ms PCM chunk (16 kHz mono s16le base64).</summary>
+    public static string BuildAudioChunk(string sessionId, string utteranceId, string dataB64)
+    {
+        var sb = new StringBuilder(64);
+        sb.Append("{\"utterance_id\":\"");
+        AppendEscaped(sb, utteranceId);
+        sb.Append(
+            "\",\"audio\":{\"encoding\":\"pcm_s16le\",\"sample_rate\":16000,\"channels\":1,\"data_b64\":\"");
+        AppendEscaped(sb, dataB64);
+        sb.Append("\"}}");
+        return WrapUtteranceMessage("audio_chunk", sessionId, utteranceId, sb.ToString());
+    }
+
+    /// <summary>Close an utterance; the coordinator then runs the turn.</summary>
+    public static string BuildUtteranceEnd(string sessionId, string utteranceId)
+    {
+        var sb = new StringBuilder(64);
+        sb.Append("{\"utterance_id\":\"");
+        AppendEscaped(sb, utteranceId);
+        sb.Append("\"}");
+        return WrapUtteranceMessage("utterance_end", sessionId, utteranceId, sb.ToString());
     }
 
     /// <summary>Quest cancel wrapper (payload carries the cancelled op_id).</summary>

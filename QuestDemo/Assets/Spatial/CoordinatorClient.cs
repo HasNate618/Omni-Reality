@@ -44,8 +44,10 @@ public class CoordinatorClient : MonoBehaviour
 
     /// <summary>Send priorities (spec order): cancel ahead of ack ahead of frames.</summary>
     public const int PriorityCancel = 0;
+    public const int PriorityUtteranceEnd = 0;
     public const int PriorityAck = 2;
     public const int PriorityPing = 8;
+    public const int PriorityAudioChunk = 8;
     public const int PriorityFrame = 9;
 
     /// <summary>Hello shares the top lane (sent once, queue empty at connect).</summary>
@@ -593,7 +595,28 @@ public class CoordinatorClient : MonoBehaviour
     {
         if (env == null || !IsOpen)
             return;
-        _outbox.Enqueue(PriorityFrame, ProtocolJson.BuildFrame(_sessionId, env));
+        _outbox.Enqueue(PriorityFrame, ProtocolJson.BuildFrame(_sessionId, env, OpenUtteranceId));
+    }
+
+    /// <summary>Open voice utterance (set by the mic uplink, cleared on end).</summary>
+    public string OpenUtteranceId;
+
+    public void EnqueueAudioChunk(string utteranceId, string dataB64)
+    {
+        if (string.IsNullOrEmpty(utteranceId) || string.IsNullOrEmpty(dataB64))
+            return;
+        _outbox.Enqueue(PriorityAudioChunk,
+            ProtocolJson.BuildAudioChunk(_sessionId, utteranceId, dataB64));
+    }
+
+    public void EnqueueUtteranceEnd(string utteranceId)
+    {
+        if (string.IsNullOrEmpty(utteranceId))
+            return;
+        if (OpenUtteranceId == utteranceId)
+            OpenUtteranceId = null;
+        _outbox.Enqueue(PriorityUtteranceEnd,
+            ProtocolJson.BuildUtteranceEnd(_sessionId, utteranceId));
     }
 
     /// <summary>
