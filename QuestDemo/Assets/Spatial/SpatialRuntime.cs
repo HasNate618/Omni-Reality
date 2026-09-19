@@ -23,8 +23,10 @@ using UnityEngine.Rendering;
 /// only emitted when the SDK supplies one (non-zero); otherwise the hint is
 /// null while the internal entry preserves the hit point. Every valid capture
 /// — hit, too-close, or miss — is cached for 10 s with identity crop.
-/// No networking, no placement: one ENVELOPE log line per trigger press plus a
-/// thin visible aim line for the slice 1 headset check.
+/// Task 7 links a CoordinatorClient to the laptop coordinator when PlayerPrefs
+/// laptop_ipv4 is set (hello, ping, scene_op mark, ACK after PCA starts);
+/// otherwise slice-1 local behavior only: one ENVELOPE log line per trigger
+/// press plus a thin visible aim line for the headset check.
 /// </summary>
 public class SpatialRuntime : MonoBehaviour
 {
@@ -50,6 +52,8 @@ public class SpatialRuntime : MonoBehaviour
     Material _aimMaterial;
     readonly CaptureGeometryCache _cache = new CaptureGeometryCache();
     int _stageEpoch = 1;
+    CoordinatorClient _coord;
+    string _laptopIpv4 = "";
     DrawingStore _store;
     HonestyChip _chip;
 
@@ -68,6 +72,7 @@ public class SpatialRuntime : MonoBehaviour
         if (rightGO != null)
             _rightAim = rightGO.transform;
         SetupAimLine();
+        _laptopIpv4 = PlayerPrefs.GetString(CoordinatorClient.LaptopIpv4PrefKey, "");
     }
 
     void OnEnable()
@@ -87,6 +92,7 @@ public class SpatialRuntime : MonoBehaviour
 
     void Update()
     {
+        TickCoordinator();
         if (_pca == null || !_pca.IsPlaying)
             return;
         UpdateAimLine();
@@ -99,6 +105,10 @@ public class SpatialRuntime : MonoBehaviour
             {
                 Debug.Log("ENVELOPE " + env.ToSpecJson());
                 ResolveAndPlace(env);
+                // Task 7: share the envelope so the laptop can target its
+                // frame_id with a resolvable scene_op mark (dropped offline).
+                if (_coord != null)
+                    _coord.EnqueueFrame(env);
             }
             else
                 Debug.Log("SpatialRuntime: capture skipped (camera or raycast unavailable)");
@@ -125,6 +135,34 @@ public class SpatialRuntime : MonoBehaviour
         catch (Exception)
         {
         }
+    }
+
+    /// <summary>
+    /// Task 7 coordinator supervision: slice-1 only while PlayerPrefs
+    /// laptop_ipv4 is empty (no connect); otherwise create the client once
+    /// and tick it after PCA starts playing.
+    /// </summary>
+    void TickCoordinator()
+    {
+        if (string.IsNullOrEmpty(_laptopIpv4))
+            return;
+        if (_pca == null || !_pca.IsPlaying)
+            return;
+        if (_coord == null)
+        {
+            EnsurePlacementRefs();
+            var go = new GameObject("CoordinatorClient");
+            _coord = go.AddComponent<CoordinatorClient>();
+            _coord.Cache = _cache;
+            _coord.Store = _store;
+            _coord.Chip = _chip;
+            _coord.CenterEye = _centerEye;
+            _coord.GetStageEpoch = () => _stageEpoch;
+            _coord.DelayedHit = DelayedHitPoint;
+            _coord.NewDrawingId = () => NewFrameId();
+            _coord.Begin(_laptopIpv4);
+        }
+        _coord.Tick();
     }
 
     /// <summary>

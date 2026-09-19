@@ -172,6 +172,48 @@ async def _handle_frame(ws: Any, state: CoordinatorState, message: dict) -> None
         )
 
 
+async def _handle_ack(ws: Any, state: CoordinatorState, message: dict) -> None:
+    """Record a Quest placement ack (Task 7); settled ops never retry."""
+    payload = message["payload"]
+    if not isinstance(payload, dict):
+        logger.info("ignoring ack with non-object payload")
+        return
+    try:
+        validate_instance("placement_ack", payload)
+    except ValidationError as exc:
+        logger.info("ignoring schema-invalid ack: %s", exc.message)
+        return
+    op_id = payload["op_id"]
+    if state.is_op_settled(op_id):
+        logger.debug("ignoring duplicate ack for settled op: %s", op_id)
+        return
+    if op_id not in state.pending_ops:
+        logger.info("ignoring ack for unknown op: %s", op_id)
+        return
+    state.complete_op(op_id, payload)
+    logger.info("ack op=%s status=%s", op_id, payload["status"])
+
+
+async def _handle_cancel(ws: Any, state: CoordinatorState, message: dict) -> None:
+    """Record a Quest cancel for a pending op (Task 7 priority path)."""
+    payload = message["payload"]
+    if not isinstance(payload, dict):
+        logger.info("ignoring cancel with non-object payload")
+        return
+    op_id = payload.get("op_id")
+    if not isinstance(op_id, str):
+        logger.info("ignoring cancel without op_id")
+        return
+    if state.is_op_settled(op_id):
+        logger.debug("ignoring duplicate cancel for settled op: %s", op_id)
+        return
+    if op_id not in state.pending_ops:
+        logger.info("ignoring cancel for unknown op: %s", op_id)
+        return
+    state.cancel_op(op_id)
+    logger.info("cancel op=%s", op_id)
+
+
 async def handle_text(ws: Any, state: CoordinatorState, raw: object) -> None:
     """Parse, validate, and dispatch one inbound frame; never raises."""
     if isinstance(raw, (bytes, bytearray)):
@@ -205,6 +247,10 @@ async def handle_text(ws: Any, state: CoordinatorState, raw: object) -> None:
         await _handle_ping(ws, state, message)
     elif msg_type == "frame":
         await _handle_frame(ws, state, message)
+    elif msg_type == "ack":
+        await _handle_ack(ws, state, message)
+    elif msg_type == "cancel":
+        await _handle_cancel(ws, state, message)
     else:
         logger.debug("ignoring unhandled message type: %s", msg_type)
 
