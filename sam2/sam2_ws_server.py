@@ -1,4 +1,11 @@
 import asyncio
+import contextlib
+import os
+
+# Let ops without an Apple-GPU (MPS) kernel fall back to CPU. Must be set
+# before torch is imported; has no effect on CUDA machines.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
 import websockets
 import json
 import base64
@@ -46,7 +53,7 @@ def append_frame(inference_state, frame_bgr, image_size=1024, device="cuda"):
     img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     img_resized = cv2.resize(img_rgb, (image_size, image_size))
     
-    # Use the global dtype (bfloat16/float16) to halve memory usage
+    # Global dtype: bfloat16/float16 on CUDA to halve memory, float32 elsewhere
     global dtype
     img_tensor = torch.from_numpy(img_resized).permute(2, 0, 1).to(device, dtype=dtype)
     img_tensor /= 255.0
@@ -109,8 +116,33 @@ def run_streaming_inference(predictor, inference_state, frame_idx):
 
 # --- GLOBAL MODEL LOAD ---
 print("Loading SAM 2 model globally on server startup...")
-device = "cuda" if torch.cuda.is_available() else "cpu"
-dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+# CUDA (RTX 4060): half precision under autocast, unchanged from the original.
+# Apple Silicon (MPS) and CPU: float32 with no autocast, since CUDA autocast
+# is a no-op there and half-precision inputs would mismatch float32 weights.
+if torch.cuda.is_available():
+    device = "cuda"
+    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+elif torch.backends.mps.is_available():
+    device = "mps"
+    dtype = torch.float32
+else:
+    device = "cpu"
+    dtype = torch.float32
+print(f"Using device={device} dtype={dtype}")
+
+
+def compute_context():
+    if device == "cuda":
+        return torch.autocast("cuda", dtype=dtype)
+    return contextlib.nullcontext()
+
+
+def free_device_memory():
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    elif device == "mps":
+        torch.mps.empty_cache()
+
 
 predictor = SAM2VideoPredictor.from_pretrained("facebook/sam2-hiera-tiny", device=device)
 try:
@@ -139,7 +171,7 @@ async def handler(websocket):
                 if inference_state is None:
                     inference_state = init_streaming_state(predictor, h, w)
                     
-                with torch.inference_mode(), torch.autocast("cuda", dtype=dtype):
+                with torch.inference_mode(), compute_context():
                     frame_idx = append_frame(inference_state, frame, image_size, device)
                     
                     clicks = data.get("clicks", [])
@@ -189,7 +221,7 @@ async def handler(websocket):
         if inference_state is not None:
             print("Cleaning up GPU memory for disconnected client...")
             del inference_state
-            torch.cuda.empty_cache()
+            free_device_memory()
 
 async def main():
     print("Starting SAM 2 WebSocket Server on ws://0.0.0.0:8765")

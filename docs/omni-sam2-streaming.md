@@ -13,6 +13,22 @@ A decoupled client-server architecture for real-time SAM 2 tracking.
 - **Memory Safety**: The server operates on a rolling window. It automatically nullifies raw image tensors older than 5 frames in its streaming state to prevent CUDA Out of Memory exceptions. The client strictly caps network updates to ~10 FPS to prevent buffer bloat.
 - **Multi-Threading**: The client uses a 3-thread design. The main UI thread renders the screen, a dedicated hardware thread captures the camera (to avoid blocking on native hardware limits), and a background network thread handles WebSocket communication.
 
+## Setup
+One venv inside `sam2/` (gitignored). The server downloads `facebook/sam2-hiera-tiny` from Hugging Face on first start; no manual checkpoint.
+
+- **Mac (Apple Silicon):**
+  `cd sam2 && python3.12 -m venv .venv && . .venv/bin/activate && pip install torch torchvision && SAM2_BUILD_CUDA=0 pip install -e . && pip install -r requirements-ws.txt huggingface_hub`
+- **Windows + RTX 4060:**
+  `cd sam2 && python -m venv .venv && .venv\Scripts\activate && pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 && pip install -e . && pip install -r requirements-ws.txt huggingface_hub`
+
+## Devices
+The server picks the device at startup and prints it (`Using device=...`):
+- **CUDA:** bfloat16/float16 under autocast (original behaviour).
+- **Apple Silicon (MPS):** float32, no autocast, `PYTORCH_ENABLE_MPS_FALLBACK=1` for ops without MPS kernels. Measured on an M4 Max with the tiny model: first frame after connect ~4 s (warm-up), then ~150-290 ms per tracked frame (~3.5-6 FPS), flat over 40 frames.
+- **CPU:** float32; works but slow.
+
+Port: the server binds `ws://0.0.0.0:8765`, the same port as the voice coordinator (`provider/coordinator`). Run one at a time. The client connects to `ws://localhost:8765`, so run it on the same machine as the server.
+
 ## How to Verify
 1. Ensure the SAM 2 environment is active (`.venv`) and the `requirements-ws.txt` dependencies are installed.
 2. Run the server: `cd sam2 && python sam2_ws_server.py`. Wait for the "model globally loaded" message.
