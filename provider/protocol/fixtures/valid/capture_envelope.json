@@ -1,0 +1,33 @@
+{
+  "frame_id": "01k5j8g0008q3m7b2d6h9n4r5v",
+  "stage_epoch": 1,
+  "t_unix_ns": 0,
+  "camera": "left",
+  "image_w": 1280,
+  "image_h": 960,
+  "sent_w": 1280,
+  "sent_h": 960,
+  "intrinsics": { "fx": 0, "fy": 0, "cx": 0, "cy": 0 },
+  "distortion": { "model": "none", "k": [] },
+  "pose": {
+    "px": 0, "py": 0, "pz": 0,
+    "qx": 0, "qy": 0, "qz": 0, "qw": 1,
+    "frame": "openxr_floor_stage"
+  },
+  "crop": { "sx": 1, "sy": 1, "tx": 0, "ty": 0 },
+  "pointing": {
+    "source": "head",
+    "t_unix_ns": 0,
+    "origin": { "px": 0, "py": 0, "pz": 0 },
+    "direction": { "x": 0, "y": 0, "z": 1 },
+    "frame": "openxr_floor_stage"
+  },
+  "world_hint": {
+    "px": 0, "py": 0, "pz": 0,
+    "nx": 0, "ny": 1, "nz": 0,
+    "frame": "openxr_floor_stage",
+    "source": "pointing",
+    "t_unix_ns": 0
+  },
+  "capture_geometry_available": true
+}

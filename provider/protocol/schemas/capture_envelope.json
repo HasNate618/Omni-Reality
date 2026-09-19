@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "frame_id", "stage_epoch", "t_unix_ns", "camera", "image_w", "image_h",
+    "sent_w", "sent_h", "intrinsics", "distortion", "pose", "crop",
+    "pointing", "world_hint", "capture_geometry_available"
+  ],
+  "properties": {
+    "frame_id": { "type": "string", "pattern": "^[0-7][0-9a-hjkmnp-tv-z]{25}$", "minLength": 26, "maxLength": 26 },
+    "stage_epoch": { "type": "integer", "minimum": 0 },
+    "t_unix_ns": { "type": "integer", "minimum": 0 },
+    "camera": { "const": "left" },
+    "image_w": { "type": "integer", "minimum": 1 },
+    "image_h": { "type": "integer", "minimum": 1 },
+    "sent_w": { "type": "integer", "minimum": 1 },
+    "sent_h": { "type": "integer", "minimum": 1 },
+    "intrinsics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fx", "fy", "cx", "cy"],
+      "properties": {
+        "fx": { "type": "number" }, "fy": { "type": "number" },
+        "cx": { "type": "number" }, "cy": { "type": "number" }
+      }
+    },
+    "distortion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "k"],
+      "properties": {
+        "model": { "type": "string" },
+        "k": { "type": "array", "items": { "type": "number" } }
+      }
+    },
+    "pose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["px", "py", "pz", "qx", "qy", "qz", "qw", "frame"],
+      "properties": {
+        "px": { "type": "number" }, "py": { "type": "number" }, "pz": { "type": "number" },
+        "qx": { "type": "number" }, "qy": { "type": "number" }, "qz": { "type": "number" }, "qw": { "type": "number" },
+        "frame": { "const": "openxr_floor_stage" },
+        "t_unix_ns": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "crop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sx", "sy", "tx", "ty"],
+      "properties": {
+        "sx": { "type": "number" }, "sy": { "type": "number" },
+        "tx": { "type": "number" }, "ty": { "type": "number" }
+      }
+    },
+    "pointing": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["source", "t_unix_ns", "origin", "direction", "frame"],
+      "properties": {
+        "source": { "enum": ["head", "controller", "hand"] },
+        "t_unix_ns": { "type": "integer", "minimum": 0 },
+        "origin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["px", "py", "pz"],
+          "properties": {
+            "px": { "type": "number" }, "py": { "type": "number" }, "pz": { "type": "number" }
+          }
+        },
+        "direction": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["x", "y", "z"],
+          "properties": {
+            "x": { "type": "number" }, "y": { "type": "number" }, "z": { "type": "number" }
+          }
+        },
+        "frame": { "const": "openxr_floor_stage" }
+      }
+    },
+    "world_hint": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["px", "py", "pz", "nx", "ny", "nz", "frame", "source", "t_unix_ns"],
+      "properties": {
+        "px": { "type": "number" }, "py": { "type": "number" }, "pz": { "type": "number" },
+        "nx": { "type": "number" }, "ny": { "type": "number" }, "nz": { "type": "number" },
+        "frame": { "const": "openxr_floor_stage" },
+        "source": { "enum": ["pointing", "centre"] },
+        "t_unix_ns": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "capture_geometry_available": { "type": "boolean" }
+  }
+}

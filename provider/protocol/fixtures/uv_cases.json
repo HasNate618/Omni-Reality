@@ -1,0 +1,26 @@
+[
+  {
+    "u": 0.0,
+    "v": 0.0,
+    "sent_w": 1280,
+    "sent_h": 960,
+    "pca_viewport": [0.0, 1.0],
+    "pixel_center": [-0.5, -0.5]
+  },
+  {
+    "u": 1.0,
+    "v": 1.0,
+    "sent_w": 1280,
+    "sent_h": 960,
+    "pca_viewport": [1.0, 0.0],
+    "pixel_center": [1279.5, 959.5]
+  },
+  {
+    "u": 0.5,
+    "v": 0.25,
+    "sent_w": 1280,
+    "sent_h": 960,
+    "pca_viewport": [0.5, 0.75],
+    "pixel_center": [639.5, 239.5]
+  }
+]

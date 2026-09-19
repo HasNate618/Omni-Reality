@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "type": "hello",
+  "session_id": null,
+  "turn_id": 0,
+  "utterance_id": null,
+  "payload": {
+    "device": "quest3s",
+    "app": "QuestDemo",
+    "os_version": "74",
+    "capabilities": { "pca": true, "depth": true, "tts": true }
+  }
+}

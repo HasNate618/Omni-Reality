@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind"],
+  "properties": {
+    "kind": { "enum": ["mark", "label", "connect", "ghost", "place_known", "place_generated", "remove", "undo"] },
+    "drawing_id": { "anyOf": [{ "$ref": "#/$defs/ulid" }, { "type": "null" }] },
+    "target": { "$ref": "#/$defs/target" },
+    "from": { "$ref": "#/$defs/target" },
+    "to": { "$ref": "#/$defs/target" },
+    "style": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "color": { "type": "string" },
+        "label": { "type": ["string", "null"] }
+      }
+    },
+    "motion": { "anyOf": [{ "$ref": "#/$defs/motion" }, { "type": "null" }] },
+    "shape": { "enum": ["ring", "dot"] },
+    "text": { "type": "string", "maxLength": 48 },
+    "asset_id": { "type": "string" },
+    "scale": { "type": "number", "minimum": 0.1, "maximum": 2 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "enum": ["mark", "label", "ghost", "place_known", "place_generated", "remove"] } }, "required": ["kind"] },
+      "then": { "required": ["target"] }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "label" } }, "required": ["kind"] },
+      "then": { "required": ["text"] }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "connect" } }, "required": ["kind"] },
+      "then": { "required": ["from", "to"] }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "ghost" } }, "required": ["kind"] },
+      "then": {
+        "required": ["motion"],
+        "properties": { "motion": { "type": "object", "properties": { "kind": { "enum": ["rotate", "slide"] } }, "required": ["kind"] } }
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "place_known" } }, "required": ["kind"] },
+      "then": { "required": ["asset_id", "scale"] }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "remove" } }, "required": ["kind"] },
+      "then": { "properties": { "target": { "properties": { "type": { "const": "drawing" } } } } }
+    }
+  ],
+  "$defs": {
+    "ulid": { "type": "string", "pattern": "^[0-7][0-9a-hjkmnp-tv-z]{25}$", "minLength": 26, "maxLength": 26 },
+    "unit_pixel": { "type": "number", "minimum": 0, "maximum": 1 },
+    "target": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "frame_id"],
+          "properties": {
+            "type": { "enum": ["capture_hint", "pointing"] },
+            "frame_id": { "$ref": "#/$defs/ulid" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "frame_id", "u", "v"],
+          "properties": {
+            "type": { "const": "image_point" },
+            "frame_id": { "$ref": "#/$defs/ulid" },
+            "u": { "$ref": "#/$defs/unit_pixel" }, "v": { "$ref": "#/$defs/unit_pixel" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "frame_id", "u0", "v0", "u1", "v1"],
+          "properties": {
+            "type": { "const": "image_box" },
+            "frame_id": { "$ref": "#/$defs/ulid" },
+            "u0": { "$ref": "#/$defs/unit_pixel" }, "v0": { "$ref": "#/$defs/unit_pixel" },
+            "u1": { "$ref": "#/$defs/unit_pixel" }, "v1": { "$ref": "#/$defs/unit_pixel" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "drawing_id"],
+          "properties": {
+            "type": { "const": "drawing" },
+            "drawing_id": { "$ref": "#/$defs/ulid" }
+          }
+        }
+      ]
+    },
+    "motion": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "period_s"],
+          "properties": {
+            "kind": { "const": "pulse" },
+            "period_s": { "type": "number", "minimum": 0.6, "maximum": 3 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "period_s"],
+          "properties": {
+            "kind": { "const": "travel" },
+            "period_s": { "type": "number", "minimum": 1, "maximum": 4 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "angle_deg", "period_s"],
+          "properties": {
+            "kind": { "const": "rotate" },
+            "axis": { "enum": ["x", "y", "z"] },
+            "angle_deg": { "type": "number", "minimum": 15, "maximum": 180 },
+            "period_s": { "type": "number", "minimum": 1, "maximum": 4 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "axis", "distance_m", "period_s"],
+          "properties": {
+            "kind": { "const": "slide" },
+            "axis": { "enum": ["x", "z"] },
+            "distance_m": { "type": "number", "minimum": 0.03, "maximum": 0.4 },
+            "period_s": { "type": "number", "minimum": 1, "maximum": 4 }
+          }
+        }
+      ]
+    }
+  }
+}

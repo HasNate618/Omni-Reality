@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["op_id", "turn_id", "stage_epoch", "status"],
+  "properties": {
+    "op_id": { "$ref": "#/$defs/ulid" },
+    "turn_id": { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 },
+    "stage_epoch": { "type": "integer", "minimum": 0 },
+    "status": { "enum": ["placed", "applied", "rejected", "stale"] },
+    "drawing_id": { "anyOf": [{ "$ref": "#/$defs/ulid" }, { "type": "null" }] },
+    "reason": { "type": ["string", "null"] },
+    "pin": { "enum": ["surface", null] }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "placed" } }, "required": ["status"] },
+      "then": {
+        "required": ["drawing_id", "pin"],
+        "properties": {
+          "drawing_id": { "type": "string" },
+          "pin": { "const": "surface" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "enum": ["rejected", "stale"] } }, "required": ["status"] },
+      "then": {
+        "required": ["drawing_id", "reason"],
+        "properties": {
+          "drawing_id": { "type": "null" },
+          "reason": { "enum": ["out_of_camera", "too_small", "too_close", "no_surface", "clutter", "invalid", "superseded", "timeout"] }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "ulid": { "type": "string", "pattern": "^[0-7][0-9a-hjkmnp-tv-z]{25}$", "minLength": 26, "maxLength": 26 }
+  }
+}
