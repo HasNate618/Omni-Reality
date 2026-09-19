@@ -21,7 +21,9 @@ selection, any change to slices 0–5, any edit to the binding product spec.
 
 ## 2. Architecture
 
-One `sam2/` package on branch `feat/sam2-streaming`. Upstream SAM2 stays an
+One `sam2ws/` package on branch `feat/sam2-streaming`. (Named `sam2ws`, not
+`sam2`: the upstream pip install owns the top-level `sam2` module and a local
+`sam2/` directory would shadow it.) Upstream SAM2 stays an
 installed dependency, never vendored. The naked gitlink is removed; if a
 submodule is wanted later it must ship a real `.gitmodules`.
 

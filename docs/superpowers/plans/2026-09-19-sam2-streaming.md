@@ -24,13 +24,13 @@
 ### Task 1: Locked environment + upstream install + state-shape spike
 
 **Files:**
-- Create: `sam2/requirements-lock.txt`
-- Create: `sam2/tests/test_state_shape.py`
-- Create: `sam2/checkpoints/` (gitignored; add `sam2/checkpoints/.gitignore` with `*\n!.gitignore`)
+- Create: `sam2ws/requirements-lock.txt`
+- Create: `sam2ws/tests/test_state_shape.py`
+- Create: `sam2ws/checkpoints/` (gitignored; add `sam2ws/checkpoints/.gitignore` with `*\n!.gitignore`)
 
 **Interfaces:**
 - Consumes: nothing (first task).
-- Produces: installed `sam2` package importable as `from sam2.build_sam import build_sam2_video_predictor`; checkpoint file path convention `sam2/checkpoints/sam2.1_hiera_tiny.pt`.
+- Produces: installed `sam2` package importable as `from sam2.build_sam import build_sam2_video_predictor`; checkpoint file path convention `sam2ws/checkpoints/sam2.1_hiera_tiny.pt`.
 
 - [ ] **Step 1: Write the lock file**
 
@@ -50,16 +50,22 @@ Install upstream at the pinned commit inside the repo venv (no worktree pollutio
 
 ```bash
 pip install /tmp/sam2-upstream
+pip install -r sam2ws/requirements-lock.txt
 ```
 
-If the CUDA extension build fails, retry once with a matching toolchain; if it still fails, set `SAM2_BUILD_ALLOW_ERRORS=0` is NOT the fallback — the fallback is extension-disabled install (default `SAM2_BUILD_ALLOW_ERRORS=1`) with degraded small-hole post-processing recorded in the Task 7 results doc. Record which path was taken in `sam2/INSTALL_NOTES.md` (one paragraph: extension built yes/no, torch version, CUDA version).
+Our package MUST be named `sam2ws`, never `sam2` — the upstream install owns
+the top-level `sam2` module and a local `sam2/` directory would shadow it and
+break upstream's own internal imports. Every new package directory ships an
+empty `__init__.py` (`sam2ws/__init__.py`, `sam2ws/tests/__init__.py`).
+
+If the CUDA extension build fails, retry once with a matching toolchain; if it still fails, set `SAM2_BUILD_ALLOW_ERRORS=0` is NOT the fallback — the fallback is extension-disabled install (default `SAM2_BUILD_ALLOW_ERRORS=1`) with degraded small-hole post-processing recorded in the Task 7 results doc. Record which path was taken in `sam2ws/INSTALL_NOTES.md` (one paragraph: extension built yes/no, torch version, CUDA version).
 
 - [ ] **Step 2: Download the tiny checkpoint and record its hash**
 
 ```bash
-mkdir -p sam2/checkpoints
-curl -L https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt -o sam2/checkpoints/sam2.1_hiera_tiny.pt
-sha256sum sam2/checkpoints/sam2.1_hiera_tiny.pt | tee sam2/checkpoints/SHA256SUMS
+mkdir -p sam2ws/checkpoints
+curl -L https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt -o sam2ws/checkpoints/sam2.1_hiera_tiny.pt
+sha256sum sam2ws/checkpoints/sam2.1_hiera_tiny.pt | tee sam2ws/checkpoints/SHA256SUMS
 ```
 
 - [ ] **Step 3: Write the failing spike test**
@@ -73,20 +79,20 @@ class StateShapeTest(unittest.TestCase):
         from sam2.build_sam import build_sam2_video_predictor
         predictor = build_sam2_video_predictor(
             "configs/sam2.1/sam2.1_hiera_t.yaml",
-            "sam2/checkpoints/sam2.1_hiera_tiny.pt",
+            "sam2ws/checkpoints/sam2.1_hiera_tiny.pt",
             device="cuda",
         )
-        state = predictor.init_state(video_path="sam2/tests/data/two_frames")
+        state = predictor.init_state(video_path="sam2ws/tests/data/two_frames")
         self.assertIn("images", state)
         self.assertIn("num_frames", state)
         self.assertEqual(state["num_frames"], 2)
 ```
 
-Test fixture: `sam2/tests/data/two_frames/` containing two JPEGs (`000000.jpg`, `000001.jpg`, any 640x480 content — copy from `/home/nate/Downloads/drone.png` converted, or solid colors).
+Test fixture: `sam2ws/tests/data/two_frames/` containing two JPEGs (`000000.jpg`, `000001.jpg`, any 640x480 content — copy from `/home/nate/Downloads/drone.png` converted, or solid colors).
 
 - [ ] **Step 4: Run test to verify it fails**
 
-Run: `cd sam2 && python -m unittest discover -s tests -v`
+Run: `cd sam2ws && python -m unittest discover -s tests -v`
 Expected: FAIL (config path resolution — `build_sam2_video_predictor` resolves `configs/...` relative to the installed package; fix by passing the absolute config path from the installed package location, found via `python -c "import sam2, os; print(os.path.dirname(sam2.__file__))"`).
 
 - [ ] **Step 5: Fix config path and verify PASS**
@@ -96,7 +102,7 @@ Expected: PASS, and the test output (or a debug print kept in the spike) records
 - [ ] **Step 6: Commit**
 
 ```bash
-git add sam2/requirements-lock.txt sam2/tests/test_state_shape.py sam2/tests/data/two_frames sam2/checkpoints/.gitignore sam2/INSTALL_NOTES.md
+git add sam2ws/requirements-lock.txt sam2ws/tests/test_state_shape.py sam2ws/tests/data/two_frames sam2ws/checkpoints/.gitignore sam2ws/INSTALL_NOTES.md
 git commit -m "feat(sam2): locked env, tiny checkpoint, state-shape spike"
 ```
 
@@ -107,8 +113,8 @@ Do NOT commit the `.pt` file (gitignored).
 ### Task 2: Versioned wire protocol
 
 **Files:**
-- Create: `sam2/protocol.py`
-- Test: `sam2/tests/test_protocol.py`
+- Create: `sam2ws/protocol.py`
+- Test: `sam2ws/tests/test_protocol.py`
 
 **Interfaces:**
 - Consumes: nothing.
@@ -122,7 +128,7 @@ import unittest
 
 class ProtocolTest(unittest.TestCase):
     def test_round_trip_and_reject_oversize(self):
-        from sam2 import protocol
+        from sam2ws import protocol
         req = protocol.build_request(
             session_id="01k0000000000000000000000",
             frame_id=7,
@@ -143,8 +149,8 @@ class ProtocolTest(unittest.TestCase):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd sam2 && python -m unittest tests.test_protocol -v`
-Expected: FAIL with "No module named 'sam2.protocol'" (run from repo root with `sam2` importable, or add `sam2/` to path — match however the venv resolves it and keep that for all later tasks).
+Run: `cd sam2ws && python -m unittest tests.test_protocol -v`
+Expected: FAIL with "No module named 'sam2ws.protocol'" (run from repo root with `sam2ws` importable, or add `sam2ws/` to path — match however the venv resolves it and keep that for all later tasks).
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -261,13 +267,13 @@ def build_error(frame_id, code, detail=""):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd sam2 && python -m unittest tests.test_protocol -v`
+Run: `cd sam2ws && python -m unittest tests.test_protocol -v`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add sam2/protocol.py sam2/tests/test_protocol.py
+git add sam2ws/protocol.py sam2ws/tests/test_protocol.py
 git commit -m "feat(sam2): versioned wire protocol with validation"
 ```
 
@@ -276,8 +282,8 @@ git commit -m "feat(sam2): versioned wire protocol with validation"
 ### Task 3: Online session adapter (windowed video state)
 
 **Files:**
-- Create: `sam2/session.py`
-- Test: `sam2/tests/test_session.py`
+- Create: `sam2ws/session.py`
+- Test: `sam2ws/tests/test_session.py`
 
 **Interfaces:**
 - Consumes: `sam2.build_sam.build_sam2_video_predictor`-compatible predictor object; `protocol.ProtocolError`.
@@ -318,7 +324,7 @@ class FakePredictor:
 class SessionTest(unittest.TestCase):
     def test_slide_reinits_and_remaps_clicks(self):
         import tempfile
-        from sam2.session import TrackingSession
+        from sam2ws.session import TrackingSession
         with tempfile.TemporaryDirectory() as d:
             s = TrackingSession(FakePredictor(), d, window=4, memory=7)
             for _ in range(4):
@@ -335,7 +341,7 @@ class SessionTest(unittest.TestCase):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd sam2 && python -m unittest tests.test_session -v`
+Run: `cd sam2ws && python -m unittest tests.test_session -v`
 Expected: FAIL with "No module named 'sam2.session'".
 
 - [ ] **Step 3: Write minimal implementation**
@@ -343,7 +349,7 @@ Expected: FAIL with "No module named 'sam2.session'".
 ```python
 import os
 
-from sam2 import protocol
+from sam2ws import protocol
 
 
 class TrackingSession:
@@ -443,13 +449,13 @@ Notes the implementer must honor: `init_state` reads the whole `work_dir`, so th
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd sam2 && python -m unittest tests.test_session -v`
+Run: `cd sam2ws && python -m unittest tests.test_session -v`
 Expected: PASS (fake propagate yields no masks; that is fine — mask extraction is covered in Task 5 against the real model).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add sam2/session.py sam2/tests/test_session.py
+git add sam2ws/session.py sam2ws/tests/test_session.py
 git commit -m "feat(sam2): windowed online tracking session"
 ```
 
@@ -458,8 +464,8 @@ git commit -m "feat(sam2): windowed online tracking session"
 ### Task 4: WebSocket server, single session, bounded queues
 
 **Files:**
-- Create: `sam2/server.py`
-- Test: `sam2/tests/test_server.py`
+- Create: `sam2ws/server.py`
+- Test: `sam2ws/tests/test_server.py`
 
 **Interfaces:**
 - Consumes: `TrackingSession` (Task 3), `protocol` (Task 2).
@@ -493,7 +499,7 @@ class FakeSession:
 
 class ServerTest(unittest.TestCase):
     def test_frame_round_trip_and_oversize_rejected(self):
-        from sam2 import protocol, server
+        from sam2ws import protocol, server
         import websockets
         req = protocol.build_request("s", 0, 0, 8, 8, b"\xff\xd8" + b"0" * 10,
                                      [], {"obj_ids": [], "all": False})
@@ -516,7 +522,7 @@ class ServerTest(unittest.TestCase):
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd sam2 && python -m unittest tests.test_server -v`
+Run: `cd sam2ws && python -m unittest tests.test_server -v`
 Expected: FAIL with "No module named 'sam2.server'".
 
 - [ ] **Step 3: Write minimal implementation**
@@ -525,13 +531,13 @@ Server loop requirements (no placeholders — implement all of these): `asyncio`
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd sam2 && python -m unittest tests.test_server -v`
+Run: `cd sam2ws && python -m unittest tests.test_server -v`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add sam2/server.py sam2/tests/test_server.py
+git add sam2ws/server.py sam2ws/tests/test_server.py
 git commit -m "feat(sam2): loopback websocket server, single session"
 ```
 
@@ -540,8 +546,8 @@ git commit -m "feat(sam2): loopback websocket server, single session"
 ### Task 5: Headless harness client + real-model integration test
 
 **Files:**
-- Create: `sam2/harness_client.py`
-- Test: `sam2/tests/test_harness.py` (GPU integration, skipped without CUDA + checkpoint)
+- Create: `sam2ws/harness_client.py`
+- Test: `sam2ws/tests/test_harness.py` (GPU integration, skipped without CUDA + checkpoint)
 
 **Interfaces:**
 - Consumes: running `server.py` on loopback; `protocol`.
@@ -561,18 +567,18 @@ class HarnessGpuTest(unittest.TestCase):
         import threading
         import numpy as np
         from PIL import Image
-        from sam2 import server, session
+        from sam2ws import server, session
         from sam2.build_sam import build_sam2_video_predictor  # noqa
 ```
 
 (The test boots the real tiny predictor on CUDA, a real `TrackingSession` in a temp dir, the test server, sends 3 drone-derived frames with one foreground click at the image center, and asserts the returned mask for `frame_id=2` is non-empty and its dimensions match the source aspect. The implementer writes the full body; the assertion bar is `mask.sum() > 0` and `mask.shape == source.shape[:2]` after rescaling.)
 
-Harness frames fixture: `sam2/tests/data/harness_frames/` — 5 JPEGs converted from `/home/nate/Downloads/drone.png` at 640x360.
+Harness frames fixture: `sam2ws/tests/data/harness_frames/` — 5 JPEGs converted from `/home/nate/Downloads/drone.png` at 640x360.
 
 - [ ] **Step 2: Run test to verify it is skipped, then fails without the module**
 
-Run: `cd sam2 && python -m unittest tests.test_harness -v`
-Expected: SKIP (no env var). Then: `ls sam2/harness_client.py` missing — write the test file first, watch it fail on import, then implement.
+Run: `cd sam2ws && python -m unittest tests.test_harness -v`
+Expected: SKIP (no env var). Then: `ls sam2ws/harness_client.py` missing — write the test file first, watch it fail on import, then implement.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -580,13 +586,13 @@ Expected: SKIP (no env var). Then: `ls sam2/harness_client.py` missing — write
 
 - [ ] **Step 4: Run GPU test to verify it passes**
 
-Run: `cd sam2 && SAM2_GPU_TEST=1 python -m unittest tests.test_harness -v`
+Run: `cd sam2ws && SAM2_GPU_TEST=1 python -m unittest tests.test_harness -v`
 Expected: PASS with a non-empty mask. (Requires free GPU: stop `llama-server` first — `nvidia-smi` must show >7GB free. This ordering constraint is part of the step.)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add sam2/harness_client.py sam2/tests/test_harness.py sam2/tests/data/harness_frames sam2/server.py sam2/tests/test_server.py
+git add sam2ws/harness_client.py sam2ws/tests/test_harness.py sam2ws/tests/data/harness_frames sam2ws/server.py sam2ws/tests/test_server.py
 git commit -m "feat(sam2): headless harness + tiny GPU round-trip"
 ```
 
@@ -595,7 +601,7 @@ git commit -m "feat(sam2): headless harness + tiny GPU round-trip"
 ### Task 6: Minimal webcam viewer (manual only)
 
 **Files:**
-- Create: `sam2/viewer_client.py`
+- Create: `sam2ws/viewer_client.py`
 
 **Interfaces:**
 - Consumes: running `server.py`; `protocol`.
@@ -609,12 +615,12 @@ Key behaviors (implement all): capture thread pushes newest frame to a size-1 sl
 
 - [ ] **Step 2: Manual verify against the Task 5 server**
 
-Run: server in one terminal, viewer in another, 60-second hand-track. Record result (pass/fail + observed FPS) in `sam2/VIEWER_NOTES.md`.
+Run: server in one terminal, viewer in another, 60-second hand-track. Record result (pass/fail + observed FPS) in `sam2ws/VIEWER_NOTES.md`.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add sam2/viewer_client.py sam2/VIEWER_NOTES.md
+git add sam2ws/viewer_client.py sam2ws/VIEWER_NOTES.md
 git commit -m "feat(sam2): minimal webcam viewer"
 ```
 
@@ -623,7 +629,7 @@ git commit -m "feat(sam2): minimal webcam viewer"
 ### Task 7: Perf gate runs + results doc (the actual decision)
 
 **Files:**
-- Create: `sam2/PERF.md` (all numbers, all conditions)
+- Create: `sam2ws/PERF.md` (all numbers, all conditions)
 - Modify: `docs/omni-sam2-streaming.md` (rewrite to match the implementation: real paths, real protocol, real pins)
 
 **Interfaces:**
@@ -641,12 +647,12 @@ Measurement order (each a run of `harness_client.py --out`, GPU freed of `llama-
 
 - [ ] **Step 2: Run measurement 4 or record why it was skipped** (headroom bar not met → skip + state that sequential handoff is the product path per binding spec §11).
 
-- [ ] **Step 3: Rewrite `docs/omni-sam2-streaming.md`** to describe what actually exists (paths, protocol v1 summary, pins, how to verify headlessly). Keep it 30 lines max; detail lives in `sam2/PERF.md` and this plan's spec.
+- [ ] **Step 3: Rewrite `docs/omni-sam2-streaming.md`** to describe what actually exists (paths, protocol v1 summary, pins, how to verify headlessly). Keep it 30 lines max; detail lives in `sam2ws/PERF.md` and this plan's spec.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add sam2/PERF.md docs/omni-sam2-streaming.md
+git add sam2ws/PERF.md docs/omni-sam2-streaming.md
 git commit -m "docs(sam2): perf gate numbers + streaming doc rewrite"
 ```
 
@@ -655,7 +661,7 @@ git commit -m "docs(sam2): perf gate numbers + streaming doc rewrite"
 ## File map (final)
 
 ```text
-sam2/
+sam2ws/
   requirements-lock.txt
   INSTALL_NOTES.md
   VIEWER_NOTES.md
