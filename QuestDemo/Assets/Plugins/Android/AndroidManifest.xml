@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Quest VR shell: makes the OS launch this immersive instead of as a 2D panel. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" android:version="1" />
+  <uses-feature android:name="android.hardware.vr.mode" android:required="false" />
+  <application>
+    <activity android:name="com.unity3d.player.UnityPlayerGameActivity" android:theme="@style/BaseUnityGameActivityTheme">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+        <category android:name="com.oculus.intent.category.VR" />
+      </intent-filter>
+    </activity>
+    <meta-data android:name="com.oculus.supportedDevices" android:value="quest|quest2|quest3|quest3s|questpro" />
+  </application>
+</manifest>

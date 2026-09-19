@@ -19,6 +19,8 @@ public static class BuildAndroid
         }
         EditorSceneManager.SaveScene(scene);
 
+        XRSetup.EnsureXR();
+
         EditorBuildSettings.scenes = new[] { new EditorBuildSettingsScene(scenePath, true) };
 
         PlayerSettings.companyName = "omni";
