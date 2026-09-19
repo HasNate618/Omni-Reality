@@ -149,3 +149,37 @@ def serve(host=DEFAULT_HOST, port=DEFAULT_PORT, session_factory=None,
         await srv.serve_forever()
 
     asyncio.run(main())
+
+
+_MODELS = {
+    "tiny": ("configs/sam2.1/sam2.1_hiera_t.yaml", "sam2.1_hiera_tiny.pt"),
+    "small": ("configs/sam2.1/sam2.1_hiera_s.yaml", "sam2.1_hiera_small.pt"),
+    "base+": ("configs/sam2.1/sam2.1_hiera_b+.yaml",
+              "sam2.1_hiera_base_plus.pt"),
+}
+
+
+def _real_session_factory(model, work_dir, window):
+    from sam2.build_sam import build_sam2_video_predictor
+    from sam2ws.session import TrackingSession
+    import os
+    cfg, ckpt = _MODELS[model]
+    ckpt_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "checkpoints", ckpt)
+    predictor = build_sam2_video_predictor(cfg, ckpt_path, device="cuda")
+    os.makedirs(work_dir, exist_ok=True)
+    return lambda: TrackingSession(predictor, work_dir, window=window)
+
+
+if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default="tiny", choices=list(_MODELS))
+    ap.add_argument("--port", type=int, default=DEFAULT_PORT)
+    ap.add_argument("--work-dir", default="/tmp/sam2ws-live")
+    ap.add_argument("--window", type=int, default=16)
+    ap.add_argument("--allow-lan", action="store_true")
+    args = ap.parse_args()
+    serve(port=args.port, allow_lan=args.allow_lan,
+          session_factory=_real_session_factory(
+              args.model, args.work_dir, args.window))
