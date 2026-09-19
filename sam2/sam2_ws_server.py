@@ -1,4 +1,11 @@
 import asyncio
+import contextlib
+import os
+
+# Let ops without an Apple-GPU (MPS) kernel fall back to CPU. Must be set
+# before torch is imported; has no effect on CUDA machines.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
 import websockets
 import json
 import base64
@@ -46,7 +53,8 @@ def append_frame(inference_state, frame_bgr, image_size=1024, device="cuda"):
     img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     img_resized = cv2.resize(img_rgb, (image_size, image_size))
     
-    # Use the global dtype (bfloat16/float16) to halve memory usage
+    # Global dtype: bfloat16/float16 on CUDA to halve memory, float32 elsewhere
+    # (float16 on Apple Silicon unless SAM2_MPS_DTYPE=float32)
     global dtype
     img_tensor = torch.from_numpy(img_resized).permute(2, 0, 1).to(device, dtype=dtype)
     img_tensor /= 255.0
@@ -109,8 +117,37 @@ def run_streaming_inference(predictor, inference_state, frame_idx):
 
 # --- GLOBAL MODEL LOAD ---
 print("Loading SAM 2 model globally on server startup...")
-device = "cuda" if torch.cuda.is_available() else "cpu"
-dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+# CUDA (RTX 4060): half precision under autocast, unchanged from the original.
+# Apple Silicon (MPS) and CPU: float32 with no autocast, since CUDA autocast
+# is a no-op there and half-precision inputs would mismatch float32 weights.
+if torch.cuda.is_available():
+    device = "cuda"
+    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+elif torch.backends.mps.is_available():
+    device = "mps"
+    # float16 autocast is ~2x faster on Apple Silicon with identical masks in our
+    # benchmark; SAM2_MPS_DTYPE=float32 opts out.
+    dtype = torch.float32 if os.environ.get("SAM2_MPS_DTYPE") == "float32" else torch.float16
+else:
+    device = "cpu"
+    dtype = torch.float32
+print(f"Using device={device} dtype={dtype}", flush=True)
+
+
+def compute_context():
+    if device == "cuda":
+        return torch.autocast("cuda", dtype=dtype)
+    if device == "mps" and dtype != torch.float32:
+        return torch.autocast("mps", dtype=dtype)
+    return contextlib.nullcontext()
+
+
+def free_device_memory():
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    elif device == "mps":
+        torch.mps.empty_cache()
+
 
 predictor = SAM2VideoPredictor.from_pretrained("facebook/sam2-hiera-tiny", device=device)
 try:
@@ -118,83 +155,132 @@ try:
 except AttributeError:
     image_size = 1024
 
+# Frames of tracking memory kept per object. The model reads at most the last
+# num_maskmem-1 = 6 memory frames and max_obj_ptrs_in_encoder-1 = 15 object
+# pointers, so anything older is dead weight that grows every frame.
+KEEP_FRAMES = 16
+PORT = int(os.environ.get("SAM2_WS_PORT", "8765"))
+STATS_EVERY = 50
+
+
+def prune_memory(inference_state, frame_idx):
+    """Drop non-conditioning outputs older than KEEP_FRAMES; keep clicked frames."""
+    oldest = frame_idx - KEEP_FRAMES
+    for per_obj in (inference_state["output_dict_per_obj"], inference_state["frames_tracked_per_obj"]):
+        for obj_dict in per_obj.values():
+            store = obj_dict.get("non_cond_frame_outputs", obj_dict)
+            for old_idx in [i for i in store if i < oldest]:
+                del store[old_idx]
+
+
+def process_frame(session, frame, clicks):
+    """Run one frame (with optional clicks). Returns (obj_ids, uint8 masks HxW) or None."""
+    h, w = frame.shape[:2]
+    if session["state"] is None:
+        session["state"] = init_streaming_state(predictor, h, w)
+    inference_state = session["state"]
+
+    with torch.inference_mode(), compute_context():
+        frame_idx = append_frame(inference_state, frame, image_size, device)
+        out_obj_ids, out_mask_logits = None, None
+        if clicks:
+            for click in clicks:
+                points = np.array([[click["x"], click["y"]]], dtype=np.float32)
+                labels = np.array([1], dtype=np.int32)
+                _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(
+                    inference_state=inference_state,
+                    frame_idx=frame_idx,
+                    obj_id=click["obj_id"],
+                    points=points,
+                    labels=labels,
+                )
+            session["has_object"] = True
+        elif session["has_object"]:
+            out_obj_ids, out_mask_logits = run_streaming_inference(predictor, inference_state, frame_idx)
+            prune_memory(inference_state, frame_idx)
+
+        if out_mask_logits is None:
+            return None
+        # One device->host transfer for all objects instead of one per object.
+        masks = (out_mask_logits[:, 0] > 0.0).to(torch.uint8).cpu().numpy()
+    return list(out_obj_ids), masks
+
+
+def device_memory_mb():
+    if device == "cuda":
+        return torch.cuda.memory_allocated() / 2**20
+    if device == "mps":
+        return torch.mps.current_allocated_memory() / 2**20
+    return float("nan")
+
+
+def warm_up():
+    """Run a click frame and two tracking frames so the first client frame is fast."""
+    started = time.monotonic()
+    rng = np.random.default_rng(0)
+    frame = rng.integers(0, 255, size=(480, 640, 3), dtype=np.uint8)
+    session = {"state": None, "has_object": False}
+    process_frame(session, frame, [{"x": 320, "y": 240, "obj_id": 1}])
+    process_frame(session, frame, [])
+    process_frame(session, frame, [])
+    del session
+    free_device_memory()
+    print(f"Warm-up done in {time.monotonic() - started:.1f} s", flush=True)
+
+
 async def handler(websocket):
-    print("Client connected!")
-    inference_state = None
-    has_object = False
-    
+    print("Client connected!", flush=True)
+    session = {"state": None, "has_object": False}
+    frame_times = []
+
     try:
         async for message in websocket:
             data = json.loads(message)
-            if data["type"] == "frame":
-                # Decode JPEG
-                jpeg_bytes = base64.b64decode(data["jpeg_b64"])
-                np_arr = np.frombuffer(jpeg_bytes, np.uint8)
-                frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-                
-                if frame is None:
-                    continue
-                    
-                h, w = frame.shape[:2]
-                if inference_state is None:
-                    inference_state = init_streaming_state(predictor, h, w)
-                    
-                with torch.inference_mode(), torch.autocast("cuda", dtype=dtype):
-                    frame_idx = append_frame(inference_state, frame, image_size, device)
-                    
-                    clicks = data.get("clicks", [])
-                    out_mask_logits = None
-                    
-                    if clicks:
-                        for click in clicks:
-                            x, y = click["x"], click["y"]
-                            obj_id = click["obj_id"]
-                            points = np.array([[x, y]], dtype=np.float32)
-                            labels = np.array([1], dtype=np.int32)
-                            
-                            _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(
-                                inference_state=inference_state,
-                                frame_idx=frame_idx,
-                                obj_id=obj_id,
-                                points=points,
-                                labels=labels,
-                            )
-                            has_object = True
-                    elif has_object:
-                        out_obj_ids, out_mask_logits = run_streaming_inference(predictor, inference_state, frame_idx)
-                        
-                    # Process results
-                    response = {"type": "result", "objects": []}
-                    if out_mask_logits is not None:
-                        for i, out_obj_id in enumerate(out_obj_ids):
-                            mask = (out_mask_logits[i, 0] > 0.0).cpu().numpy().astype(np.uint8)
-                            
-                            # Encode the binary mask as a compressed PNG
-                            mask_255 = mask * 255
-                            _, buffer = cv2.imencode('.png', mask_255)
-                            mask_b64 = base64.b64encode(buffer).decode('utf-8')
-                            
-                            response["objects"].append({
-                                "obj_id": out_obj_id,
-                                "mask_b64": mask_b64
-                            })
-                            
-                    await websocket.send(json.dumps(response))
-                    
+            if data["type"] != "frame":
+                continue
+            started = time.monotonic()
+            jpeg_bytes = base64.b64decode(data["jpeg_b64"])
+            frame = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
+            if frame is None:
+                continue
+
+            result = process_frame(session, frame, data.get("clicks", []))
+            response = {"type": "result", "objects": []}
+            if result is not None:
+                obj_ids, masks = result
+                for obj_id, mask in zip(obj_ids, masks):
+                    _, buffer = cv2.imencode(".png", mask * 255)
+                    response["objects"].append(
+                        {"obj_id": obj_id, "mask_b64": base64.b64encode(buffer).decode("ascii")}
+                    )
+            await websocket.send(json.dumps(response))
+
+            frame_times.append(time.monotonic() - started)
+            if len(frame_times) == STATS_EVERY:
+                print(
+                    f"[stats] last {STATS_EVERY} frames: mean {1000 * sum(frame_times) / STATS_EVERY:.0f} ms, "
+                    f"objects {len(response['objects'])}, device memory {device_memory_mb():.0f} MB",
+                    flush=True,
+                )
+                frame_times.clear()
+
     except websockets.exceptions.ConnectionClosed:
-        print("Client disconnected.")
+        print("Client disconnected.", flush=True)
     except Exception as e:
-        print(f"Error handling client: {e}")
+        print(f"Error handling client: {e}", flush=True)
     finally:
-        if inference_state is not None:
-            print("Cleaning up GPU memory for disconnected client...")
-            del inference_state
-            torch.cuda.empty_cache()
+        if session["state"] is not None:
+            print("Cleaning up GPU memory for disconnected client...", flush=True)
+            session["state"] = None
+            free_device_memory()
+
 
 async def main():
-    print("Starting SAM 2 WebSocket Server on ws://0.0.0.0:8765")
-    async with websockets.serve(handler, "0.0.0.0", 8765):
+    warm_up()
+    print(f"Starting SAM 2 WebSocket Server on ws://0.0.0.0:{PORT}", flush=True)
+    async with websockets.serve(handler, "0.0.0.0", PORT, max_size=None):
         await asyncio.Future()  # run forever
+
 
 if __name__ == "__main__":
     asyncio.run(main())
