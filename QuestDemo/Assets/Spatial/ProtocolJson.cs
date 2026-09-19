@@ -259,9 +259,21 @@ public static class ProtocolJson
     /// <summary>Frame wrapper tagged with an open utterance_id (voice turn).</summary>
     public static string BuildFrame(string sessionId, CaptureEnvelope env, string utteranceId)
     {
+        return BuildFrame(sessionId, env, utteranceId, null);
+    }
+
+    /// <summary>One per-question JPEG with the matching capture-time envelope.</summary>
+    public static string BuildFrame(string sessionId, CaptureEnvelope env, string utteranceId, string jpegBase64)
+    {
         var sb = new StringBuilder(640);
         sb.Append("{\"envelope\":");
         sb.Append(ToSpecJson(env));
+        if (!string.IsNullOrEmpty(jpegBase64))
+        {
+            sb.Append(",\"jpeg_b64\":\"");
+            AppendEscaped(sb, jpegBase64);
+            sb.Append('"');
+        }
         sb.Append('}');
         if (string.IsNullOrEmpty(utteranceId))
             return WrapMessage("frame", sessionId, 0, sb.ToString());
@@ -364,6 +376,12 @@ public static class ProtocolJson
     {
         bool found;
         return TryGetStringOrNull(json, "session_id", out sessionId, out found);
+    }
+
+    public static bool TryGetUtteranceId(string json, out string utteranceId)
+    {
+        bool found;
+        return TryGetStringOrNull(json, "utterance_id", out utteranceId, out found);
     }
 
     /// <summary>Brace-matched payload object substring, if present.</summary>

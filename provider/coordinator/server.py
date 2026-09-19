@@ -32,7 +32,7 @@ from jsonschema import ValidationError
 from coordinator.live_config import ensure_live_voice_only_config
 from coordinator.session import CoordinatorState, UtteranceBuffer
 from coordinator.turn import cancel_turn, ingest_audio_chunk, start_turn
-from yibu_audit import ApiKeyConfigurationError
+from yibu_audit import ApiKeyConfigurationError, ensure_env_api_key
 from protocol.ids import new_ulid
 from protocol.validate import validate_instance
 
@@ -126,8 +126,8 @@ def _extract_envelope(payload: object) -> dict | None:
         return None
     try:
         validate_instance("capture_envelope", candidate)
-    except ValidationError as exc:
-        logger.info("ignoring frame with invalid envelope: %s", exc.message)
+    except ValidationError:
+        logger.info("VoiceBootstrap component=coordinator event=jpeg_rejected reason=invalid_envelope")
         return None
     return candidate
 
@@ -148,6 +148,7 @@ async def _handle_hello(ws: Any, state: CoordinatorState, message: dict) -> None
                 "session_id": session_id,
                 "laptop_t_unix_ns": _laptop_now_ns(),
                 "artifact_port": state.artifact_port,
+                "perception_qa": bool(getattr(state.planner, "perception_qa", False)),
             },
         )
     )
@@ -201,13 +202,30 @@ def _attach_frame_to_utterance(state: CoordinatorState, message: dict, envelope:
     if not isinstance(utterance_id, str):
         logger.info("frame without utterance_id; envelope kept, no utterance")
         return
-    jpeg = None
-    if isinstance(payload.get("jpeg_b64"), str):
-        try:
-            jpeg = base64.b64decode(payload["jpeg_b64"], validate=True)
-        except (binascii.Error, ValueError):
-            logger.info("ignoring bad jpeg_b64 on frame")
+    if not state.accepts_utterance(utterance_id):
+        return
     buf = state.utterances.setdefault(utterance_id, UtteranceBuffer())
+    perception = getattr(state.planner, "perception_qa", False)
+    if perception and buf.frame_received:
+        return
+    buf.frame_received = True
+    jpeg = None
+    encoded = payload.get("jpeg_b64")
+    from voice.perception_image import MAX_JPEG_BASE64, validate_jpeg
+    from voice.bootstrap_diagnostics import perception_frame
+
+    if isinstance(encoded, str) and (not perception or len(encoded) <= MAX_JPEG_BASE64):
+        try:
+            jpeg = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            pass
+    if perception:
+        reason = "image_over_cap" if isinstance(encoded, str) and len(encoded) > MAX_JPEG_BASE64 else validate_jpeg(jpeg, envelope)
+        if reason:
+            perception_frame("jpeg_rejected", reason=reason)
+            jpeg = None
+        else:
+            perception_frame("frame_accepted", jpeg_bytes=len(jpeg))
     buf.envelope = envelope
     buf.jpeg = jpeg
 
@@ -310,8 +328,8 @@ async def handle_text(ws: Any, state: CoordinatorState, raw: object) -> None:
         return
     try:
         validate_instance("message", message)
-    except ValidationError as exc:
-        logger.info("ignoring schema-invalid message: %s", exc.message)
+    except ValidationError:
+        logger.info("VoiceBootstrap component=coordinator event=message_rejected reason=invalid_schema")
         return
     if not state.is_session_allowed(message["session_id"]):
         logger.info("ignoring message from foreign session")
@@ -341,6 +359,7 @@ async def _handle_clear_session(ws: Any, state: CoordinatorState, message: dict)
     from coordinator.jobs import clear_jobs
 
     clear_jobs(state.jobs, state.artifact_root)
+    await state.clear_voice()
     payload = {"session_id": state.session_id, "generation": state.clear_generation}
     state.clear_generation += 1
     await ws.send(_sendable("session_cleared", state.session_id, 0, payload))
@@ -372,12 +391,19 @@ async def handle_connection(ws: Any, state: CoordinatorState) -> None:
                 return
     finally:
         connection_close()
+        if state.planner is not None:
+            await state.clear_voice()
         clear_jobs(state.jobs, state.artifact_root)
 
 
 def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if getattr(args, "voice_only", False) and args.planner != "yibu":
         parser.error("--voice-only requires --planner yibu")
+    if getattr(args, "perception_qa", False):
+        if getattr(args, "voice_only", False):
+            parser.error("--perception-qa and --voice-only are mutually exclusive")
+        if args.planner not in ("yibu", "voice-stub"):
+            parser.error("--perception-qa requires --planner yibu or voice-stub")
 
 
 def make_planner(
@@ -385,8 +411,11 @@ def make_planner(
     model: str | None = None,
     *,
     voice_only: bool = False,
+    perception_qa: bool = False,
 ):
-    """None (slice-2 hardcoded mark), stub/voice-stub offline planners, or Yibu."""
+    """None (slice-2 hardcoded mark), offline planners, or live Yibu."""
+    _validate_cli_args(argparse.ArgumentParser(), argparse.Namespace(
+        planner=kind, voice_only=voice_only, perception_qa=perception_qa))
     if kind == "mark":
         return None
     from coordinator.planner import StubPlanner, VoiceStubPlanner, YibuPlanner
@@ -394,7 +423,10 @@ def make_planner(
     if kind == "stub":
         return StubPlanner()
     if kind == "voice-stub":
-        return VoiceStubPlanner()
+        return VoiceStubPlanner(perception_qa=perception_qa)
+    if perception_qa:
+        from coordinator.perception import PerceptionQaPlanner
+        return PerceptionQaPlanner(**({"model": model} if model else {}))
     purpose = "voice-only-turn" if voice_only else "voice-turn"
     if model:
         return YibuPlanner(model=model, voice_only=voice_only, purpose=purpose)
@@ -407,14 +439,19 @@ async def run_server(
     planner_kind: str = "mark",
     model: str | None = None,
     voice_only: bool = False,
+    perception_qa: bool = False,
 ) -> None:
     """Bind the coordinator WebSocket server (CLI: python -m coordinator.server)."""
+    _validate_cli_args(argparse.ArgumentParser(), argparse.Namespace(
+        planner=planner_kind, voice_only=voice_only, perception_qa=perception_qa))
     ensure_live_voice_only_config(planner_kind, voice_only)
+    if planner_kind == "yibu" and perception_qa:
+        ensure_env_api_key("YIBU_API_KEY")
     import websockets
 
     async def _serve_one(ws) -> None:
         state = CoordinatorState(
-            planner=make_planner(planner_kind, model, voice_only=voice_only)
+            planner=make_planner(planner_kind, model, voice_only=voice_only, perception_qa=perception_qa)
         )
         if planner_kind == "voice-stub":
             from voice.test_tone import make_test_tone
@@ -427,7 +464,7 @@ async def run_server(
             # Live cloud speech for speak.audio (spends credit per turn).
             from voice.cloud_speech import synthesize_line
 
-            speak_purpose = "voice-only-speak" if voice_only else "voice-speak"
+            speak_purpose = "perception-qa-speak" if perception_qa else ("voice-only-speak" if voice_only else "voice-speak")
 
             async def _live_synth(text: str) -> bytes | None:
                 return await synthesize_line(text=text, purpose=speak_purpose)
@@ -459,13 +496,19 @@ if __name__ == "__main__":
         action="store_true",
         help="audio-only yibu turns (no image/tools); requires --planner yibu",
     )
+    parser.add_argument(
+        "--perception-qa", action="store_true",
+        help="one camera image per spoken question, no tools; yibu or offline voice-stub",
+    )
     args = parser.parse_args()
     _validate_cli_args(parser, args)
     try:
         ensure_live_voice_only_config(args.planner, args.voice_only)
+        if args.planner == "yibu" and args.perception_qa:
+            ensure_env_api_key("YIBU_API_KEY")
     except ApiKeyConfigurationError as exc:
         parser.error(
-            f"--planner yibu --voice-only requires environment variable {exc.name} "
+            f"Live coordinator requires environment variable {exc.name} "
             "(set on the laptop only; no API call is made when it is missing)."
         )
     logging.basicConfig(level=logging.INFO)
@@ -476,5 +519,6 @@ if __name__ == "__main__":
             args.planner,
             args.model,
             voice_only=args.voice_only,
+            perception_qa=args.perception_qa,
         )
     )

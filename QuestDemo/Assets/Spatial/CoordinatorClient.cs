@@ -44,10 +44,10 @@ public class CoordinatorClient : MonoBehaviour
 
     /// <summary>Send priorities (spec order): cancel ahead of ack ahead of frames.</summary>
     public const int PriorityCancel = 0;
-    public const int PriorityUtteranceEnd = 0;
+    public const int PriorityUtteranceEnd = 9;
     public const int PriorityAck = 2;
     public const int PriorityPing = 8;
-    public const int PriorityAudioChunk = 8;
+    public const int PriorityAudioChunk = 9;
     public const int PriorityFrame = 9;
 
     /// <summary>Hello shares the top lane (sent once, queue empty at connect).</summary>
@@ -96,6 +96,11 @@ public class CoordinatorClient : MonoBehaviour
             return false;
         }
 
+        public void Clear()
+        {
+            lock (_gate) _queues.Clear();
+        }
+
         public int Count
         {
             get
@@ -120,6 +125,7 @@ public class CoordinatorClient : MonoBehaviour
     internal Func<Ray, Vector3?> DelayedHit;
     internal Func<string> NewDrawingId;
     internal SpeakCloudPlayer SpeakPlayer;
+    internal VoiceCaption Caption;
 
     readonly ConcurrentQueue<string> _inbound = new ConcurrentQueue<string>();
     readonly ConcurrentQueue<string> _errors = new ConcurrentQueue<string>();
@@ -139,6 +145,14 @@ public class CoordinatorClient : MonoBehaviour
     bool _wasOpen;
     bool _offlineShown;
     bool _attemptFailed;
+    string _pendingReplyId;
+    float _replyStartedAt;
+    public bool PerceptionEnabled { get; private set; }
+    public string SessionId { get { return _sessionId; } }
+    public bool AwaitingReply { get { return _pendingReplyId != null; } }
+
+    [Serializable]
+    class HelloOptions { public bool perception_qa; }
 
     /// <summary>Queue a hello + start supervision. No socket work happens here.</summary>
     internal void Begin(string ipv4)
@@ -155,7 +169,7 @@ public class CoordinatorClient : MonoBehaviour
     /// <summary>True while the socket is open (main thread).</summary>
     internal bool IsConnected
     {
-        get { return IsOpen; }
+        get { return IsOpen && _sessionId != null; }
     }
 
     /// <summary>Outbound depth for diagnostics (main or background).</summary>
@@ -184,6 +198,15 @@ public class CoordinatorClient : MonoBehaviour
         if (!_beginRequested || string.IsNullOrEmpty(_ipv4))
             return;
         float now = Time.realtimeSinceStartup;
+        if (AwaitingReply && now - _replyStartedAt >= 45f)
+        {
+            VoiceBootstrapLog.Log(VoiceBootstrapLog.ComponentCoordinator, "reply_timeout");
+            CleanupSocket();
+            ShowVoiceFeedback("Reply timed out. Reconnecting; please ask again.");
+            _wasOpen = false;
+            _lastConnectAttemptAt = now;
+            return;
+        }
         if (IsOpen)
         {
             if (!_wasOpen)
@@ -200,7 +223,7 @@ public class CoordinatorClient : MonoBehaviour
             }
             return;
         }
-        if (_wasOpen)
+        if (_wasOpen || (_socket != null && !_connecting))
         {
             _wasOpen = false;
             CleanupSocket();
@@ -299,7 +322,7 @@ public class CoordinatorClient : MonoBehaviour
         catch (Exception e)
         {
             VoiceBootstrapLog.SocketFailure("send", e.GetType().Name);
-            _socketDown = true;
+            if (ReferenceEquals(_socket, sock)) _socketDown = true;
         }
     }
 
@@ -315,7 +338,7 @@ public class CoordinatorClient : MonoBehaviour
                     new ArraySegment<byte>(buffer), token);
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
-                    _socketDown = true;
+                    if (ReferenceEquals(_socket, sock)) _socketDown = true;
                     return;
                 }
                 if (result.MessageType == WebSocketMessageType.Binary)
@@ -326,7 +349,7 @@ public class CoordinatorClient : MonoBehaviour
                 {
                     string text = Encoding.UTF8.GetString(frame.ToArray());
                     frame.Clear();
-                    if (!string.IsNullOrEmpty(text))
+                    if (!string.IsNullOrEmpty(text) && ReferenceEquals(_socket, sock))
                         _inbound.Enqueue(text);
                 }
             }
@@ -337,7 +360,7 @@ public class CoordinatorClient : MonoBehaviour
         catch (Exception e)
         {
             VoiceBootstrapLog.SocketFailure("receive", e.GetType().Name);
-            _socketDown = true;
+            if (ReferenceEquals(_socket, sock)) _socketDown = true;
         }
     }
 
@@ -374,6 +397,7 @@ public class CoordinatorClient : MonoBehaviour
             string payload;
             if (ProtocolJson.TryGetPayloadObject(text, out payload))
             {
+                PerceptionEnabled = JsonUtility.FromJson<HelloOptions>(payload).perception_qa;
                 // session_id lookup works on any object substring, payload included.
                 string session;
                 if (ProtocolJson.TryGetSessionId(payload, out session) && session != null)
@@ -390,6 +414,11 @@ public class CoordinatorClient : MonoBehaviour
             return;
         if (type == "scene_op")
         {
+            if (PerceptionEnabled)
+            {
+                VoiceBootstrapLog.Log(VoiceBootstrapLog.ComponentCoordinator, "scene_op_blocked");
+                return;
+            }
             string payload;
             if (!ProtocolJson.TryGetPayloadObject(text, out payload))
                 return;
@@ -425,12 +454,18 @@ public class CoordinatorClient : MonoBehaviour
         }
         if (type == "speak")
         {
+            string replyId;
+            ProtocolJson.TryGetUtteranceId(text, out replyId);
+            if (PerceptionEnabled && (_pendingReplyId == null || replyId != _pendingReplyId))
+                return;
             string payload;
             if (!ProtocolJson.TryGetPayloadObject(text, out payload))
                 return;
             ProtocolJson.SpeakMsg speak;
             if (!ProtocolJson.TryParseSpeak(payload, out speak))
                 return;
+            _pendingReplyId = null;
+            ShowVoiceFeedback(speak.Text);
             if (SpeakPlayer == null)
             {
                 Debug.LogWarning("CoordinatorClient: speak received but no SpeakCloudPlayer");
@@ -439,9 +474,11 @@ public class CoordinatorClient : MonoBehaviour
             byte[] pcm;
             if (!SpeakCloudPlayer.TryDecodePcmBase64(speak.AudioDataB64, out pcm))
             {
+                ShowVoiceFeedback("Speech audio unavailable. " + speak.Text, 12f);
                 SpeakPlayer.TryPlay(speak.HasTurnId ? speak.TurnId : 0, speak.Text, null);
                 return;
             }
+            ShowVoiceFeedback(speak.Text, Mathf.Max(8f, pcm.Length / 32000f + 2f));
             SpeakPlayer.TryPlay(speak.HasTurnId ? speak.TurnId : 0, speak.Text, pcm);
             return;
         }
@@ -597,6 +634,17 @@ public class CoordinatorClient : MonoBehaviour
         _outbox.Enqueue(PriorityFrame, ProtocolJson.BuildFrame(_sessionId, env, OpenUtteranceId));
     }
 
+    /// <summary>Queue the final JPEG in the SAME FIFO lane as audio and end.</summary>
+    public bool EnqueuePerceptionFrame(string utteranceId, CaptureEnvelope env, byte[] jpeg)
+    {
+        if (!IsConnected || !PerceptionEnabled || OpenUtteranceId != utteranceId
+            || env == null || jpeg == null || jpeg.Length == 0 || jpeg.Length > 65536)
+            return false;
+        _outbox.Enqueue(PriorityFrame,
+            ProtocolJson.BuildFrame(_sessionId, env, utteranceId, Convert.ToBase64String(jpeg)));
+        return true;
+    }
+
     /// <summary>Open voice utterance (set by the mic uplink, cleared on end).</summary>
     public string OpenUtteranceId;
 
@@ -604,7 +652,7 @@ public class CoordinatorClient : MonoBehaviour
     {
         if (string.IsNullOrEmpty(utteranceId) || string.IsNullOrEmpty(dataB64))
             return;
-        if (!IsOpen)
+        if (!IsConnected)
         {
             VoiceBootstrapLog.AudioDropOffline(VoiceBootstrapLog.PcmBytesFromBase64(dataB64));
             return;
@@ -613,16 +661,21 @@ public class CoordinatorClient : MonoBehaviour
             ProtocolJson.BuildAudioChunk(_sessionId, utteranceId, dataB64));
     }
 
-    public void EnqueueUtteranceEnd(string utteranceId)
+    public void EnqueueUtteranceEnd(string utteranceId, bool expectReply = true)
     {
         if (string.IsNullOrEmpty(utteranceId))
             return;
         if (OpenUtteranceId == utteranceId)
             OpenUtteranceId = null;
-        if (!IsOpen)
+        if (!IsConnected)
         {
             VoiceBootstrapLog.UtteranceEndDropOffline();
             return;
+        }
+        if (expectReply)
+        {
+            _pendingReplyId = utteranceId;
+            _replyStartedAt = Time.realtimeSinceStartup;
         }
         _outbox.Enqueue(PriorityUtteranceEnd,
             ProtocolJson.BuildUtteranceEnd(_sessionId, utteranceId));
@@ -635,6 +688,12 @@ public class CoordinatorClient : MonoBehaviour
     internal void EnqueueCancel(string opId, int turnId)
     {
         _outbox.Enqueue(PriorityCancel, ProtocolJson.BuildCancel(_sessionId, turnId, opId));
+    }
+
+    internal void ShowVoiceFeedback(string text, float seconds = 8f)
+    {
+        if (Caption != null) Caption.Show(text, CenterEye, seconds);
+        else ShowChipText(text);
     }
 
     internal void ShowChipText(string text)
@@ -654,7 +713,7 @@ public class CoordinatorClient : MonoBehaviour
     void ShowOffline()
     {
         // Offline honesty: exact copy, rings preserved (never Store.Clear).
-        ShowChipText(OfflineChipText);
+        ShowVoiceFeedback(OfflineChipText);
         Debug.Log("CoordinatorClient: offline, drawings kept");
     }
 
@@ -684,33 +743,17 @@ public class CoordinatorClient : MonoBehaviour
         {
         }
         _cts = null;
+        _sessionId = null;
+        PerceptionEnabled = false;
+        _pendingReplyId = null;
+        OpenUtteranceId = null;
+        _outbox.Clear();
+        while (_inbound.TryDequeue(out _)) { }
     }
 
     void Shutdown()
     {
         _beginRequested = false;
-        try
-        {
-            if (_cts != null)
-                _cts.Cancel();
-        }
-        catch (Exception)
-        {
-        }
-        var sock = _socket;
-        _socket = null;
-        if (sock != null)
-        {
-            try { sock.Dispose(); } catch (Exception) { }
-        }
-        try
-        {
-            if (_cts != null)
-                _cts.Dispose();
-        }
-        catch (Exception)
-        {
-        }
-        _cts = null;
+        CleanupSocket();
     }
 }

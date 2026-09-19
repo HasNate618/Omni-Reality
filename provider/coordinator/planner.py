@@ -136,6 +136,9 @@ class VoiceStubPlanner:
 
     text: str = VOICE_STUB_CAPTION
 
+    def __init__(self, *, perception_qa: bool = False) -> None:
+        self.perception_qa = perception_qa
+
     async def plan(self, *, pcm, jpeg, envelope, context) -> PlanResult:
         return PlanResult(ops=[], text=self.text, heard="(voice-stub)")
 
@@ -375,7 +378,10 @@ class YibuPlanner:
         from voice.audio import build_voice_messages, pcm_to_wav_bytes
         from yibu_http import extract_text
 
-        history = "\n".join(f"- user: {c.get('heard')} / you: {c.get('said')}" for c in context[-8:])
+        history = "\n".join(
+            (f"- user: {c['heard']} / " if c.get('heard') else "- ")
+            + f"you: {c.get('said', '')}" for c in context[-8:]
+        )
         prompt = "Respond to the user's speech in the audio."
         if history:
             prompt += "\nRecent turns:\n" + history
@@ -396,7 +402,7 @@ class YibuPlanner:
             ops=[],
             text=say,
             latency_ms=latency_ms,
-            heard=say or None,
+            heard=None,  # Plain-text reply is not a transcript of the user.
             audit_id=audit_id,
             proposed_op_count=0,
         )

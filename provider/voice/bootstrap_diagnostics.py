@@ -11,7 +11,7 @@ _PREFIX = "VoiceBootstrap"
 _COMPONENT = "coordinator"
 
 _ALLOWED_STRING_KEYS = frozenset(
-    {"event", "component", "exception_class", "mode", "voice_gate", "phase"}
+    {"event", "component", "exception_class", "mode", "voice_gate", "phase", "reason"}
 )
 
 
@@ -97,7 +97,13 @@ def synth_failed(*, turn_id: int, exception_class: str) -> None:
     _emit("synth_failed", turn_id=turn_id, exception_class=exception_class)
 
 
+def perception_frame(event: str, *, reason: str | None = None, jpeg_bytes: int = 0) -> None:
+    _emit(event, reason=reason, jpeg_bytes=jpeg_bytes)
+
+
 def planner_mode_label(planner: Any) -> str:
+    if getattr(planner, "perception_qa", False):
+        return "perception_qa"
     if planner is None:
         return "mark"
     voice_only = getattr(planner, "voice_only", False)

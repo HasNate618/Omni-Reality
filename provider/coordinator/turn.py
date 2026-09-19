@@ -64,7 +64,13 @@ def _turn_task_done(state: CoordinatorState, turn_id: int, task: asyncio.Task) -
 
 def start_turn(state: CoordinatorState, send: Send, utterance_id: str) -> asyncio.Task | None:
     """Close an utterance. Returns the background turn task, or None."""
+    if utterance_id in state.closed_utterances:
+        return None
     buf = state.utterances.pop(utterance_id, None) or UtteranceBuffer()
+    state.closed_utterances.add(utterance_id)
+    if getattr(state.planner, "perception_qa", False) and state.turn_tasks:
+        logger.info("VoiceBootstrap component=coordinator event=utterance_dropped reason=turn_busy")
+        return None
     if len(buf.pcm) < MIN_UTTERANCE_S * BYTES_PER_SECOND:
         logger.info("utterance %s too short (%d bytes); no turn", utterance_id, len(buf.pcm))
         return None
@@ -140,7 +146,7 @@ async def _run_turn(
     await send("turn_started", turn_id, {"utterance_id": utterance_id, "turn_id": turn_id}, utterance_id)
     bind = getattr(state.planner, "bind_tools", None)
     voice_only = getattr(state.planner, "voice_only", False)
-    if bind is not None and not voice_only:
+    if bind is not None and not voice_only and not getattr(state.planner, "perception_qa", False):
         try:
             bind(
                 jobs=state.jobs,
@@ -248,6 +254,8 @@ def ingest_audio_chunk(state: CoordinatorState, utterance_id: str | None, payloa
         pcm = base64.b64decode(audio.get("data_b64") or "", validate=True)
     except (binascii.Error, ValueError):
         logger.info("ignoring audio_chunk with bad base64")
+        return
+    if not state.accepts_utterance(utterance_id) or len(pcm) % 2:
         return
     buf = state.utterances.setdefault(utterance_id, UtteranceBuffer())
     if len(buf.pcm) + len(pcm) > state.max_utterance_bytes:

@@ -30,14 +30,23 @@ Quest owns VAD, capture, transport, playback. Laptop owns turn IDs, Omni
 call, audit, TTS. One WebSocket, no new services or ports.
 
 The camera source is the real one already on device:
-`PassthroughCameraAccess.GetTexture()` (left camera, already displayed
-live on the CameraQuad by `ARRuntime`). At VAD close, Quest reads back
-that texture once, downscales (longest side <= 640 px, starting point ~612x408
-from the proven smoke), JPEG-encodes to <= 64 KB, and attaches it to the
-closing utterance. Exact dimensions/quality are pinned in the implementation
-plan; the smoke's 34 KB frame is the reference point. If the camera is not
-playing, encoding exceeds the cap, audio is under 0.5 s, or the socket is
-down, Quest drops the frame and runs a voice-only fallback turn.
+`PassthroughCameraAccess` left texture (already displayed live on the
+CameraQuad by `ARRuntime`). At VAD close, Quest requests one frame through
+`AsyncGPUReadback` in render order (a blocking Blit/ReadPixels can return
+the previous image per the SDK warning), freezes capture-time pose +
+intrinsics + timestamp first, downscales with aspect preserved (longest
+side <= 640 px; full 1280x960 input becomes 640x480), JPEG-encodes at
+quality 60 with one quality-35 retry to stay <= 64 KB, and attaches it to
+the closing utterance. The request waits at most 750 ms and requires a PCA
+update no older than 500 ms; AsyncGPUReadback must be supported. Audio is
+never re-sent: PCM already streamed stays streamed, and the JPEG is queued
+in the same FIFO media lane before the single `utterance_end`. If the
+camera is not playing, capture/readback/encode fails, audio is under 0.5 s,
+or the socket is down, Quest drops the media locally with a visible
+recovery hint and makes no cloud call. A missing or rejected image on an
+otherwise valid turn yields a fixed local recovery reply (no Omni call), not
+an audio-only model answer. No offline replay or cloud fallback ever occurs
+on disconnect.
 
 The coordinator runs the existing grounded HTTP Omni helper
 (`build_voice_messages` audio WAV + JPEG) in a new `perception-qa` planner
@@ -52,9 +61,15 @@ leg. Audit purposes are `perception-qa-turn` (Omni) and `perception-qa-speak`
   from the PCA texture at `utterance_end`; downscale, JPEG encode, byte
   cap; tag with the closing `utterance_id`. Drops on camera-down,
   over-cap, too-short, or offline. Never buffers across turns.
-- **`CoordinatorClient` + `ProtocolJson` (small edit):** `BuildFrame`
-  gains a `jpeg_b64` form for voice turns only (today it sends envelope
-  only). Priority stays below cancel/ack.
+- **`CoordinatorClient` + `ProtocolJson`:** `BuildFrame` gains a
+  `jpeg_b64` form for voice turns only (today it sends envelope only).
+  Audio chunks, the single frame, and `utterance_end` share one FIFO media
+  lane (cancel/ack stay ahead; `utterance_end` can no longer overtake audio
+  or the image). Capture is negotiated: `hello_ok` carries
+  `perception_qa`; Quest only sends images when the server offers it, and
+  the server ignores images when the planner is not perception mode. Quest
+  shows spoken and recovery text in a head-relative caption; logs never
+  carry captions.
 - **Coordinator planner `perception-qa` mode (new, beside `voice-only`):**
   audio + JPEG in, short plain-text answer out ("answer what you see and
   hear, no JSON, no ops"; one or two sentences, planner max-tokens <= 128),
@@ -70,10 +85,13 @@ leg. Audit purposes are `perception-qa-turn` (Omni) and `perception-qa-speak`
 3. Quest sends `frame {utterance_id, envelope, jpeg_b64}` once, then
    buffered audio chunks, then `utterance_end` — same order as the
    grounded turn.
-4. Coordinator assembles; under-length/missing/bad frame becomes a
-   voice-only fallback (existing `voice-only-turn` path, no image).
-   Otherwise Omni audio+JPEG (`perception-qa-turn`) → short text → TTS
-   (`perception-qa-speak`) → `speak`.
+4. Coordinator assembles; under-length turns and any media after
+   disconnect/close are dropped locally with no cloud call. A missing or
+   rejected image yields a fixed local recovery reply with no Omni call.
+   Otherwise one Omni audio+JPEG call (`perception-qa-turn`, max-tokens
+   <= 128, no tools) → short text → one TTS call (`perception-qa-speak`)
+   → `speak`. One question never overlaps the next: the mic gate holds
+   until the reply or a 45 s timeout with visible feedback.
 5. Quest plays PCM and shows the caption. All buffers clear on close,
    error, cancel, or socket drop. No replay.
 
@@ -104,10 +122,11 @@ JPEG/base64, transcripts, prompts, replies, URLs, or keys.
 
 Only the bounded open utterance plus its one frame leave the headset,
 over LAN to the laptop — never directly to the provider. Nothing is
-recorded while silent. Exactly one Omni call plus one TTS call per
-accepted turn, small `--max-tokens`, labeled purposes, redacted ledger,
-missing counts stay null. Live coordinator remains stopped unless a
-bounded test is explicitly requested.
+recorded while silent, and the 300 ms pre-roll is a local VAD buffer, not
+cloud recording. At most one Omni call plus one TTS call per accepted
+valid turn (invalid/short/offline turns make none), max-tokens <= 128,
+labeled purposes, redacted ledger, missing counts stay null. Live
+coordinator remains stopped unless a bounded test is explicitly requested.
 
 ## 8. Verification
 
@@ -125,7 +144,13 @@ bounded test is explicitly requested.
 
 ## 9. Forward path (not built here)
 
-Point selection on the captured image → capture-time raycast → world pin;
-SAM2 boxes/masks shown to the model and the wearer in real time; mask
-crops feeding image-to-3D. Those reuse the `utterance_id` / `frame_id`
-linkage above and live in the worker-tools / voice-spatial lanes.
+Point selection on the captured image → capture-time raycast → depth/scene
+hit → world pin; SAM2 boxes/masks shown to the model and the wearer in real
+time; mask crops feeding image-to-3D. SAM2 masks alone do not supply metric
+depth or current-view registration: real-time display needs tracking and
+reprojection work. The `utterance_id` / `frame_id` linkage plus the
+corrected sent→original pixel-centre mapping (`p_original =
+(p_sent + .5) * scale - .5`) and the cached capture geometry are preserved
+so that future work can add calibrated UV → capture ray → hit resolution;
+they are provenance, not a promise that no future protocol fields are
+needed. That work lives in the worker-tools / voice-spatial lanes.

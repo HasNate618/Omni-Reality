@@ -85,6 +85,7 @@ class Session:
     def __init__(self, planner: StubPlanner) -> None:
         self.state = CoordinatorState(planner=planner)
         self.ws = DummyWs()
+        self.utterance_number = 0
 
     async def __aenter__(self) -> "Session":
         self.task = asyncio.create_task(handle_connection(self.ws, self.state))
@@ -102,11 +103,17 @@ class Session:
             pass
 
     async def utter(self, pcm: bytes = ONE_SECOND, with_frame: bool = True) -> None:
-        if with_frame:
-            await self.ws.inject(frame())
-        await self.ws.inject(audio_chunk(pcm[: len(pcm) // 2]))
-        await self.ws.inject(audio_chunk(pcm[len(pcm) // 2 :]))
-        await self.ws.inject(msg("utterance_end", {"utterance_id": UTT, "t_unix_ns": 0}))
+        # A new question has a new ID, just like Quest; replaying the same ID
+        # is now correctly ignored rather than becoming a second paid turn.
+        self.utterance_number += 1
+        uid = UTT if self.utterance_number == 1 else f"{UTT}-{self.utterance_number}"
+        messages = [frame()] if with_frame else []
+        messages.extend([audio_chunk(pcm[: len(pcm) // 2]), audio_chunk(pcm[len(pcm) // 2 :]),
+                         msg("utterance_end", {"utterance_id": uid, "t_unix_ns": 0})])
+        for outgoing in messages:
+            outgoing["utterance_id"] = uid
+            outgoing["payload"]["utterance_id"] = uid
+            await self.ws.inject(outgoing)
 
     def types(self) -> list[str]:
         return [m["type"] for m in self.ws.sent if m["type"] != "hello_ok"]

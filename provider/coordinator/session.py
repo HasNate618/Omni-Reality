@@ -26,6 +26,7 @@ class UtteranceBuffer:
     pcm: bytearray = field(default_factory=bytearray)
     jpeg: bytes | None = None
     envelope: dict | None = None
+    frame_received: bool = False
 
 
 class CoordinatorState:
@@ -39,6 +40,7 @@ class CoordinatorState:
     def __init__(self, planner: Any = None) -> None:
         self.planner = planner
         self.utterances: dict[str, UtteranceBuffer] = {}
+        self.closed_utterances: set[str] = set()
         self.max_utterance_bytes: int = 30 * 16000 * 2  # 30 s cap
         self.turn_tasks: dict[int, asyncio.Task] = {}
         self.cancelled_turns: set[int] = set()
@@ -61,6 +63,27 @@ class CoordinatorState:
         self.artifact_port: int = ARTIFACT_PORT
         self.artifact_root: Path = Path(__file__).resolve().parent.parent / "artifacts" / "generated"
         self.clear_generation: int = 1
+
+    def accepts_utterance(self, utterance_id: str) -> bool:
+        # Bound open media and tombstones; after a very long session reconnect
+        # rather than forgetting IDs and allowing old audio to become paid turns.
+        return (utterance_id not in self.closed_utterances
+                and len(self.closed_utterances) < 4096
+                and (utterance_id in self.utterances or len(self.utterances) < 4))
+
+    async def clear_voice(self) -> None:
+        tasks = list(self.turn_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.turn_tasks.clear()
+        self.closed_utterances.update(self.utterances)
+        self.utterances.clear()
+        self.context.clear()
+        self.last_envelope = None
+        self.ack_events.clear()
+        self.pending_ops.clear()
 
     def is_session_allowed(self, incoming: str | None) -> bool:
         """True unless an established session is contradicted."""

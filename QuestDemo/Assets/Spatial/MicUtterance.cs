@@ -28,6 +28,9 @@ public class MicUtterance : MonoBehaviour
     bool _micAuthRequested;
     bool? _lastLoggedMicGrant;
     int _utterancePcmBytes;
+    string _utteranceSessionId;
+    bool _closing;
+    internal PerceptionCapture Perception;
 
     /// <summary>Chunks streamed this utterance (test seam).</summary>
     public int SentChunks { get { return _sentChunks; } }
@@ -43,13 +46,11 @@ public class MicUtterance : MonoBehaviour
     /// <summary>PTT press (or keyword): open the utterance and start the mic.</summary>
     public bool BeginUtterance()
     {
-        if (_utteranceId != null || _client == null)
+        if (!CanOpenUtterance())
             return false;
         _manualCapture = true;
-        _utteranceId = Guid.NewGuid().ToString("N");
-        _client.OpenUtteranceId = _utteranceId;
+        OpenUtterance();
         _pending.Clear();
-        _sentChunks = 0;
         EnsureMicClip();
         return _clip != null;
     }
@@ -81,6 +82,18 @@ public class MicUtterance : MonoBehaviour
 
     void Update()
     {
+        TryEnsureAutoCapture();
+        if (_client == null || !_client.IsConnected
+            || (_utteranceId != null && _utteranceSessionId != _client.SessionId))
+        {
+            DropLocalTurn();
+            return;
+        }
+        if (_closing || _client.AwaitingReply || (_client.SpeakPlayer != null && _client.SpeakPlayer.IsPlaying))
+        {
+            DiscardMicWindow();
+            return;
+        }
         if (_manualCapture)
         {
             if (_utteranceId == null || _clip == null)
@@ -89,10 +102,38 @@ public class MicUtterance : MonoBehaviour
             return;
         }
 
-        TryEnsureAutoCapture();
         if (_clip == null)
             return;
         PumpMicVad();
+    }
+
+    void DiscardMicWindow()
+    {
+        _pending.Clear();
+        _gate = new VoiceActivityGate();
+        if (_clip != null) _lastPos = Mathf.Max(0, Microphone.GetPosition(null));
+    }
+
+    void DropLocalTurn()
+    {
+        if (_closing && Perception != null) Perception.Cancel();
+        _closing = false;
+        _utteranceId = null;
+        _utteranceSessionId = null;
+        _manualCapture = false;
+        if (_client != null) _client.OpenUtteranceId = null;
+        DiscardMicWindow();
+    }
+
+    void OnDisable()
+    {
+        DropLocalTurn();
+        if (_clip != null)
+        {
+            Microphone.End(null);
+            Destroy(_clip);
+            _clip = null;
+        }
     }
 
     void TryEnsureAutoCapture()
@@ -224,7 +265,7 @@ public class MicUtterance : MonoBehaviour
 
     bool CanOpenUtterance()
     {
-        if (_client == null || !_client.IsConnected || _utteranceId != null)
+        if (_client == null || !_client.IsConnected || _client.AwaitingReply || _utteranceId != null)
             return false;
         SpeakCloudPlayer player = _client.SpeakPlayer;
         return player == null || !player.IsPlaying;
@@ -244,19 +285,59 @@ public class MicUtterance : MonoBehaviour
     {
         _utteranceId = Guid.NewGuid().ToString("N");
         _client.OpenUtteranceId = _utteranceId;
+        _utteranceSessionId = _client.SessionId;
         _sentChunks = 0;
         _utterancePcmBytes = 0;
     }
 
     void CloseUtterance()
     {
+        if (_closing || _utteranceId == null) return;
         string id = _utteranceId;
-        int sent = _sentChunks;
-        int pcmBytes = _utterancePcmBytes;
+        VoiceBootstrapLog.VadEnded(_sentChunks, _utterancePcmBytes);
+        if (_client == null || !_client.IsConnected || _client.SessionId != _utteranceSessionId)
+        {
+            DropLocalTurn();
+            return;
+        }
+        _closing = true;
+        bool longEnough = _utterancePcmBytes >= SampleRate; // 0.5 seconds s16le.
+        if (!longEnough)
+        {
+            _client.ShowVoiceFeedback("That was too short. Please ask again.");
+            FinishUtterance(id, null, null, null, false);
+        }
+        else if (_client.PerceptionEnabled && Perception != null)
+        {
+            Perception.Capture((env, jpeg, reason) => FinishUtterance(id, env, jpeg, reason, true));
+        }
+        else
+        {
+            FinishUtterance(id, null, null, _client.PerceptionEnabled ? "camera_down" : null, true);
+        }
+    }
+
+    void FinishUtterance(string id, CaptureEnvelope env, byte[] jpeg, string reason, bool expectReply)
+    {
+        if (_utteranceId != id || _client == null || !_client.IsConnected
+            || _client.SessionId != _utteranceSessionId)
+        {
+            DropLocalTurn();
+            return;
+        }
+        if (jpeg != null && !_client.EnqueuePerceptionFrame(id, env, jpeg))
+        {
+            DropLocalTurn();
+            return;
+        }
+        if (reason != null)
+            _client.ShowVoiceFeedback(reason == "dark_image"
+                ? "Camera view is dark. Uncover the camera or try more light."
+                : "Camera image unavailable. Check camera access and try again.");
+        _client.EnqueueUtteranceEnd(id, expectReply);
         _utteranceId = null;
-        VoiceBootstrapLog.VadEnded(sent, pcmBytes);
-        if (_client != null && id != null)
-            _client.EnqueueUtteranceEnd(id);
+        _utteranceSessionId = null;
+        _closing = false;
     }
 
     void FlushPartialManual()

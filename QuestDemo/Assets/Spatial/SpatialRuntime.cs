@@ -52,6 +52,7 @@ public class SpatialRuntime : MonoBehaviour
     Material _aimMaterial;
     readonly CaptureGeometryCache _cache = new CaptureGeometryCache();
     int _stageEpoch = 1;
+    public int StageEpoch { get { return _stageEpoch; } }
     CoordinatorClient _coord;
     string _laptopIpv4 = "";
     DrawingStore _store;
@@ -93,6 +94,12 @@ public class SpatialRuntime : MonoBehaviour
     void Update()
     {
         TickCoordinator();
+        // Perception is Q&A only, including when developer controllers are held.
+        if (_coord != null && _coord.PerceptionEnabled)
+        {
+            if (_aimLine != null) _aimLine.enabled = false;
+            return;
+        }
         if (_pca == null || !_pca.IsPlaying)
             return;
         UpdateAimLine();
@@ -152,7 +159,12 @@ public class SpatialRuntime : MonoBehaviour
             var go = new GameObject("CoordinatorClient");
             _coord = go.AddComponent<CoordinatorClient>();
             _coord.SpeakPlayer = go.AddComponent<SpeakCloudPlayer>();
-            go.AddComponent<MicUtterance>();
+            _coord.Caption = go.AddComponent<VoiceCaption>();
+            var capture = go.AddComponent<PerceptionCapture>();
+            capture.CameraSource = _pca;
+            capture.Runtime = this;
+            var mic = go.AddComponent<MicUtterance>();
+            mic.Perception = capture;
             _coord.Cache = _cache;
             _coord.Store = _store;
             _coord.Chip = _chip;
@@ -280,12 +292,13 @@ public class SpatialRuntime : MonoBehaviour
     /// <c>world_hint</c>, and the capture-time <paramref name="cameraPose"/>
     /// and <paramref name="ray"/> used. The capture is always cached.
     /// </summary>
-    public bool TryCapture(out CaptureEnvelope env, out Pose cameraPose, out Ray ray)
+    public bool TryCapture(out CaptureEnvelope env, out Pose cameraPose, out Ray ray,
+        bool requireDepth = true, bool includePointing = true)
     {
         env = null;
         cameraPose = default(Pose);
         ray = default(Ray);
-        if (_pca == null || !_pca.IsPlaying || _raycast == null)
+        if (_pca == null || !_pca.IsPlaying || (requireDepth && _raycast == null))
             return false;
 
         // Capture-time state only: pose and timestamp belong to this frame.
@@ -306,7 +319,7 @@ public class SpatialRuntime : MonoBehaviour
         Vector3 direction;
         CapturePointing pointing = null;
         string hintSource;
-        if (triggerHeld && _rightAim != null)
+        if (includePointing && triggerHeld && _rightAim != null)
         {
             // Exactly the sampled controller ray, stamped with its actual
             // sample time — never the PCA image time.
@@ -357,8 +370,7 @@ public class SpatialRuntime : MonoBehaviour
         Vector3 hitPoint = default(Vector3);
         Vector3 hitNormal = default(Vector3);
         EnvironmentRaycastHit hit;
-        if (_raycast.Raycast(ray, out hit, MaxCaptureDistanceM)
-            && hit.status == EnvironmentRaycastHitStatus.Hit)
+        if (TryDepthHit(ray, out hit))
         {
             float distance = Vector3.Distance(origin, hit.point);
             if (distance < MinCaptureDistanceM)
@@ -442,6 +454,29 @@ public class SpatialRuntime : MonoBehaviour
             Honesty = honesty,
         };
         return true;
+    }
+
+    bool TryDepthHit(Ray ray, out EnvironmentRaycastHit hit)
+    {
+        hit = default;
+        if (_raycast == null) return false;
+        try
+        {
+            return _raycast.Raycast(ray, out hit, MaxCaptureDistanceM)
+                && hit.status == EnvironmentRaycastHitStatus.Hit;
+        }
+        catch (Exception) { return false; }
+    }
+
+    internal void UpdateSentGeometry(CaptureEnvelope env)
+    {
+        if (_cache.TryGet(env.FrameId, out var entry))
+        {
+            entry.CropSx = env.CropSx;
+            entry.CropSy = env.CropSy;
+            entry.CropTx = env.CropTx;
+            entry.CropTy = env.CropTy;
+        }
     }
 
     void SetupAimLine()
