@@ -23,7 +23,7 @@
         }
       }
     },
-    "error": { "enum": ["no_object", "timeout", "busy"] }
+    "error": { "enum": ["no_object", "timeout", "busy", "invalid"] }
   },
   "$defs": {
     "ulid": { "type": "string", "pattern": "^[0-7][0-9a-hjkmnp-tv-z]{25}$", "minLength": 26, "maxLength": 26 },

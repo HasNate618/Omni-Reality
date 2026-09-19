@@ -14,6 +14,8 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
+from coordinator.jobs import JobStore
+
 
 @dataclass
 class UtteranceBuffer:
@@ -50,6 +52,7 @@ class CoordinatorState:
         self.cancelled_op_ids: list[str] = []
         self.mark_sent: bool = False
         self.last_clock_skew_ns: int | None = None
+        self.jobs = JobStore()
 
     def is_session_allowed(self, incoming: str | None) -> bool:
         """True unless an established session is contradicted."""
