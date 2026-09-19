@@ -1,5 +1,4 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -27,7 +26,7 @@ public class MicUtterance : MonoBehaviour
     VoiceActivityGate _gate = new VoiceActivityGate();
     bool _manualCapture;
     bool _micAuthRequested;
-    bool _permissionResultLogged;
+    bool? _lastLoggedMicGrant;
     int _utterancePcmBytes;
 
     /// <summary>Chunks streamed this utterance (test seam).</summary>
@@ -100,16 +99,15 @@ public class MicUtterance : MonoBehaviour
     {
         if (_clip != null)
             return;
-#if UNITY_ANDROID && !UNITY_EDITOR
-        if (!_micAuthRequested)
-        {
-            _micAuthRequested = true;
-            Application.RequestUserAuthorization(UserAuthorization.Microphone);
-            StartCoroutine(LogMicPermissionOnce());
-        }
-        if (!Application.HasUserAuthorization(UserAuthorization.Microphone))
-            return;
+#if UNITY_EDITOR
+        EnsureMicClip();
+        return;
 #endif
+        MicRecordPermission.RequestOnce(ref _micAuthRequested);
+        bool granted = MicRecordPermission.IsGranted();
+        MaybeLogMicPermission(granted);
+        if (!granted)
+            return;
         EnsureMicClip();
     }
 
@@ -117,6 +115,10 @@ public class MicUtterance : MonoBehaviour
     {
         if (_clip != null)
             return;
+#if UNITY_ANDROID && !UNITY_EDITOR
+        if (!MicRecordPermission.IsGranted())
+            return;
+#endif
         try
         {
             _clip = Microphone.Start(null, true, 10, SampleRate);
@@ -131,14 +133,13 @@ public class MicUtterance : MonoBehaviour
             VoiceBootstrapLog.MicStarted();
     }
 
-    IEnumerator LogMicPermissionOnce()
+    void MaybeLogMicPermission(bool granted)
     {
-        yield return null;
-        if (_permissionResultLogged)
-            yield break;
-        _permissionResultLogged = true;
-        VoiceBootstrapLog.MicPermission(
-            Application.HasUserAuthorization(UserAuthorization.Microphone));
+        if (!MicRecordPermission.ShouldLogGrantTransition(
+                _micAuthRequested, _lastLoggedMicGrant, granted))
+            return;
+        _lastLoggedMicGrant = granted;
+        VoiceBootstrapLog.MicPermission(granted);
     }
 
     void PumpMicVad()
