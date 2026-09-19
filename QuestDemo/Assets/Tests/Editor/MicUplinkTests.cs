@@ -73,4 +73,20 @@ public class MicUplinkTests
         Assert.IsTrue(json.Contains("\"type\":\"utterance_end\""));
         Assert.IsTrue(json.Contains("\"utterance_id\":\"utt123\""));
     }
+
+    [Test]
+    public void MicUplinkUsesVoiceActivityGateThresholdAndDurations()
+    {
+        Assert.AreEqual(0.01f, MicUtterance.SilenceRms);
+        Assert.AreEqual(16000, MicUtterance.SampleRate);
+        Assert.AreEqual(1600, MicUtterance.ChunkSamples);
+        Assert.AreEqual(800, MicUtterance.SilenceEndMs);
+        Assert.AreEqual(8000, MicUtterance.MaxUtteranceMs);
+    }
+
+    [Test]
+    public void PlayerReportsPlaybackState()
+    {
+        Assert.IsNotNull(typeof(SpeakCloudPlayer).GetProperty("IsPlaying"));
+    }
 }

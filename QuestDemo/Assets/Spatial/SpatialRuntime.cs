@@ -146,14 +146,13 @@ public class SpatialRuntime : MonoBehaviour
     {
         if (string.IsNullOrEmpty(_laptopIpv4))
             return;
-        if (_pca == null || !_pca.IsPlaying)
-            return;
         if (_coord == null)
         {
             EnsurePlacementRefs();
             var go = new GameObject("CoordinatorClient");
             _coord = go.AddComponent<CoordinatorClient>();
             _coord.SpeakPlayer = go.AddComponent<SpeakCloudPlayer>();
+            go.AddComponent<MicUtterance>();
             _coord.Cache = _cache;
             _coord.Store = _store;
             _coord.Chip = _chip;
@@ -467,8 +466,23 @@ public class SpatialRuntime : MonoBehaviour
 
     void UpdateAimLine()
     {
-        if (_aimLine == null || !_aimLine.enabled)
+        if (_aimLine == null)
             return;
+        bool rightTouchConnected = false;
+        try
+        {
+            rightTouchConnected = OVRInput.IsControllerConnected(OVRInput.Controller.RTouch);
+        }
+        catch (Exception)
+        {
+            rightTouchConnected = false;
+        }
+        if (!rightTouchConnected)
+        {
+            _aimLine.enabled = false;
+            return;
+        }
+        _aimLine.enabled = true;
         bool triggerHeld = false;
         try
         {

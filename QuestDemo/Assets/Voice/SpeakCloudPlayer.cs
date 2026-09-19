@@ -14,6 +14,12 @@ public class SpeakCloudPlayer : MonoBehaviour
     AudioSource _source;
     string _activeTurnId;
 
+    /// <summary>True while cloud PCM is actively playing (barge-in / mic gate).</summary>
+    public bool IsPlaying
+    {
+        get { return _source != null && _source.isPlaying; }
+    }
+
     void Awake()
     {
         _source = GetComponent<AudioSource>();
