@@ -142,7 +142,11 @@ async def _handle_hello(ws: Any, state: CoordinatorState, message: dict) -> None
             "hello_ok",
             session_id,
             0,
-            {"session_id": session_id, "laptop_t_unix_ns": _laptop_now_ns()},
+            {
+                "session_id": session_id,
+                "laptop_t_unix_ns": _laptop_now_ns(),
+                "artifact_port": state.artifact_port,
+            },
         )
     )
     # NOTE: no mark here by design. The production Quest sequence is hello
@@ -320,29 +324,45 @@ async def handle_text(ws: Any, state: CoordinatorState, raw: object) -> None:
         await _handle_audio_chunk(ws, state, message)
     elif msg_type == "utterance_end":
         await _handle_utterance_end(ws, state, message)
+    elif msg_type == "clear_session":
+        await _handle_clear_session(ws, state, message)
     else:
         logger.debug("ignoring unhandled message type: %s", msg_type)
 
 
+async def _handle_clear_session(ws: Any, state: CoordinatorState, message: dict) -> None:
+    from coordinator.jobs import clear_jobs
+
+    clear_jobs(state.jobs, state.artifact_root)
+    payload = {"session_id": state.session_id, "generation": state.clear_generation}
+    state.clear_generation += 1
+    await ws.send(_sendable("session_cleared", state.session_id, 0, payload))
+
+
 async def handle_connection(ws: Any, state: CoordinatorState) -> None:
     """Serve one connection until it closes or the task is cancelled."""
-    if hasattr(ws, "recv"):
-        while True:
+    from coordinator.jobs import clear_jobs
+
+    try:
+        if hasattr(ws, "recv"):
+            while True:
+                try:
+                    raw = await ws.recv()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    return
+                await handle_text(ws, state, raw)
+        else:  # async-iterable socket (e.g. websockets server connection)
             try:
-                raw = await ws.recv()
+                async for raw in ws:
+                    await handle_text(ws, state, raw)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 return
-            await handle_text(ws, state, raw)
-    else:  # async-iterable socket (e.g. websockets server connection)
-        try:
-            async for raw in ws:
-                await handle_text(ws, state, raw)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            return
+    finally:
+        clear_jobs(state.jobs, state.artifact_root)
 
 
 def make_planner(kind: str, model: str | None = None):

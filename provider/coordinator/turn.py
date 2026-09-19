@@ -20,6 +20,7 @@ from jsonschema import ValidationError
 
 from coordinator.planner import MAX_OPS_PER_TURN, PlanResult
 from coordinator.session import CoordinatorState, UtteranceBuffer
+from omni.tools import accept_model_ops
 from protocol.ids import new_ulid
 from protocol.validate import validate_instance
 from voice.audio import BYTES_PER_SECOND, MIN_UTTERANCE_S
@@ -187,3 +188,84 @@ def ingest_audio_chunk(state: CoordinatorState, utterance_id: str | None, payloa
         logger.info("utterance %s over cap; dropping chunk", utterance_id)
         return
     buf.pcm.extend(pcm)
+
+
+PlaceSend = Callable[[dict], Awaitable[dict | None]]
+FinalFn = Callable[[dict], Awaitable[None]]
+
+
+def may_speak(acks: list[dict] | None, timed_out: bool) -> bool:
+    if timed_out:
+        return False
+    if acks is None:
+        return False
+    if not acks:
+        return True
+    for ack in acks:
+        status = ack.get("status")
+        if status not in ("placed", "applied"):
+            return False
+    return True
+
+
+async def freeze_and_ack(
+    *,
+    send_ops: Callable[[dict], Awaitable[None]],
+    wait_acks: Callable[[list[dict], float], Awaitable[list[dict] | None]],
+    ops: list[dict],
+    timeout_s: float = ACK_TIMEOUT_S,
+) -> list[dict]:
+    frozen = list(ops)
+    for op in frozen:
+        await send_ops(op)
+    return await wait_acks(frozen, timeout_s) or []
+
+
+def build_place_generated(*, job_id: str, turn_id: int, stage_epoch: int, target: dict) -> dict:
+    op = {
+        "op_id": new_ulid(),
+        "turn_id": turn_id,
+        "stage_epoch": stage_epoch,
+        "kind": "place_generated",
+        "drawing_id": None,
+        "job_id": job_id,
+        "target": target,
+    }
+    validate_instance("scene_op", op)
+    return op
+
+
+async def on_job_terminal(
+    state: CoordinatorState,
+    job_id: str,
+    send: PlaceSend,
+    complete_final_fn: FinalFn,
+) -> None:
+    job = state.jobs.jobs.get(job_id)
+    if job is None:
+        return
+    status = job.get("status")
+    if status not in ("ready", "failed"):
+        return
+    stage_epoch = int(job.get("stage_epoch") or state.latest_stage_epoch)
+    if stage_epoch < state.latest_stage_epoch:
+        return
+    if status == "failed":
+        await complete_final_fn({"status": "failed"})
+        return
+    turn_id = max(state.turn_id, 1)
+    target = job.get("target")
+    if not isinstance(target, dict):
+        await complete_final_fn({"status": "failed"})
+        return
+    op = build_place_generated(
+        job_id=job_id,
+        turn_id=turn_id,
+        stage_epoch=stage_epoch,
+        target=target,
+    )
+    ack = await send(op)
+    if ack is None:
+        await complete_final_fn({"status": "failed"})
+        return
+    await complete_final_fn(ack)

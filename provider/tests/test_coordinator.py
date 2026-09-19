@@ -139,6 +139,7 @@ class CoordinatorTests(unittest.TestCase):
             self.assertEqual(len(session_id), 26)
             self.assertEqual(state.session_id, session_id)
             self.assertIsInstance(hello_ok["payload"]["laptop_t_unix_ns"], int)
+            self.assertEqual(hello_ok["payload"]["artifact_port"], 8766)
 
         asyncio.run(scenario())
 

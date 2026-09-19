@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect as inspect_module
+from pathlib import Path
 from typing import Any, Callable
 
 from protocol.ids import new_ulid
@@ -184,6 +185,15 @@ def mark_failed(store: JobStore, job_id: str) -> None:
         job["status"] = "failed"
 
 
-def clear_jobs(store: JobStore) -> None:
+def clear_jobs(store: JobStore, artifact_root: Path | None = None) -> None:
+    job_ids = list(store.jobs.keys())
     store.objects.clear()
     store.jobs.clear()
+    if artifact_root is None:
+        return
+    for job_id in job_ids:
+        path = artifact_root / f"{job_id}.glb"
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass

@@ -3,7 +3,14 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from coordinator.jobs import JobStore, coordinator_may_place, handle_inspect, handle_start_generation
+from coordinator.jobs import (
+    JobStore,
+    clear_jobs,
+    coordinator_may_place,
+    handle_inspect,
+    handle_start_generation,
+    mark_ready,
+)
 from protocol.ids import new_ulid
 from protocol.validate import load_fixture, validate_instance
 
@@ -95,3 +102,11 @@ class JobStoreTests(unittest.TestCase):
 
     def test_unknown_job_may_not_place(self) -> None:
         self.assertFalse(coordinator_may_place(self.store, new_ulid()))
+
+    def test_clear_jobs_blocks_place(self) -> None:
+        job_id = new_ulid()
+        self.store.jobs[job_id] = {"job_id": job_id, "status": "queued"}
+        mark_ready(self.store, job_id)
+        self.assertTrue(coordinator_may_place(self.store, job_id))
+        clear_jobs(self.store)
+        self.assertFalse(coordinator_may_place(self.store, job_id))

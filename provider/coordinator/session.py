@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from coordinator.artifacts import ARTIFACT_PORT
 from coordinator.jobs import JobStore
 
 
@@ -53,6 +55,9 @@ class CoordinatorState:
         self.mark_sent: bool = False
         self.last_clock_skew_ns: int | None = None
         self.jobs = JobStore()
+        self.artifact_port: int = ARTIFACT_PORT
+        self.artifact_root: Path = Path(__file__).resolve().parent.parent / "artifacts" / "generated"
+        self.clear_generation: int = 1
 
     def is_session_allowed(self, incoming: str | None) -> bool:
         """True unless an established session is contradicted."""
