@@ -38,11 +38,33 @@ ops over LAN; Unity renders and ACKs. No model calls in these slices.
 - Unity side: `QuestDemo/Assets/Spatial/` (`SpatialRuntime`, `PlacementResolver`,
   `PulsingRing`, `HonestyChip`, `CoordinatorClient`, `CaptureGeometryCache`).
 
+## Voice turn (slice 3, laptop side)
+
+- Coordinator runs voice turns only with a planner:
+  `python -m coordinator.server --planner stub` (offline) or `--planner yibu`
+  (live `qwen3.8-omni-flash`, spends credit). Default `--planner mark` keeps
+  the slice-2 hardcoded mark above.
+- Quest sends `frame` (with `utterance_id`, envelope, `jpeg_b64`), ~100 ms
+  `audio_chunk`s, then `utterance_end`. Under 0.5 s of PCM → no turn.
+- Turn order: `turn_started` → planner (full response, WAV + JPEG) → at most
+  3 schema-valid `scene_op`s (list frozen first) → wait 1500 ms for ACKs →
+  one `speak` (`audio: null`). Speech claims a drawing only if every op ACKed
+  `placed`/`applied`; rejected/stale use the honesty copy; a missing ACK says
+  "I couldn't confirm placement." once, and a late ACK never speaks again.
+- `cancel {turn_id}` tombstones the turn: no further ops or speech for it.
+- Planner seam: `provider/coordinator/planner.py` (`Planner.plan` →
+  `PlanResult`). Spatial prompt/parse is Member A's `spatial_ops.parse_model_reply`
+  when present; a JSON-extract fallback stands in until then.
+- Headset-free end-to-end: `python -m tools.fake_quest --say "mark the laptop"
+  --jpeg photo.jpg` (`--reject`, `--no-ack` for honesty paths).
+- Not yet: spoken follow-up after the tool result (spec §7 step 5) is the
+  first reply's text, not a second tools-disabled call.
+
 ## How to verify
 
 - Offline (no credit, no headset): from `provider/`,
   `python -m unittest discover -s tests -v` — schema, uv-convention, stale,
-  coordinator, and send-priority tests.
+  coordinator, send-priority, and voice-turn tests.
 - Headset, slice 1: native build (XR Simulator has no PCA), plant the ring on
   a real table, walk ~90 degrees — pulse stays on the table. Then force a
   miss: chip appears, nothing floats mid-air.

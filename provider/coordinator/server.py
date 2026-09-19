@@ -2,19 +2,26 @@
 
 Handles WebSocket `hello`/`hello_ok`, `ping`/`pong`, and emits exactly one
 laptop-authored hardcoded `scene_op` mark after the first valid `frame`.
+
+With a planner on the state (`--planner stub|yibu`), frames and
+`audio_chunk`s feed utterances instead, and `utterance_end` runs a voice
+turn (coordinator/turn.py). Only the yibu planner calls a model.
 `hello` alone never emits a mark: the production Quest sequence is hello
 first and a real frame later, and only the frame carries a resolvable
 frame_id/stage_epoch for the mark target.
 
-Offline by construction: this module never imports yibuapi, never reads
-any API key, never invokes a model, and never produces speech. Outbound
+This module never imports yibuapi or reads an API key itself; the
+default (no planner) path never invokes a model or produces speech. Outbound
 frames are always v1 JSON text. Inbound frames are validated defensively;
 invalid input is logged and ignored without crashing the connection.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import time
@@ -22,7 +29,8 @@ from typing import Any
 
 from jsonschema import ValidationError
 
-from coordinator.session import CoordinatorState
+from coordinator.session import CoordinatorState, UtteranceBuffer
+from coordinator.turn import cancel_turn, ingest_audio_chunk, start_turn
 from protocol.ids import new_ulid
 from protocol.validate import validate_instance
 
@@ -43,6 +51,7 @@ def _sendable(
     session_id: str | None,
     turn_id: int,
     payload: dict,
+    utterance_id: str | None = None,
 ) -> str:
     """Build a validated v1 JSON text wrapper frame."""
     message = {
@@ -50,7 +59,7 @@ def _sendable(
         "type": msg_type,
         "session_id": session_id,
         "turn_id": turn_id,
-        "utterance_id": None,
+        "utterance_id": utterance_id,
         "payload": payload,
     }
     validate_instance("message", message)
@@ -167,6 +176,9 @@ async def _handle_frame(ws: Any, state: CoordinatorState, message: dict) -> None
         return
     state.accept_envelope(envelope)
     _check_clock_skew(state, envelope.get("t_unix_ns"))
+    if state.planner is not None:
+        _attach_frame_to_utterance(state, message, envelope)
+        return
     if not state.mark_sent:
         await _send_mark(
             ws,
@@ -174,6 +186,50 @@ async def _handle_frame(ws: Any, state: CoordinatorState, message: dict) -> None
             stage_epoch=envelope["stage_epoch"],
             frame_id=envelope["frame_id"],
         )
+
+
+def _attach_frame_to_utterance(state: CoordinatorState, message: dict, envelope: dict) -> None:
+    """Keep the latest envelope + JPEG for the frame's open utterance."""
+    payload = message["payload"]
+    utterance_id = payload.get("utterance_id") or message["utterance_id"]
+    if not isinstance(utterance_id, str):
+        logger.info("frame without utterance_id; envelope kept, no utterance")
+        return
+    jpeg = None
+    if isinstance(payload.get("jpeg_b64"), str):
+        try:
+            jpeg = base64.b64decode(payload["jpeg_b64"], validate=True)
+        except (binascii.Error, ValueError):
+            logger.info("ignoring bad jpeg_b64 on frame")
+    buf = state.utterances.setdefault(utterance_id, UtteranceBuffer())
+    buf.envelope = envelope
+    buf.jpeg = jpeg
+
+
+def _turn_sender(ws: Any, state: CoordinatorState):
+    async def send(msg_type: str, turn_id: int, payload: dict, utterance_id: str | None = None) -> None:
+        try:
+            await ws.send(_sendable(msg_type, state.session_id, turn_id, payload, utterance_id))
+        except Exception:  # socket gone: drawings stay on Quest, nothing to retry
+            logger.info("send %s failed; connection closed?", msg_type)
+
+    return send
+
+
+async def _handle_audio_chunk(ws: Any, state: CoordinatorState, message: dict) -> None:
+    if state.planner is None:
+        return
+    ingest_audio_chunk(state, message["utterance_id"], message["payload"])
+
+
+async def _handle_utterance_end(ws: Any, state: CoordinatorState, message: dict) -> None:
+    if state.planner is None:
+        return
+    utterance_id = message["payload"].get("utterance_id") or message["utterance_id"]
+    if not isinstance(utterance_id, str):
+        logger.info("ignoring utterance_end without utterance_id")
+        return
+    start_turn(state, _turn_sender(ws, state), utterance_id)
 
 
 async def _handle_ack(ws: Any, state: CoordinatorState, message: dict) -> None:
@@ -203,6 +259,11 @@ async def _handle_cancel(ws: Any, state: CoordinatorState, message: dict) -> Non
     payload = message["payload"]
     if not isinstance(payload, dict):
         logger.info("ignoring cancel with non-object payload")
+        return
+    turn_id = payload.get("turn_id")
+    if isinstance(turn_id, int) and not isinstance(turn_id, bool) and "op_id" not in payload:
+        cancel_turn(state, turn_id)
+        logger.info("cancel turn=%d", turn_id)
         return
     op_id = payload.get("op_id")
     if not isinstance(op_id, str):
@@ -255,6 +316,10 @@ async def handle_text(ws: Any, state: CoordinatorState, raw: object) -> None:
         await _handle_ack(ws, state, message)
     elif msg_type == "cancel":
         await _handle_cancel(ws, state, message)
+    elif msg_type == "audio_chunk":
+        await _handle_audio_chunk(ws, state, message)
+    elif msg_type == "utterance_end":
+        await _handle_utterance_end(ws, state, message)
     else:
         logger.debug("ignoring unhandled message type: %s", msg_type)
 
@@ -280,18 +345,45 @@ async def handle_connection(ws: Any, state: CoordinatorState) -> None:
             return
 
 
-async def run_server(host: str = "0.0.0.0", port: int = 8765) -> None:
+def make_planner(kind: str, model: str | None = None):
+    """None (slice-2 hardcoded mark), a StubPlanner, or a live YibuPlanner."""
+    if kind == "mark":
+        return None
+    from coordinator.planner import StubPlanner, YibuPlanner
+
+    if kind == "stub":
+        return StubPlanner()
+    return YibuPlanner(model=model) if model else YibuPlanner()
+
+
+async def run_server(
+    host: str = "0.0.0.0",
+    port: int = 8765,
+    planner_kind: str = "mark",
+    model: str | None = None,
+) -> None:
     """Bind the coordinator WebSocket server (CLI: python -m coordinator.server)."""
     import websockets
 
     async def _serve_one(ws) -> None:
-        await handle_connection(ws, CoordinatorState())
+        await handle_connection(ws, CoordinatorState(planner=make_planner(planner_kind, model)))
 
     async with websockets.serve(_serve_one, host, port):
-        logger.info("coordinator listening on %s:%d", host, port)
+        logger.info("coordinator listening on %s:%d (planner=%s)", host, port, planner_kind)
         await asyncio.Future()  # serve forever
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Omni-Reality LAN coordinator")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--planner",
+        choices=["mark", "stub", "yibu"],
+        default="mark",
+        help="mark: slice-2 hardcoded mark (default); stub: offline voice turns; yibu: live model (spends credit)",
+    )
+    parser.add_argument("--model", help="yibu model id (default qwen3.8-omni-flash)")
+    args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(run_server())
+    asyncio.run(run_server(args.host, args.port, args.planner, args.model))

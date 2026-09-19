@@ -10,11 +10,37 @@ Fencing rules:
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class UtteranceBuffer:
+    """Mic PCM plus the frame captured for one open utterance."""
+
+    pcm: bytearray = field(default_factory=bytearray)
+    jpeg: bytes | None = None
+    envelope: dict | None = None
+
 
 class CoordinatorState:
-    """Mutable state for one coordinator connection."""
+    """Mutable state for one coordinator connection.
 
-    def __init__(self) -> None:
+    `planner` None keeps the slice-2 behaviour (one hardcoded mark on the
+    first frame). With a planner, frames feed utterances and voice turns
+    run instead.
+    """
+
+    def __init__(self, planner: Any = None) -> None:
+        self.planner = planner
+        self.utterances: dict[str, UtteranceBuffer] = {}
+        self.max_utterance_bytes: int = 30 * 16000 * 2  # 30 s cap
+        self.turn_tasks: dict[int, asyncio.Task] = {}
+        self.cancelled_turns: set[int] = set()
+        self.ops_closed: dict[int, list[str]] = {}
+        self.ack_events: dict[str, asyncio.Event] = {}
+        self.context: list[dict] = []
         self.session_id: str | None = None
         self.turn_id: int = 0
         self.latest_stage_epoch: int = 0
@@ -44,6 +70,9 @@ class CoordinatorState:
         """Mark a pending op complete (Task 7 ACK bookkeeping)."""
         self.pending_ops.pop(op_id, None)
         self.completed_ops[op_id] = ack
+        event = self.ack_events.pop(op_id, None)
+        if event is not None:
+            event.set()
 
     def cancel_op(self, op_id: str) -> None:
         """Record a Quest cancel for a pending op; it is never retried."""
