@@ -5,6 +5,7 @@ short working context) into spoken text plus at most 3 ModelSceneOps. The
 turn loop never sees prompts or raw model output, only a PlanResult.
 
 - StubPlanner: offline, canned ops, for tests and fake-Quest runs.
+- VoiceStubPlanner: offline audio-only turns, empty ops, transport test caption.
 - YibuPlanner: live yibu omni call over HTTP. Prompting/parsing for spatial
   ops is Member A's lane; when `spatial_ops.parse_model_reply(text) ->
   (say, heard, ops)` exists it is used, otherwise a minimal JSON extractor stands in.
@@ -125,6 +126,20 @@ class StubPlanner:
         )
 
 
+VOICE_STUB_CAPTION = (
+    "Voice transport check (test tone — not Omni speech)."
+)
+
+
+class VoiceStubPlanner:
+    """Offline headset transport proof: caption + tone synthesizer, no ops."""
+
+    text: str = VOICE_STUB_CAPTION
+
+    async def plan(self, *, pcm, jpeg, envelope, context) -> PlanResult:
+        return PlanResult(ops=[], text=self.text, heard="(voice-stub)")
+
+
 def _centre_mark(envelope: dict | None) -> list[dict]:
     if envelope is None:
         return []
@@ -166,6 +181,10 @@ Rules:
   {"kind": "revise_procedural", "drawing_id": "...", "action":
   "enlarge"|"shrink"|"rotate_cw"|"rotate_ccw"|"nudge"|"remove",
   "direction": "left"|"right"|"up"|"down"|"forward"|"back" (nudge only)}."""
+
+VOICE_ONLY_SYSTEM_PROMPT = """You are a voice assistant on a mixed-reality headset.
+Listen to the user's speech and reply with one or two short spoken sentences in plain text.
+Do not use JSON, markdown, drawing instructions, or spatial operations."""
 
 
 def _extract_json_object(text: str) -> dict | None:
@@ -209,6 +228,7 @@ class YibuPlanner:
         purpose: str = "voice-turn",
         max_tokens: int = 256,
         audio_as: str = "data_url",
+        voice_only: bool = False,
         complete_fn: Any | None = None,
         execute_fn: Any | None = None,
     ) -> None:
@@ -216,6 +236,7 @@ class YibuPlanner:
         self.purpose = purpose
         self.max_tokens = max_tokens
         self.audio_as = audio_as
+        self.voice_only = voice_only
         # Injected in tests; live default (network only inside plan()).
         self._complete_fn = complete_fn or make_live_complete_fn(self)
         self._execute_fn = execute_fn
@@ -287,6 +308,9 @@ class YibuPlanner:
         return text, record
 
     async def plan(self, *, pcm, jpeg, envelope, context) -> PlanResult:
+        if self.voice_only:
+            return await self._plan_voice_only(pcm=pcm, context=context)
+
         from voice.audio import build_voice_messages, pcm_to_wav_bytes
 
         history = "\n".join(f"- user: {c.get('heard')} / you: {c.get('said')}" for c in context[-8:])
@@ -343,6 +367,36 @@ class YibuPlanner:
             heard=heard,
             audit_id=None,
             proposed_op_count=len(collected),
+        )
+
+    async def _plan_voice_only(self, *, pcm: bytes, context: list[dict]) -> PlanResult:
+        from voice.audio import build_voice_messages, pcm_to_wav_bytes
+        from yibu_http import extract_text
+
+        history = "\n".join(f"- user: {c.get('heard')} / you: {c.get('said')}" for c in context[-8:])
+        prompt = "Respond to the user's speech in the audio."
+        if history:
+            prompt += "\nRecent turns:\n" + history
+        messages = build_voice_messages(
+            prompt,
+            wav=pcm_to_wav_bytes(pcm),
+            jpeg=None,
+            system=VOICE_ONLY_SYSTEM_PROMPT,
+            audio_as=self.audio_as,
+        )
+        started = time.monotonic()
+        response = await self._complete_fn(messages, False)
+        text = extract_text(response)
+        latency_ms = int((time.monotonic() - started) * 1000)
+        say = text.strip()
+        audit_id = response.get("id") if isinstance(response, dict) else None
+        return PlanResult(
+            ops=[],
+            text=say,
+            latency_ms=latency_ms,
+            heard=say or None,
+            audit_id=audit_id,
+            proposed_op_count=0,
         )
 
 

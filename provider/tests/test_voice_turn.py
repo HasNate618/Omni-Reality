@@ -175,6 +175,31 @@ class SpeakPcmTests(unittest.TestCase):
         self.assertIsNone(payload["audio"])
         self.assertEqual(state.context[-1].get("voice_gate"), "degraded")
 
+    def test_voice_only_turn_skips_bind_tools(self) -> None:
+        bind_calls: list[str] = []
+
+        async def complete_fn(_messages, tools_enabled):
+            return _text_response("Hello.")
+
+        planner = YibuPlanner(voice_only=True, complete_fn=complete_fn)
+
+        def bind_tools(**kwargs):
+            bind_calls.append("bind")
+
+        planner.bind_tools = bind_tools  # type: ignore[method-assign]
+
+        state = CoordinatorState(planner=planner)
+        state.synthesizer = lambda _text: b"\x00\x00" * 400
+        sent: list[tuple] = []
+
+        async def send(mtype, _turn_id, payload, _utterance_id):
+            sent.append((mtype, payload))
+
+        asyncio.run(turn._run_turn(state, send, 1, "u1", _pcm_buffer()))
+        self.assertEqual(bind_calls, [])
+        kinds = [k for k, _ in sent]
+        self.assertEqual(kinds, ["turn_started", "speak"])
+
 
 if __name__ == "__main__":
     unittest.main()

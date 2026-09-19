@@ -110,7 +110,8 @@ async def _run_turn(
 ) -> None:
     await send("turn_started", turn_id, {"utterance_id": utterance_id, "turn_id": turn_id}, utterance_id)
     bind = getattr(state.planner, "bind_tools", None)
-    if bind is not None:
+    voice_only = getattr(state.planner, "voice_only", False)
+    if bind is not None and not voice_only:
         try:
             bind(
                 jobs=state.jobs,

@@ -365,15 +365,30 @@ async def handle_connection(ws: Any, state: CoordinatorState) -> None:
         clear_jobs(state.jobs, state.artifact_root)
 
 
-def make_planner(kind: str, model: str | None = None):
-    """None (slice-2 hardcoded mark), a StubPlanner, or a live YibuPlanner."""
+def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if getattr(args, "voice_only", False) and args.planner != "yibu":
+        parser.error("--voice-only requires --planner yibu")
+
+
+def make_planner(
+    kind: str,
+    model: str | None = None,
+    *,
+    voice_only: bool = False,
+):
+    """None (slice-2 hardcoded mark), stub/voice-stub offline planners, or Yibu."""
     if kind == "mark":
         return None
-    from coordinator.planner import StubPlanner, YibuPlanner
+    from coordinator.planner import StubPlanner, VoiceStubPlanner, YibuPlanner
 
     if kind == "stub":
         return StubPlanner()
-    return YibuPlanner(model=model) if model else YibuPlanner()
+    if kind == "voice-stub":
+        return VoiceStubPlanner()
+    purpose = "voice-only-turn" if voice_only else "voice-turn"
+    if model:
+        return YibuPlanner(model=model, voice_only=voice_only, purpose=purpose)
+    return YibuPlanner(voice_only=voice_only, purpose=purpose)
 
 
 async def run_server(
@@ -381,18 +396,30 @@ async def run_server(
     port: int = 8765,
     planner_kind: str = "mark",
     model: str | None = None,
+    voice_only: bool = False,
 ) -> None:
     """Bind the coordinator WebSocket server (CLI: python -m coordinator.server)."""
     import websockets
 
     async def _serve_one(ws) -> None:
-        state = CoordinatorState(planner=make_planner(planner_kind, model))
-        if planner_kind == "yibu":
+        state = CoordinatorState(
+            planner=make_planner(planner_kind, model, voice_only=voice_only)
+        )
+        if planner_kind == "voice-stub":
+            from voice.test_tone import make_test_tone
+
+            async def _tone_synth(_text: str) -> bytes:
+                return make_test_tone()
+
+            state.synthesizer = _tone_synth
+        elif planner_kind == "yibu":
             # Live cloud speech for speak.audio (spends credit per turn).
             from voice.cloud_speech import synthesize_line
 
+            speak_purpose = "voice-only-speak" if voice_only else "voice-speak"
+
             async def _live_synth(text: str) -> bytes | None:
-                return await synthesize_line(text=text, purpose="voice-speak")
+                return await synthesize_line(text=text, purpose=speak_purpose)
 
             state.synthesizer = _live_synth
         await handle_connection(ws, state)
@@ -408,11 +435,28 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
         "--planner",
-        choices=["mark", "stub", "yibu"],
+        choices=["mark", "stub", "yibu", "voice-stub"],
         default="mark",
-        help="mark: slice-2 hardcoded mark (default); stub: offline voice turns; yibu: live model (spends credit)",
+        help=(
+            "mark: slice-2 hardcoded mark (default); stub: offline voice turns; "
+            "voice-stub: offline transport tone; yibu: live model (spends credit)"
+        ),
     )
     parser.add_argument("--model", help="yibu model id (default qwen3.8-omni-flash)")
+    parser.add_argument(
+        "--voice-only",
+        action="store_true",
+        help="audio-only yibu turns (no image/tools); requires --planner yibu",
+    )
     args = parser.parse_args()
+    _validate_cli_args(parser, args)
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(run_server(args.host, args.port, args.planner, args.model))
+    asyncio.run(
+        run_server(
+            args.host,
+            args.port,
+            args.planner,
+            args.model,
+            voice_only=args.voice_only,
+        )
+    )
