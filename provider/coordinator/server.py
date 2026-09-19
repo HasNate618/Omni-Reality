@@ -280,6 +280,11 @@ async def _handle_utterance_end(ws: Any, state: CoordinatorState, message: dict)
     buf = state.utterances.get(utterance_id)
     pcm_bytes = len(buf.pcm) if buf is not None else 0
     utterance_end_accepted(pcm_bytes)
+    if buf is not None and pcm_bytes:
+        from voice.echo_gate import peak_rms, voiced_windows
+        logger.info("VoiceBootstrap component=coordinator event=utterance_levels "
+                    "voiced=%d peak_rms=%.4f",
+                    voiced_windows(bytes(buf.pcm)), peak_rms(bytes(buf.pcm)))
     if buf is not None and len(buf.pcm) < MIN_UTTERANCE_S * BYTES_PER_SECOND:
         logger.info("utterance %s too short (%d bytes); no turn", utterance_id, len(buf.pcm))
         return

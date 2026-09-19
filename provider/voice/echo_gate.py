@@ -12,7 +12,7 @@ import struct
 
 WINDOW = 1600  # 100 ms at 16 kHz mono s16le
 VOICED_RMS = 0.01
-MIN_VOICED_WINDOWS = 3
+MIN_VOICED_WINDOWS = 2
 BLOCK = 320  # 20 ms energy blocks for the envelope correlator
 MAX_LAG_BLOCKS = 50  # +-1 s of playback/mic misalignment
 ECHO_SCORE_DROP = 0.55
@@ -34,6 +34,14 @@ def voiced_windows(pcm: bytes) -> int:
         return 0
     return sum(1 for off in range(0, len(pcm) // 2 - WINDOW + 1, WINDOW)
                if window_rms(pcm, off, WINDOW) >= VOICED_RMS)
+
+
+def peak_rms(pcm: bytes) -> float:
+    """Loudest 100 ms window. Tuning data only, never content."""
+    if len(pcm) < WINDOW * 2:
+        return 0.0
+    return max(window_rms(pcm, off, WINDOW)
+               for off in range(0, len(pcm) // 2 - WINDOW + 1, WINDOW))
 
 
 def envelope(data: bytes) -> list[float]:
