@@ -18,7 +18,16 @@ from coordinator.session import CoordinatorState, UtteranceBuffer
 from voice.audio import BYTES_PER_SECOND
 from yibu_audit import ApiKeyConfigurationError, ensure_env_api_key
 
-PCM_0_6S = b"\x00\x01" * int(0.6 * BYTES_PER_SECOND // 2)
+def _voiced_pcm() -> bytes:
+    import math as _math
+    import struct as _struct
+    n = int(0.6 * BYTES_PER_SECOND // 2)
+    return b"".join(_struct.pack("<h", int(8000 * _math.sin(2 * _math.pi * 300 * i / 16000)))
+                       for i in range(n))
+
+
+# Speech-like energy: the server no-speech guard drops near-silent audio.
+PCM_0_6S = _voiced_pcm()
 
 
 def _utterance_buffer() -> UtteranceBuffer:

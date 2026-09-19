@@ -77,7 +77,9 @@ class LiveSession:
         try:
             await ws.send(json.dumps({"setup": {
                 "model": f"models/{self._model}",
-                "generationConfig": {"responseModalities": ["AUDIO"], "temperature": 0.2},
+                "generationConfig": {"responseModalities": ["AUDIO"], "temperature": 0.2,
+                    "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {
+                        "voiceName": "Kore"}}}},
                 "outputAudioTranscription": {},
                 "inputAudioTranscription": {},
             }}))

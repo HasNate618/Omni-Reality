@@ -16,7 +16,15 @@ from yibu_audit import ApiKeyConfigurationError
 
 # ffmpeg-generated red 16x12 square, not camera/user media.
 JPEG = base64.b64decode('/9j/4AAQSkZJRgABAgAAAQABAAD//gAQTGF2YzYyLjI4LjEwMgD/2wBDAAgEBAQEBAUFBQUFBQYGBgYGBgYGBgYGBgYHBwcICAgHBwcGBgcHCAgICAkJCQgICAgJCQoKCgwMCwsODg4RERT/xABMAAEBAAAAAAAAAAAAAAAAAAAABgEBAQAAAAAAAAAAAAAAAAAABgcQAQAAAAAAAAAAAAAAAAAAAAARAQAAAAAAAAAAAAAAAAAAAAD/wAARCAAMABADASIAAhEAAxEA/9oADAMBAAIRAxEAPwCLAE1/f//Z')
-PCM = b'\x00\x01' * 9600
+def _voiced_pcm() -> bytes:
+    import math as _math
+    import struct as _struct
+    return b"".join(_struct.pack("<h", int(8000 * _math.sin(2 * _math.pi * 300 * i / 16000)))
+                       for i in range(int(16000 * 0.6)))
+
+
+# Speech-like energy: near-silent fixtures would (correctly) trip no_speech.
+PCM = _voiced_pcm()
 
 
 def envelope():
@@ -202,6 +210,37 @@ class PerceptionServerTests(unittest.IsolatedAsyncioTestCase):
         await self.frame()
         await self.frame(jpeg=b'bad')
         self.assertEqual(self.state.utterances['u1'].jpeg, JPEG)
+
+    async def test_single_blip_never_becomes_a_turn(self):
+        import struct
+        import time as _time
+        blip = bytearray(b"\x00\x00" * 1600 * 11)
+        blip += struct.pack("<h", 20000) * 1600
+        self.assertGreaterEqual(len(blip), 16000)  # passes length, must fail voiced
+        await self.audio(pcm=bytes(blip))
+        await self.frame()
+        await self.finish(complete=False)
+        kinds = [m['type'] for m in self.sent]
+        self.assertNotIn('turn_started', kinds)
+        self.assertIn('stop_speak', kinds)
+        live = self.live()
+        self.assertTrue(live is None or live.image_turns == [])
+
+    async def test_echo_of_just_played_reply_drops_silently(self):
+        import time as _time
+        from tests.test_echo_gate import tone
+        played = tone(6.0)
+        self.state.last_speak_pcm = played
+        self.state.last_speak_at = _time.monotonic()
+        heard = played[-16000 * 2:]
+        await self.audio(pcm=heard)
+        await self.frame()
+        await self.finish(complete=False)
+        kinds = [m['type'] for m in self.sent]
+        self.assertNotIn('turn_started', kinds)
+        self.assertIn('stop_speak', kinds)
+        live = self.live()
+        self.assertTrue(live is None or live.image_turns == [])
 
     async def test_too_short_never_calls_session(self):
         await self.audio(pcm=b'\0' * 100)

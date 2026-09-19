@@ -77,6 +77,12 @@ Session connect failure, mid-turn socket loss, image rejection, and
 empty replies all produce the existing honest recovery lines and
 visible recovery hints, never invented vision and never a silent stall.
 A turn with no reply within 45 s fails visibly and frees the mic gate.
+Blips (under three voiced 100 ms windows) and speaker echo (envelope
+correlation against the just-played reply) never become turns: the
+utterance drops with `utterance_dropped` plus the echo score, and a
+silent `stop_speak` releases the Quest mic gate with no caption and no
+model call. One fixed Live voice (`Kore`) so the speaker never changes
+mid-conversation.
 Logs carry enums, counts, dimensions, durations, and exception classes
 only.
 

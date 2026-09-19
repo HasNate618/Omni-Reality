@@ -217,9 +217,14 @@ async def _run_turn(
     audio_bytes = 0
     if isinstance(audio_block, dict):
         try:
-            audio_bytes = len(base64.b64decode(audio_block.get("data_b64") or "", validate=True))
+            pcm_out = base64.b64decode(audio_block.get("data_b64") or "", validate=True)
+            audio_bytes = len(pcm_out)
         except (binascii.Error, ValueError):
-            audio_bytes = 0
+            pcm_out = b""
+        if pcm_out:
+            import time as _time
+            state.last_speak_pcm = bytes(pcm_out)
+            state.last_speak_at = _time.monotonic()
     synth_result(turn_id=turn_id, voice_gate=voice_gate, audio_bytes=audio_bytes)
     await send(
         "speak", turn_id,

@@ -280,6 +280,11 @@ async def _handle_utterance_end(ws: Any, state: CoordinatorState, message: dict)
     buf = state.utterances.get(utterance_id)
     pcm_bytes = len(buf.pcm) if buf is not None else 0
     utterance_end_accepted(pcm_bytes)
+    if buf is not None and len(buf.pcm) < MIN_UTTERANCE_S * BYTES_PER_SECOND:
+        logger.info("utterance %s too short (%d bytes); no turn", utterance_id, len(buf.pcm))
+        return
+    if buf is not None and _drop_phantom(state, _turn_sender(ws, state), utterance_id, buf):
+        return
     if _live_mode(state):
         _start_live_utterance(state, _turn_sender(ws, state), utterance_id)
         return
@@ -363,6 +368,30 @@ async def _handle_cancel(ws: Any, state: CoordinatorState, message: dict) -> Non
         return
     state.cancel_op(op_id)
     logger.info("cancel op=%s", op_id)
+
+
+def _drop_phantom(state: CoordinatorState, send: Any, utterance_id: str, buf: Any) -> bool:
+    """Blips and speaker echo never become turns (no model call, no chatter)."""
+    from voice.echo_gate import should_drop
+    drop, reason, score = should_drop(
+        utterance_pcm=bytes(buf.pcm), last_speak_pcm=state.last_speak_pcm,
+        speak_sent_at=state.last_speak_at or None, utterance_end_at=time.monotonic())
+    if not drop:
+        return False
+    logger.info("VoiceBootstrap component=coordinator event=utterance_dropped "
+                "reason=%s echo_score=%.2f", reason, score)
+    state.utterances.pop(utterance_id, None)
+    state.closed_utterances.add(utterance_id)
+    # stop_speak releases the Quest mic gate silently: no caption, no tone.
+    asyncio.create_task(_silent_drop(state, send, utterance_id))
+    return True
+
+
+async def _silent_drop(state: CoordinatorState, send: Any, utterance_id: str) -> None:
+    try:
+        await send("stop_speak", state.turn_id, {"turn_id": state.turn_id}, utterance_id)
+    except Exception:
+        pass
 
 
 async def _close_live(state: CoordinatorState) -> None:

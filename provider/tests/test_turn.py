@@ -21,7 +21,15 @@ from tests.test_coordinator import DummyWs, make_hello, wait_for
 from voice.audio import pcm_to_wav_bytes, read_wav_pcm
 
 UTT = "01k5j8g0038q3m7b2d6h9n4r5v"
-ONE_SECOND = b"\x01\x00" * 16000
+def _voiced_second() -> bytes:
+    import math as _math
+    import struct as _struct
+    return b"".join(_struct.pack("<h", int(8000 * _math.sin(2 * _math.pi * 300 * i / 16000)))
+                       for i in range(16000))
+
+
+# Speech-like energy: the server no-speech guard drops near-silent audio.
+ONE_SECOND = _voiced_second()
 
 
 def msg(msg_type: str, payload: dict, utterance_id: str | None = UTT, turn_id: int = 0) -> dict:

@@ -65,6 +65,10 @@ class CoordinatorState:
         self.live: Any | None = None
         self._live_turn: Any | None = None
         self._live_last_totals: dict[str, int] = {}
+        # Last audio actually played on Quest (16 kHz mono s16le) + send time.
+        # Feeds the echo gate: the mic re-hearing our own reply is dropped.
+        self.last_speak_pcm: bytes | None = None
+        self.last_speak_at: float = 0.0
         self.artifact_port: int = ARTIFACT_PORT
         self.artifact_root: Path = Path(__file__).resolve().parent.parent / "artifacts" / "generated"
         self.clear_generation: int = 1

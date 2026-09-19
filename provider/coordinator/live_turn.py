@@ -40,6 +40,7 @@ class _Turn:
         self.tombstoned = False
         self.pending: set = set()
         self.baseline: dict[str, int] = {}
+        self.audio_out = bytearray()
         self.started = time.monotonic()
         self.last_usage: dict[str, int] = {}
         self.usage_delta: dict[str, int] = {}
@@ -164,6 +165,7 @@ async def _emit_chunk(turn: _Turn, window24k: bytes) -> None:
         return
     if turn.tombstoned:
         return
+    turn.audio_out.extend(pcm16k)
     payload = {"turn_id": turn.turn_id, "seq": turn.seq,
                "audio": {"encoding": "pcm_s16le", "sample_rate": 16000,
                          "channels": 1,
@@ -225,6 +227,10 @@ async def _finish_turn(state: CoordinatorState, turn: _Turn) -> None:
         task.add_done_callback(turn.pending.discard)
     if turn.pending:
         await asyncio.gather(*list(turn.pending), return_exceptions=True)
+    if turn.audio_out and not turn.tombstoned:
+        import time as _time
+        state.last_speak_pcm = bytes(turn.audio_out)
+        state.last_speak_at = _time.monotonic()
     if not turn.tombstoned:
         text = "".join(turn.said).strip()
         gate = "passed" if turn.seq > 0 else "failed"
