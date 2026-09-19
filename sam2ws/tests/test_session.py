@@ -18,6 +18,7 @@ class FakePredictor:
     def __init__(self):
         self.inits = []
         self.points = []
+        self.masks = []
 
     def init_state(self, video_path, **kw):
         import torch
@@ -29,6 +30,10 @@ class FakePredictor:
 
     def add_new_points_or_box(self, state, frame_idx, obj_id, points, labels):
         self.points.append((frame_idx, obj_id, list(points), list(labels)))
+        return state, [0], [True]
+
+    def add_new_mask(self, state, frame_idx, obj_id, mask):
+        self.masks.append((frame_idx, obj_id))
         return state, [0], [True]
 
     def propagate_in_video(self, state, start_frame_idx=None,
@@ -63,6 +68,29 @@ class SessionTest(unittest.TestCase):
             s.click(4, 2, 2, 1, 1)
             self.assertEqual(s.predictor.points[-1][0], 3)
 
+    def test_slide_carries_masks_forward(self):
+        import torch
+        from sam2ws.session import TrackingSession
+
+        class YieldingFake(FakePredictor):
+            def propagate_in_video(self, state, start_frame_idx=None,
+                                   max_frame_num_to_track=None):
+                for k in range(5):
+                    yield (start_frame_idx or 0) + k, [1], \
+                        torch.zeros(1, 1, 8, 8) + 5.0
+
+        with tempfile.TemporaryDirectory() as d:
+            s = TrackingSession(YieldingFake(), d, window=4, memory=7)
+            for _ in range(4):
+                s.ingest(JPEG, 8, 8)
+            s.click(0, 1, 1, 1, 1)
+            s.ingest(JPEG, 8, 8)  # slide: click(0) evicted, mask carried
+            self.assertEqual(len(s.predictor.masks), 1)
+            self.assertEqual(s.predictor.masks[0][1], 1)
+            out = s.masks_for_latest()
+            self.assertEqual(len(out), 1)
+            self.assertEqual(out[0][0], 1)
+
     def test_masks_for_latest_parses_yield(self):
         import torch
         from sam2ws.session import TrackingSession
@@ -70,7 +98,9 @@ class SessionTest(unittest.TestCase):
         class YieldingFake(FakePredictor):
             def propagate_in_video(self, state, start_frame_idx=None,
                                    max_frame_num_to_track=None):
-                yield 2, [1], torch.zeros(1, 1, 8, 8) + 5.0
+                for k in range(5):
+                    yield (start_frame_idx or 0) + k, [1], \
+                        torch.zeros(1, 1, 8, 8) + 5.0
 
         with tempfile.TemporaryDirectory() as d:
             s = TrackingSession(YieldingFake(), d, window=4, memory=7)

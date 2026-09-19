@@ -28,6 +28,8 @@ class TrackingSession:
         os.makedirs(work_dir, exist_ok=True)
         self._frames = []  # absolute jpeg paths, oldest first, contiguous idx
         self._clicks = []  # (global_idx, x, y, label, obj_id)
+        self._obj_ids = set()
+        self._last_masks = {}  # obj_id -> bool mask at latest computed frame
         self._base = 0  # global index of _frames[0]
         self._state = None
         self._last_wh = (0, 0)
@@ -72,6 +74,38 @@ class TrackingSession:
         except Exception:
             return False
 
+    def _carry_masks(self):
+        """Latest bool mask per object, for re-seeding across a slide.
+
+        Primary source is the cache from the last masks_for_latest() call
+        (no predictor call, no fragile mid-stream propagate). Fallback is a
+        single-frame re-verify AT the latest frame, which always carries an
+        input: starting propagate before the first input frame is an
+        upstream failure mode (bf16/fp32 mismatch in memory attention).
+        """
+        if self._last_masks:
+            return list(self._last_masks.items())
+        if not self._obj_ids:
+            return []
+        latest = self._base + len(self._frames) - 1
+        carry = {}
+        try:
+            for frame_idx, obj_ids, video_res_masks in \
+                    self.predictor.propagate_in_video(
+                        self._state,
+                        start_frame_idx=latest - self._base,
+                        max_frame_num_to_track=1):
+                if frame_idx != latest - self._base:
+                    continue
+                arr = video_res_masks.detach().cpu()
+                for oid, logits in zip(obj_ids, arr):
+                    carry[oid] = (logits.squeeze().numpy() > 0.0)
+        except Exception as e:  # noqa: BLE001
+            import traceback as _tb
+            _tb.print_exc()
+            return []
+        return list(carry.items())
+
     def ingest(self, jpeg_bytes, w, h):
         self._last_wh = (w, h)
         idx = self._base + len(self._frames)
@@ -81,18 +115,29 @@ class TrackingSession:
         self._frames.append(path)
         if self._state is None:
             self._boot()
-        elif len(self._frames) > self.window:
-            drop = len(self._frames) - self.window
-            for p in self._frames[:drop]:
-                if os.path.exists(p):
-                    os.remove(p)
-            self._frames = self._frames[drop:]
-            self._base += drop
-            self._clicks = [(fi, x, y, l, o) for (fi, x, y, l, o) in self._clicks
-                            if fi >= self._base]
-            self._boot()
-        elif not self._try_append(jpeg_bytes):
-            self._boot()
+        else:
+            if not self._try_append(jpeg_bytes):
+                self._boot()
+            if len(self._frames) > self.window:
+                carry = self._carry_masks()
+                drop = len(self._frames) - self.window
+                for p in self._frames[:drop]:
+                    if os.path.exists(p):
+                        os.remove(p)
+                self._frames = self._frames[drop:]
+                self._base += drop
+                self._clicks = [(fi, x, y, l, o) for (fi, x, y, l, o)
+                                in self._clicks if fi >= self._base]
+                self._boot()
+                for oid, mask in carry:
+                    try:
+                        self.predictor.add_new_mask(
+                            self._state, len(self._frames) - 1, oid,
+                            torch.from_numpy(np.ascontiguousarray(mask)))
+                        self._obj_ids.add(oid)
+                    except Exception as e:  # noqa: BLE001
+                        print(f"carry {oid} failed: {type(e).__name__}",
+                              flush=True)
         return self._base + len(self._frames) - 1
 
     def _check_live(self, frame_idx):
@@ -106,10 +151,13 @@ class TrackingSession:
             points=[[x, y]], labels=[label],
         )
         self._clicks.append((frame_idx, x, y, label, obj_id))
+        self._obj_ids.add(obj_id)
 
     def remove(self, obj_ids, all_flag):
         if all_flag:
             self._clicks = []
+            self._obj_ids = set()
+            self._last_masks = {}
             self._boot()
             return
         gone = set(obj_ids)
@@ -117,8 +165,13 @@ class TrackingSession:
             self.predictor.remove_object(self._state, oid)
         self._clicks = [(fi, x, y, l, o) for (fi, x, y, l, o) in self._clicks
                         if o not in gone]
+        self._obj_ids -= gone
+        for oid in gone:
+            self._last_masks.pop(oid, None)
 
     def masks_for_latest(self):
+        if not self._obj_ids:
+            return []
         latest = self._base + len(self._frames) - 1
         start = self._clicks[0][0] if self._clicks else latest
         w, h = self._last_wh
@@ -137,9 +190,12 @@ class TrackingSession:
                 sx, sy = mw / max(1, w), mh / max(1, h)
                 assert abs(sx - sy) < 0.05, (sx, sy)
                 out.append((oid, mask, (sx + sy) / 2))
+        self._last_masks = {oid: mask for oid, mask, _ in out}
         return out
 
     def reset(self):
         self._clicks = []
+        self._obj_ids = set()
+        self._last_masks = {}
         if self._frames:
             self._boot()

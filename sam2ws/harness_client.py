@@ -55,8 +55,8 @@ def main():
     ap.add_argument("--frames", required=True, help="dir of .jpg frames")
     ap.add_argument("--out", required=True, help="timings json path")
     ap.add_argument("--url", default="ws://127.0.0.1:8767")
-    ap.add_argument("--click", default="320,180,1,1",
-                    help="x,y,label,obj_id for frame 0")
+    ap.add_argument("--click", default=None, action="append",
+                    help="x,y,label,obj_id for frame 0 (repeat per object)")
     ap.add_argument("--size", default=None, help="WxH override, e.g. 640x360")
     args = ap.parse_args()
 
@@ -71,8 +71,10 @@ def main():
             with Image.open(path) as im:
                 w, h = im.size
         frames.append((w, h, raw))
-    x, y, label, obj_id = (int(v) for v in args.click.split(","))
-    clicks = [{"x": x, "y": y, "label": label, "obj_id": obj_id}]
+    clicks = []
+    for spec in (args.click or ["320,180,1,1"]):
+        x, y, label, obj_id = (int(v) for v in spec.split(","))
+        clicks.append({"x": x, "y": y, "label": label, "obj_id": obj_id})
 
     result = asyncio.run(run_harness(frames, clicks, args.url))
     with open(args.out, "w") as f:
