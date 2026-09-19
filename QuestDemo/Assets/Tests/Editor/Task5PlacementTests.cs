@@ -174,7 +174,7 @@ public class Task5PlacementTests
     {
         Vector3 eye = new Vector3(0f, 1.6f, 0f);
         Vector3 pos = HonestyChip.ComputeChipPosition(eye, Vector3.forward);
-        Assert.That(pos, Is.EqualTo(eye + Vector3.forward * 0.12f).Using<Vector3>(Vector3Comparer));
+        Assert.IsTrue(Vector3Comparer(pos, eye + Vector3.forward * 0.12f));
         Assert.That(HonestyChip.ForwardDistanceM, Is.EqualTo(0.12f));
     }
 
@@ -210,7 +210,7 @@ public class Task5PlacementTests
             Vector3 point = new Vector3(0f, 1f, 2f);
             GameObject mark = store.PlaceMark(point, Vector3.up, "test-draw-1");
             Assert.That(mark.transform.parent, Is.Null, "mark must never attach to a camera");
-            Assert.That(mark.transform.position, Is.EqualTo(point).Using<Vector3>(Vector3Comparer));
+            Assert.IsTrue(Vector3Comparer(mark.transform.position, point));
             Assert.That(store.Count, Is.EqualTo(1));
             for (int i = 2; i <= 9; i++)
                 store.PlaceMark(point, Vector3.up, "test-draw-" + i);
