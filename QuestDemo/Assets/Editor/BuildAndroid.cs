@@ -16,6 +16,18 @@ public static class BuildAndroid
 
     public static void Build()
     {
+        BuildWithOptions(BuildOptions.None);
+    }
+
+    /// <summary>Device-test build: debuggable so prefs (laptop_ipv4) can be
+    /// seeded via run-as. Test builds only, never the demo release.</summary>
+    public static void BuildDevelopment()
+    {
+        BuildWithOptions(BuildOptions.Development | BuildOptions.AllowDebugging);
+    }
+
+    static void BuildWithOptions(BuildOptions options)
+    {
         const string scenePath = "Assets/Scenes/SampleScene.unity";
         Scene scene = EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Single);
 
@@ -75,6 +87,11 @@ public static class BuildAndroid
 
         EditorUserBuildSettings.SwitchActiveBuildTarget(BuildTargetGroup.Android, BuildTarget.Android);
 
+        // Runtime-created materials (rings, ghosts, labels, procedural,
+        // generated) use Unlit/Color via Shader.Find: pin it so release
+        // stripping cannot drop it (else visuals silently vanish on device).
+        EnsureAlwaysIncludedShader("Unlit/Color");
+
         System.IO.Directory.CreateDirectory("Builds");
         BuildPlayerOptions opts = new BuildPlayerOptions
         {
@@ -82,7 +99,7 @@ public static class BuildAndroid
             locationPathName = "Builds/QuestDemo.apk",
             targetGroup = BuildTargetGroup.Android,
             target = BuildTarget.Android,
-            options = BuildOptions.None,
+            options = options,
         };
         var report = BuildPipeline.BuildPlayer(opts);
         if (report.summary.result != UnityEditor.Build.Reporting.BuildResult.Succeeded)
@@ -91,5 +108,31 @@ public static class BuildAndroid
             EditorApplication.Exit(1);
         }
         Debug.Log("BUILD SUCCEEDED: Builds/QuestDemo.apk");
+    }
+
+    static void EnsureAlwaysIncludedShader(string shaderName)
+    {
+        Shader shader = Shader.Find(shaderName);
+        if (shader == null)
+        {
+            Debug.LogWarning("BuildAndroid: shader not found: " + shaderName);
+            return;
+        }
+        var gfx = UnityEditor.AssetDatabase.LoadAssetAtPath<UnityEngine.Rendering.GraphicsSettings>(
+            "ProjectSettings/GraphicsSettings.asset");
+        if (gfx == null)
+            return;
+        var so = new SerializedObject(gfx);
+        var arr = so.FindProperty("m_AlwaysIncludedShaders");
+        for (int i = 0; i < arr.arraySize; i++)
+        {
+            if (arr.GetArrayElementAtIndex(i).objectReferenceValue == shader)
+                return;
+        }
+        arr.InsertArrayElementAtIndex(arr.arraySize);
+        arr.GetArrayElementAtIndex(arr.arraySize - 1).objectReferenceValue = shader;
+        so.ApplyModifiedProperties();
+        UnityEditor.AssetDatabase.SaveAssets();
+        Debug.Log("BuildAndroid: pinned always-included shader " + shaderName);
     }
 }
