@@ -55,6 +55,9 @@ class CoordinatorState:
         self.mark_sent: bool = False
         self.last_clock_skew_ns: int | None = None
         self.jobs = JobStore()
+        # Cloud speech synth for speak.audio (None = caption-only degraded).
+        # Server sets a live synth for yibu turns; tests inject fakes.
+        self.synthesizer: Any | None = None
         self.artifact_port: int = ARTIFACT_PORT
         self.artifact_root: Path = Path(__file__).resolve().parent.parent / "artifacts" / "generated"
         self.clear_generation: int = 1

@@ -17,6 +17,13 @@ the coordinator owns `place_generated` after a job is ready.
   with ULID `job_id` only (default port 8766 in `hello_ok.payload.artifact_port`).
 - Speech after generation waits for placement ACKs; the first turn must not claim
   the GLB is already placed.
+- Live voice turn (`--planner yibu`): the turn loop binds session tools per turn
+  (`YibuPlanner.bind_tools` with `state.jobs`, frame JPEG, frame_id), runs the
+  bounded tool loop in `plan()`, then makes one tools-disabled closing call
+  for the final line. `speak.audio` carries cloud PCM (Gemini Live leg in
+  `provider/voice/cloud_speech.py`, 16 kHz mono s16le) when a synthesizer is
+  attached; otherwise `audio` is `null` (degraded caption-only). Every turn
+  records `voice_gate` (`passed` / `failed` / `degraded`) in session context.
 - API key only in env var `YIBU_API_KEY` (never in Unity, logs, or the repo).
 
 ## How to verify

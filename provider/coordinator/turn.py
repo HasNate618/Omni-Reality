@@ -109,6 +109,16 @@ async def _run_turn(
     buf: UtteranceBuffer,
 ) -> None:
     await send("turn_started", turn_id, {"utterance_id": utterance_id, "turn_id": turn_id}, utterance_id)
+    bind = getattr(state.planner, "bind_tools", None)
+    if bind is not None:
+        try:
+            bind(
+                jobs=state.jobs,
+                jpeg_b64=base64.b64encode(buf.jpeg).decode() if buf.jpeg else None,
+                frame_id=(buf.envelope or {}).get("frame_id"),
+            )
+        except Exception:
+            logger.exception("tool bind failed for turn %d", turn_id)
     try:
         plan = await state.planner.plan(
             pcm=bytes(buf.pcm),
@@ -154,7 +164,14 @@ async def _run_turn(
 
     acks = {op["op_id"]: state.completed_ops.get(op["op_id"]) for op in sent}
     line = spoken_line(plan, sent, acks)
-    await send("speak", turn_id, {"turn_id": turn_id, "text": line, "audio": None}, utterance_id)
+    # Cloud speech after the ACK barrier (voice spec §2 step 7). The final
+    # line is tools-disabled: no tool calls happen past this point.
+    audio_block, voice_gate = await _speak_audio(state, line)
+    await send(
+        "speak", turn_id,
+        {"turn_id": turn_id, "text": line, "audio": audio_block},
+        utterance_id,
+    )
     state.context.append(
         {
             "turn_id": turn_id,
@@ -163,6 +180,7 @@ async def _run_turn(
             "drawing_ids": [a["drawing_id"] for a in acks.values() if a and a.get("drawing_id")],
             "latency_ms": plan.latency_ms,
             "audit_id": plan.audit_id,
+            "voice_gate": voice_gate,
         }
     )
     del state.context[:-CONTEXT_TURNS]
@@ -188,6 +206,29 @@ def ingest_audio_chunk(state: CoordinatorState, utterance_id: str | None, payloa
         logger.info("utterance %s over cap; dropping chunk", utterance_id)
         return
     buf.pcm.extend(pcm)
+
+
+async def _speak_audio(
+    state: CoordinatorState, line: str
+) -> tuple[dict | None, str]:
+    """Synthesize the final line. Returns (audio_block_or_None, voice_gate)."""
+    import inspect as inspect_module
+
+    from voice.cloud_speech import audio_block
+
+    synth = getattr(state, "synthesizer", None)
+    if synth is None:
+        return None, "degraded"
+    try:
+        pcm = synth(line)
+        if inspect_module.iscoroutine(pcm):
+            pcm = await pcm
+    except Exception:
+        logger.exception("cloud speech failed")
+        return None, "failed"
+    if not pcm:
+        return None, "failed"
+    return audio_block(bytes(pcm)), "passed"
 
 
 PlaceSend = Callable[[dict], Awaitable[dict | None]]

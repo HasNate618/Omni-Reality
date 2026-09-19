@@ -22,6 +22,8 @@ from typing import Any, Callable, Protocol
 
 from jsonschema import ValidationError
 
+from omni.reasoner import run_tool_loop
+from omni.tools import TOOL_DEFINITIONS
 from protocol.validate import validate_instance
 
 logger = logging.getLogger(__name__)
@@ -190,11 +192,70 @@ class YibuPlanner:
         purpose: str = "voice-turn",
         max_tokens: int = 256,
         audio_as: str = "data_url",
+        complete_fn: Any | None = None,
+        execute_fn: Any | None = None,
     ) -> None:
         self.model = model
         self.purpose = purpose
         self.max_tokens = max_tokens
         self.audio_as = audio_as
+        # Injected in tests; live default (network only inside plan()).
+        self._complete_fn = complete_fn or make_live_complete_fn(self)
+        self._execute_fn = execute_fn
+        self._jobs: Any | None = None
+        self._jpeg_b64: str | None = None
+        self._frame_id: str | None = None
+        self._inspect_fn: Any | None = None
+        self._queue_fn: Any | None = None
+
+    def bind_tools(
+        self,
+        *,
+        jobs: Any,
+        jpeg_b64: str | None,
+        frame_id: str | None,
+        inspect_fn: Any | None = None,
+        queue_fn: Any | None = None,
+    ) -> None:
+        """Attach session tool context (called by the turn loop per turn)."""
+        self._jobs = jobs
+        self._jpeg_b64 = jpeg_b64
+        self._frame_id = frame_id
+        self._inspect_fn = inspect_fn
+        self._queue_fn = queue_fn
+
+    async def _dispatch_tool(self, name: str, arguments: dict) -> Any:
+        """Route one model tool call to workers (never to Quest)."""
+        if self._execute_fn is not None and name != "emit_scene_ops":
+            result = self._execute_fn(name, arguments)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return result
+        if self._jobs is None:
+            return {"error": "tools_unbound"}
+        if name == "inspect_objects":
+            from coordinator.jobs import handle_inspect
+
+            return await handle_inspect(
+                self._jobs,
+                frame_id=arguments.get("frame_id"),
+                jpeg_b64=self._jpeg_b64 or "",
+                target=arguments.get("target") or {},
+                phrase=arguments.get("phrase"),
+                current_frame_id=self._frame_id,
+                inspect_fn=self._inspect_fn or _default_inspect_fn,
+            )
+        if name == "start_generation":
+            from coordinator.jobs import handle_start_generation
+
+            return await handle_start_generation(
+                self._jobs,
+                args=dict(arguments),
+                current_frame_id=self._frame_id,
+                jpeg_b64=self._jpeg_b64,
+                queue_fn=self._queue_fn or _default_queue_fn,
+            )
+        return {"error": "unknown_tool"}
 
     def _call(self, messages: list[dict[str, Any]]) -> tuple[str, dict]:
         from yibu_http import chat_completion, require_api_key
@@ -225,16 +286,93 @@ class YibuPlanner:
             audio_as=self.audio_as,
         )
         started = time.monotonic()
-        text, record = await asyncio.to_thread(self._call, messages)
-        latency_ms = int((time.monotonic() - started) * 1000)
-        say, heard, raw_ops = _parse_reply(text)
         frame_id = envelope["frame_id"] if envelope and jpeg is not None else None
-        ops = accept_model_ops(raw_ops, frame_id) if frame_id else []
+        if self._execute_fn is None and self._jobs is None:
+            # Legacy single-call path: no tool context bound (offline/tests).
+            text, record = await asyncio.to_thread(self._call, messages)
+            latency_ms = int((time.monotonic() - started) * 1000)
+            say, heard, raw_ops = _parse_reply(text)
+            ops = accept_model_ops(raw_ops, frame_id) if frame_id else []
+            return PlanResult(
+                ops=ops,
+                text=say,
+                latency_ms=latency_ms,
+                heard=heard,
+                audit_id=record.get("call_id"),
+                proposed_op_count=len(raw_ops) if isinstance(raw_ops, list) else 0,
+            )
+        # Tool path: bounded tool rounds, then a tools-disabled closing line
+        # (skipped when the loop already ended on model text).
+        thread = list(messages)
+        collected, closing = await run_tool_loop(
+            complete_fn=self._complete_fn,
+            execute_fn=self._dispatch_tool,
+            messages=thread,
+            max_rounds=4,
+        )
+        final_text = closing
+        if not final_text:
+            final = await self._complete_fn(thread, False)
+            from yibu_http import extract_text as _extract_text
+
+            final_text = _extract_text(final)
+        say, heard, _ = _parse_reply(final_text)
+        latency_ms = int((time.monotonic() - started) * 1000)
+        ops = accept_model_ops(collected, frame_id) if frame_id else []
         return PlanResult(
             ops=ops,
             text=say,
             latency_ms=latency_ms,
             heard=heard,
-            audit_id=record.get("call_id"),
-            proposed_op_count=len(raw_ops) if isinstance(raw_ops, list) else 0,
+            audit_id=None,
+            proposed_op_count=len(collected),
         )
+
+
+def make_live_complete_fn(planner: "YibuPlanner"):
+    """Chat Completions backend for the tool loop (network on call only)."""
+
+    async def complete_fn(messages: list[dict[str, Any]], tools_enabled: bool) -> dict[str, Any]:
+        from yibu_http import chat_completion, require_api_key
+
+        extra: dict[str, Any] = {}
+        if tools_enabled:
+            extra = {"tools": TOOL_DEFINITIONS, "tool_choice": "auto"}
+
+        def call() -> dict[str, Any]:
+            _text, response_json, _record = chat_completion(
+                api_key=require_api_key(),
+                model=planner.model,
+                messages=list(messages),
+                purpose=planner.purpose,
+                max_tokens=planner.max_tokens,
+                **extra,
+            )
+            return response_json
+
+        return await asyncio.to_thread(call)
+
+    return complete_fn
+
+
+def _default_inspect_fn(**kwargs: Any) -> dict:
+    import os
+
+    from workers.sam2_client import inspect_remote
+
+    return inspect_remote(
+        base_url=os.environ.get("SAM2_WORKER_URL", "http://127.0.0.1:8771"),
+        timeout_s=8.0,
+        **kwargs,
+    )
+
+
+def _default_queue_fn(**kwargs: Any) -> dict:
+    import os
+
+    from workers.gen_client import queue_job
+
+    return queue_job(
+        base_url=os.environ.get("GEN_WORKER_URL", "http://127.0.0.1:8772"),
+        **kwargs,
+    )

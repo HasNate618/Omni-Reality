@@ -386,7 +386,16 @@ async def run_server(
     import websockets
 
     async def _serve_one(ws) -> None:
-        await handle_connection(ws, CoordinatorState(planner=make_planner(planner_kind, model)))
+        state = CoordinatorState(planner=make_planner(planner_kind, model))
+        if planner_kind == "yibu":
+            # Live cloud speech for speak.audio (spends credit per turn).
+            from voice.cloud_speech import synthesize_line
+
+            async def _live_synth(text: str) -> bytes | None:
+                return await synthesize_line(text=text, purpose="voice-speak")
+
+            state.synthesizer = _live_synth
+        await handle_connection(ws, state)
 
     async with websockets.serve(_serve_one, host, port):
         logger.info("coordinator listening on %s:%d (planner=%s)", host, port, planner_kind)
