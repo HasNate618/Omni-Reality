@@ -112,10 +112,10 @@ class PerceptionImageTests(unittest.TestCase):
 
 class PerceptionServerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        from tests.test_live_turn import FakeLive
         self.state = CoordinatorState(planner=server.make_planner('yibu', perception_qa=True))
+        self.state.live_factory = lambda **cb: FakeLive(self, **cb)
         self.sent = []
-        self.model_calls = []
-        self.synth_calls = []
         owner = self
 
         class Socket:
@@ -123,17 +123,6 @@ class PerceptionServerTests(unittest.IsolatedAsyncioTestCase):
                 owner.sent.append(json.loads(raw))
 
         self.ws = Socket()
-
-        async def complete(messages, enabled):
-            self.model_calls.append((messages, enabled))
-            return {'choices': [{'message': {'content': 'A red square.'}}]}
-
-        async def synth(text):
-            self.synth_calls.append(text)
-            return b'\x00\x01' * 800
-
-        self.state.planner._complete_fn = complete
-        self.state.synthesizer = synth
 
     async def feed(self, kind, payload, uid='u1'):
         await server.handle_text(self.ws, self.state, json.dumps(message(kind, payload, uid)))
@@ -144,41 +133,68 @@ class PerceptionServerTests(unittest.IsolatedAsyncioTestCase):
     async def frame(self, uid='u1', jpeg=JPEG):
         await self.feed('frame', {'envelope': envelope(), 'jpeg_b64': base64.b64encode(jpeg).decode()}, uid)
 
-    async def finish(self, uid='u1'):
+    def live(self):
+        return self.state.live
+
+    async def finish(self, uid='u1', complete=True):
         await self.feed('utterance_end', {}, uid)
-        tasks = list(self.state.turn_tasks.values())
-        if tasks:
-            await asyncio.gather(*tasks)
+        # The utterance handler schedules the turn; yield so it starts.
+        for _ in range(100):
+            if self.state._live_turn is not None:
+                break
+            await asyncio.sleep(0.01)
+        # Emit the session-side completion the fake cannot produce alone.
+        # Recovery/short paths never wait: completing them would fabricate
+        # a speak_final after the honest recovery speak.
+        if complete and self.live() is not None and self.state._live_turn is not None:
+            self.live().emit('on_turn_end')
+            for _ in range(200):
+                if self.state._live_turn is None:
+                    break
+                await asyncio.sleep(0.01)
 
     async def test_hello_negotiates_capture_and_audio_then_image_then_end_runs_once(self):
         await server.handle_text(self.ws, self.state, json.dumps(make_hello()))
         self.assertIs(self.sent[0]['payload']['perception_qa'], True)
+        for _ in range(100):
+            if self.live() is not None:
+                break
+            await asyncio.sleep(0.01)
+        self.assertIsNotNone(self.live())
         await self.audio()
         await self.frame()
         await self.finish()
-        self.assertEqual([m['type'] for m in self.sent], ['hello_ok', 'turn_started', 'speak'])
-        self.assertEqual(len(self.model_calls), 1)
-        self.assertEqual(len(self.synth_calls), 1)
-        self.assertEqual(self.sent[-1]['payload']['audio']['sample_rate'], 16000)
+        kinds = [m['type'] for m in self.sent]
+        self.assertEqual(kinds[0], 'hello_ok')
+        self.assertIn('turn_started', kinds)
+        self.assertIn('speak_final', kinds)
+        self.assertEqual(len(self.live().image_turns), 1)
+        self.assertEqual(self.live().image_turns[0][0], JPEG)
         self.assertNotIn('u1', self.state.utterances)
-        # Late data/replayed end must not open a second paid turn.
+        # Late data/replayed end must not open a second session turn.
         await self.audio()
         await self.frame()
         await self.finish()
-        self.assertEqual(len(self.model_calls), 1)
+        self.assertEqual(len(self.live().image_turns), 1)
         self.assertNotIn('u1', self.state.utterances)
 
     async def test_bad_frame_and_validation_errors_do_not_log_payload(self):
+        await server.handle_text(self.ws, self.state, json.dumps(make_hello()))
+        for _ in range(100):
+            if self.live() is not None:
+                break
+            await asyncio.sleep(0.01)
         with self.assertLogs(level='INFO') as logs:
             await self.audio()
             await self.frame(jpeg=b'PRIVATE_MEDIA')
             env = envelope()
             env['camera'] = 'PRIVATE_MEDIA'
             await self.feed('frame', {'envelope': env, 'jpeg_b64': 'PRIVATE_MEDIA'})
-            await self.finish()
+            await self.finish(complete=False)
         self.assertNotIn('PRIVATE_MEDIA', '\n'.join(logs.output))
         self.assertIn('jpeg_rejected', '\n'.join(logs.output))
-        self.assertEqual(len(self.model_calls), 0)
+        live = self.live()
+        self.assertTrue(live is None or live.image_turns == [])
         self.assertTrue(self.sent[-1]['payload']['text'].startswith("I couldn't get a camera image."))
 
     async def test_duplicate_frame_cannot_replace_first_image(self):
@@ -187,58 +203,55 @@ class PerceptionServerTests(unittest.IsolatedAsyncioTestCase):
         await self.frame(jpeg=b'bad')
         self.assertEqual(self.state.utterances['u1'].jpeg, JPEG)
 
-    async def test_too_short_never_calls_model_or_synth(self):
+    async def test_too_short_never_calls_session(self):
         await self.audio(pcm=b'\0' * 100)
         await self.frame()
-        await self.finish()
-        self.assertFalse(self.model_calls)
-        self.assertFalse(self.synth_calls)
+        await self.finish(complete=False)
+        live = self.live()
+        self.assertTrue(live is None or live.image_turns == [])
+        self.assertFalse([m for m in self.sent if m['type'] == 'turn_started'])
 
     async def test_connection_close_cancels_pending_turn_and_clears_media(self):
-        started = asyncio.Event()
-
-        async def complete(_messages, _enabled):
-            started.set()
-            await asyncio.Event().wait()
-
-        self.state.planner._complete_fn = complete
+        await server.handle_text(self.ws, self.state, json.dumps(make_hello()))
+        for _ in range(100):
+            if self.live() is not None:
+                break
+            await asyncio.sleep(0.01)
         await self.audio()
         await self.frame()
         await self.feed('utterance_end', {})
-        await started.wait()
+        for _ in range(100):
+            if self.state._live_turn is not None:
+                break
+            await asyncio.sleep(0.01)
+        self.assertIsNotNone(self.state._live_turn)
         self.state.utterances['unused'] = UtteranceBuffer(pcm=bytearray(PCM), jpeg=JPEG)
 
         class ClosedSocket:
             async def recv(self):
                 raise ConnectionError('private transport details')
 
+        live = self.live()
+        self.assertIsNotNone(live)
         await server.handle_connection(ClosedSocket(), self.state)
         self.assertFalse(self.state.turn_tasks)
         self.assertFalse(self.state.utterances)
         self.assertFalse(self.state.context)
         self.assertIsNone(self.state.last_envelope)
-        self.assertFalse(self.synth_calls)
+        self.assertFalse(live.is_open)
+        self.assertIsNone(self.state.live)
 
 
 class PerceptionWireTests(unittest.IsolatedAsyncioTestCase):
-    async def test_real_loopback_websocket_delivers_one_image_turn_and_tone(self):
+    async def test_real_loopback_websocket_runs_live_session_turn(self):
         import websockets
-        from voice.test_tone import make_test_tone
+        from tests.test_live_turn import FakeLive
         state = CoordinatorState(planner=server.make_planner('yibu', perception_qa=True))
-        observed = []
-
-        async def complete(messages, tools):
-            observed.append((messages[-1]['content'][1]['image_url']['url'], tools))
-            return {'choices': [{'message': {'content': 'Synthetic red square.'}}]}
-
-        async def synth(_text):
-            return make_test_tone()
+        state.live_factory = lambda **cb: FakeLive(self, **cb)
 
         async def handler(ws):
             await server.handle_connection(ws, state)
 
-        state.planner._complete_fn = complete
-        state.synthesizer = synth
         async with websockets.serve(handler, '127.0.0.1', 0) as listener:
             port = listener.sockets[0].getsockname()[1]
             async with websockets.connect(f'ws://127.0.0.1:{port}', proxy=None) as ws:
@@ -254,12 +267,46 @@ class PerceptionWireTests(unittest.IsolatedAsyncioTestCase):
                     outgoing['session_id'] = hello['payload']['session_id']
                     await ws.send(json.dumps(outgoing))
                 started = json.loads(await asyncio.wait_for(ws.recv(), 2))
-                speak = json.loads(await asyncio.wait_for(ws.recv(), 2))
-                self.assertEqual([started['type'], speak['type']], ['turn_started', 'speak'])
-                self.assertEqual(base64.b64decode(speak['payload']['audio']['data_b64']), make_test_tone())
-        self.assertEqual(len(observed), 1)
-        self.assertEqual(base64.b64decode(observed[0][0].split(',')[1]), JPEG)
-        self.assertFalse(observed[0][1])
+                self.assertEqual(started['type'], 'turn_started')
+                live = state.live
+                self.assertEqual(len(live.image_turns), 1)
+                self.assertEqual(live.image_turns[0][0], JPEG)
+                # Session-side completion over the real socket: one chunk + final.
+                live.emit('on_audio', b'\x11\x22' * 24000)
+                live.emit('on_output_transcript', 'A red square.')
+                live.emit('on_turn_end')
+                chunk = json.loads(await asyncio.wait_for(ws.recv(), 5))
+                final = json.loads(await asyncio.wait_for(ws.recv(), 5))
+                self.assertEqual(chunk['type'], 'speak_chunk')
+                self.assertEqual(chunk['payload']['seq'], 0)
+                self.assertEqual(chunk['payload']['audio']['sample_rate'], 16000)
+                self.assertEqual(final['type'], 'speak_final')
+                self.assertEqual(final['payload']['text'], 'A red square.')
+                self.assertEqual(final['payload']['voice_gate'], 'passed')
+
+    async def test_voice_stub_twin_needs_no_session(self):
+        from voice.test_tone import make_test_tone
+        state = CoordinatorState(planner=server.make_planner('voice-stub', perception_qa=True))
+        state.synthesizer = lambda _text: make_test_tone()
+        sent = []
+
+        class Socket:
+            async def send(self, raw):
+                sent.append(json.loads(raw))
+
+        for kind, payload in [
+            ('audio_chunk', {'audio': {'encoding': 'pcm_s16le', 'sample_rate': 16000, 'channels': 1, 'data_b64': base64.b64encode(PCM).decode()}}),
+            ('utterance_end', {}),
+        ]:
+            await server.handle_text(Socket(), state, json.dumps(message(kind, payload)))
+        for _ in range(100):
+            if any(m['type'] == 'speak' for m in sent):
+                break
+            await asyncio.sleep(0.01)
+        speaks = [m for m in sent if m['type'] == 'speak']
+        self.assertEqual(len(speaks), 1)
+        self.assertEqual(base64.b64decode(speaks[0]['payload']['audio']['data_b64']), make_test_tone())
+        self.assertIsNone(getattr(state, 'live', None))
 
     async def test_real_http_wrapper_audits_perception_without_payloads(self):
         import httpx

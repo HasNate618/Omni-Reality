@@ -10,11 +10,21 @@ public class SpeakCloudPlayer : MonoBehaviour
 {
     public const int SampleRate = 16000;
     public const string EncodingPcmS16Le = "pcm_s16le";
+    /// <summary>Streaming ring capacity: 30 s of 16 kHz mono.</summary>
+    public const int StreamMaxSamples = 16000 * 30;
 
     AudioSource _source;
     string _activeTurnId;
     int _activeTurnNumeric;
     bool _wasPlaying;
+    AudioClip _streamClip;
+    int _streamPos;
+    int _streamTurn;
+
+    /// <summary>Turn currently streaming, or 0 when idle.</summary>
+    public int StreamingTurnId { get { return _streamTurn; } }
+    /// <summary>Samples written for the streaming turn.</summary>
+    public int StreamedSamples { get { return _streamPos; } }
 
     /// <summary>True while cloud PCM is actively playing (barge-in / mic gate).</summary>
     public bool IsPlaying
@@ -45,8 +55,67 @@ public class SpeakCloudPlayer : MonoBehaviour
         _activeTurnId = null;
         _activeTurnNumeric = 0;
         _wasPlaying = false;
+        _streamTurn = 0;
+        _streamPos = 0;
+        _streamClip = null;
         if (_source != null && _source.isPlaying)
             _source.Stop();
+    }
+
+    /// <summary>
+    /// Append one streamed speech chunk. Starts a 30 s ring clip on the
+    /// first chunk and plays while later chunks arrive. Returns false for
+    /// empty audio, a foreign turn, or overflow (old turn keeps playing).
+    /// </summary>
+    public bool AppendChunk(int turnId, byte[] pcmS16Le)
+    {
+        int pcmBytes = pcmS16Le != null ? pcmS16Le.Length : 0;
+        if (pcmS16Le == null || pcmS16Le.Length < 2 || pcmS16Le.Length % 2 != 0)
+            return false;
+        if (_streamTurn != 0 && turnId != _streamTurn)
+            return false;
+        int samples = pcmS16Le.Length / 2;
+        if (_streamPos + samples > StreamMaxSamples)
+        {
+            VoiceBootstrapLog.PlaybackRejected(turnId, pcmBytes, "stream_overflow");
+            return false;
+        }
+        if (_streamClip == null)
+            _streamClip = AudioClip.Create("live_speak", StreamMaxSamples, 1, SampleRate, false);
+        if (_streamClip == null)
+        {
+            VoiceBootstrapLog.PlaybackRejected(turnId, pcmBytes, "clip_build_failed");
+            return false;
+        }
+        float[] floats;
+        if (!TryConvertPcm(pcmS16Le, out floats))
+            return false;
+        _streamClip.SetData(floats, _streamPos);
+        _streamPos += samples;
+        if (_streamTurn == 0)
+        {
+            _streamTurn = turnId;
+            _activeTurnId = turnId.ToString();
+            _activeTurnNumeric = turnId;
+            VoiceBootstrapLog.PlaybackAccepted(turnId, pcmBytes);
+            _source.clip = _streamClip;
+            _source.Play();
+            _wasPlaying = true;
+            VoiceBootstrapLog.PlaybackStarted(turnId);
+        }
+        return true;
+    }
+
+    /// <summary>Pure s16le → float conversion. False for empty/odd input.</summary>
+    public static bool TryConvertPcm(byte[] pcmS16Le, out float[] floats)
+    {
+        floats = null;
+        if (pcmS16Le == null || pcmS16Le.Length < 2 || pcmS16Le.Length % 2 != 0)
+            return false;
+        floats = new float[pcmS16Le.Length / 2];
+        for (int i = 0; i < floats.Length; i++)
+            floats[i] = (short)(pcmS16Le[i * 2] | (pcmS16Le[i * 2 + 1] << 8)) / 32768f;
+        return true;
     }
 
     /// <summary>

@@ -484,8 +484,41 @@ public class CoordinatorClient : MonoBehaviour
         }
         if (type == "stop_speak")
         {
+            _pendingReplyId = null;
             if (SpeakPlayer != null)
                 SpeakPlayer.StopPlayback();
+            return;
+        }
+        if (type == "speak_chunk")
+        {
+            string payload;
+            if (!ProtocolJson.TryGetPayloadObject(text, out payload))
+                return;
+            ProtocolJson.SpeakChunkMsg chunk;
+            if (!ProtocolJson.TryParseSpeakChunk(payload, out chunk))
+                return;
+            if (SpeakPlayer == null)
+                return;
+            byte[] pcm;
+            if (!SpeakCloudPlayer.TryDecodePcmBase64(chunk.AudioDataB64, out pcm))
+                return;
+            SpeakPlayer.AppendChunk(chunk.TurnId, pcm);
+            return;
+        }
+        if (type == "speak_final")
+        {
+            string payload;
+            if (!ProtocolJson.TryGetPayloadObject(text, out payload))
+                return;
+            ProtocolJson.SpeakFinalMsg final;
+            if (!ProtocolJson.TryParseSpeakFinal(payload, out final))
+                return;
+            string replyId;
+            ProtocolJson.TryGetUtteranceId(text, out replyId);
+            if (PerceptionEnabled && (_pendingReplyId == null || replyId != _pendingReplyId))
+                return;
+            _pendingReplyId = null;
+            ShowVoiceFeedback(final.Text);
             return;
         }
         if (type == "turn_started")
@@ -643,6 +676,12 @@ public class CoordinatorClient : MonoBehaviour
         _outbox.Enqueue(PriorityFrame,
             ProtocolJson.BuildFrame(_sessionId, env, utteranceId, Convert.ToBase64String(jpeg)));
         return true;
+    }
+
+    /// <summary>Abandon the pending reply (voice barge-in moved on).</summary>
+    public void AbandonReply()
+    {
+        _pendingReplyId = null;
     }
 
     /// <summary>Open voice utterance (set by the mic uplink, cleared on end).</summary>

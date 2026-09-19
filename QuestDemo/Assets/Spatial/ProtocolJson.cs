@@ -551,6 +551,72 @@ public static class ProtocolJson
             frameId = parsed;
     }
 
+    /// <summary>One streamed speech chunk (turn_id, seq, audio object).</summary>
+    public sealed class SpeakChunkMsg
+    {
+        public int TurnId;
+        public int Seq;
+        public string AudioDataB64;
+    }
+
+    /// <summary>End of streamed speech (turn_id, text, voice_gate).</summary>
+    public sealed class SpeakFinalMsg
+    {
+        public int TurnId;
+        public string Text;
+        public string VoiceGate;
+    }
+
+    /// <summary>Parse a speak_chunk payload. False when turn/seq/audio missing.</summary>
+    public static bool TryParseSpeakChunk(string payloadJson, out SpeakChunkMsg msg)
+    {
+        msg = null;
+        if (string.IsNullOrEmpty(payloadJson))
+            return false;
+        long turnId;
+        long seq;
+        if (!TryGetLong(payloadJson, "turn_id", out turnId))
+            return false;
+        if (!TryGetLong(payloadJson, "seq", out seq))
+            return false;
+        string audioData = null;
+        int audioAt = IndexOfKey(payloadJson, "audio", 0);
+        if (audioAt >= 0)
+        {
+            int valueAt = SkipValueStart(payloadJson, audioAt);
+            if (valueAt >= 0 && valueAt < payloadJson.Length && payloadJson[valueAt] == '{')
+            {
+                string audioJson;
+                int endAt;
+                bool found;
+                if (ExtractBraced(payloadJson, valueAt, out audioJson, out endAt))
+                    TryGetStringOrNull(audioJson, "data_b64", out audioData, out found);
+            }
+        }
+        if (string.IsNullOrEmpty(audioData))
+            return false;
+        msg = new SpeakChunkMsg { TurnId = (int)turnId, Seq = (int)seq, AudioDataB64 = audioData };
+        return true;
+    }
+
+    /// <summary>Parse a speak_final payload. False when turn_id missing.</summary>
+    public static bool TryParseSpeakFinal(string payloadJson, out SpeakFinalMsg msg)
+    {
+        msg = null;
+        if (string.IsNullOrEmpty(payloadJson))
+            return false;
+        long turnId;
+        if (!TryGetLong(payloadJson, "turn_id", out turnId))
+            return false;
+        string text;
+        bool found;
+        TryGetStringOrNull(payloadJson, "text", out text, out found);
+        string gate;
+        TryGetStringOrNull(payloadJson, "voice_gate", out gate, out found);
+        msg = new SpeakFinalMsg { TurnId = (int)turnId, Text = text, VoiceGate = gate };
+        return true;
+    }
+
     /// <summary>Parse speak payload (turn_id, text, optional audio object).</summary>
     public static bool TryParseSpeak(string payloadJson, out SpeakMsg msg)
     {

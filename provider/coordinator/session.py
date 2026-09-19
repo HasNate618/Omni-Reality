@@ -60,6 +60,11 @@ class CoordinatorState:
         # Cloud speech synth for speak.audio (None = caption-only degraded).
         # Server sets a live synth for yibu turns; tests inject fakes.
         self.synthesizer: Any | None = None
+        # Persistent Live session for the realtime voice loop (None until
+        # hello warms it). _live_turn is the in-flight turn, if any.
+        self.live: Any | None = None
+        self._live_turn: Any | None = None
+        self._live_last_totals: dict[str, int] = {}
         self.artifact_port: int = ARTIFACT_PORT
         self.artifact_root: Path = Path(__file__).resolve().parent.parent / "artifacts" / "generated"
         self.clear_generation: int = 1

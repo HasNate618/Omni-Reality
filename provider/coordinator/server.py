@@ -32,6 +32,7 @@ from jsonschema import ValidationError
 from coordinator.live_config import ensure_live_voice_only_config
 from coordinator.session import CoordinatorState, UtteranceBuffer
 from coordinator.turn import cancel_turn, ingest_audio_chunk, start_turn
+from voice.audio import BYTES_PER_SECOND, MIN_UTTERANCE_S
 from yibu_audit import ApiKeyConfigurationError, ensure_env_api_key
 from protocol.ids import new_ulid
 from protocol.validate import validate_instance
@@ -152,6 +153,8 @@ async def _handle_hello(ws: Any, state: CoordinatorState, message: dict) -> None
             },
         )
     )
+    if _live_mode(state):
+        asyncio.create_task(_warm_live_session(state))
     # NOTE: no mark here by design. The production Quest sequence is hello
     # first, real frame later; emitting a mark on hello would carry a random
     # frame_id no client can resolve and would consume the single mark
@@ -240,10 +243,29 @@ def _turn_sender(ws: Any, state: CoordinatorState):
     return send
 
 
+async def _warm_live_session(state: CoordinatorState) -> None:
+    from coordinator import live_turn as live_mod
+    await live_mod.ensure_live_session(state)
+
+
+def _live_mode(state: CoordinatorState) -> bool:
+    from coordinator.planner import VoiceStubPlanner
+    return bool(getattr(state.planner, "perception_qa", False)) and not isinstance(
+        state.planner, VoiceStubPlanner)
+
+
 async def _handle_audio_chunk(ws: Any, state: CoordinatorState, message: dict) -> None:
     if state.planner is None:
         return
     ingest_audio_chunk(state, message["utterance_id"], message["payload"])
+    if _live_mode(state):
+        from coordinator import live_turn as live_mod
+        try:
+            audio = message["payload"].get("audio") or {}
+            pcm = base64.b64decode(audio.get("data_b64") or "", validate=True)
+        except (binascii.Error, ValueError):
+            return
+        await live_mod.forward_audio(state, pcm)
 
 
 async def _handle_utterance_end(ws: Any, state: CoordinatorState, message: dict) -> None:
@@ -258,7 +280,42 @@ async def _handle_utterance_end(ws: Any, state: CoordinatorState, message: dict)
     buf = state.utterances.get(utterance_id)
     pcm_bytes = len(buf.pcm) if buf is not None else 0
     utterance_end_accepted(pcm_bytes)
+    if _live_mode(state):
+        _start_live_utterance(state, _turn_sender(ws, state), utterance_id)
+        return
     start_turn(state, _turn_sender(ws, state), utterance_id)
+
+
+def _start_live_utterance(state: CoordinatorState, send: Any, utterance_id: str) -> None:
+    """Session path: pop the buffer and run the live turn in background."""
+    from coordinator import live_turn as live_mod
+    from coordinator.turn import _turn_task_done
+    if utterance_id in state.closed_utterances:
+        return
+    buf = state.utterances.pop(utterance_id, None) or UtteranceBuffer()
+    state.closed_utterances.add(utterance_id)
+    if len(buf.pcm) < MIN_UTTERANCE_S * BYTES_PER_SECOND:
+        logger.info("utterance %s too short (%d bytes); no turn", utterance_id, len(buf.pcm))
+        return
+    live = getattr(state, "live", None)
+    if live is None or not live.is_open:
+        task = asyncio.create_task(_live_down(state, send, utterance_id))
+    else:
+        task = asyncio.create_task(live_mod.start_live_turn(state, send, utterance_id, buf))
+    task.add_done_callback(_log_live_task_done)
+
+
+async def _live_down(state: CoordinatorState, send: Any, utterance_id: str) -> None:
+    from coordinator import live_turn as live_mod
+    await live_mod.speak_down(state, send, utterance_id)
+
+
+def _log_live_task_done(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.info("live turn background task failed exception_class=%s", type(exc).__name__)
 
 
 async def _handle_ack(ws: Any, state: CoordinatorState, message: dict) -> None:
@@ -306,6 +363,16 @@ async def _handle_cancel(ws: Any, state: CoordinatorState, message: dict) -> Non
         return
     state.cancel_op(op_id)
     logger.info("cancel op=%s", op_id)
+
+
+async def _close_live(state: CoordinatorState) -> None:
+    live = getattr(state, "live", None)
+    state.live = None
+    if live is not None:
+        try:
+            await live.close()
+        except Exception:
+            pass
 
 
 async def handle_text(ws: Any, state: CoordinatorState, raw: object) -> None:
@@ -360,6 +427,7 @@ async def _handle_clear_session(ws: Any, state: CoordinatorState, message: dict)
 
     clear_jobs(state.jobs, state.artifact_root)
     await state.clear_voice()
+    await _close_live(state)
     payload = {"session_id": state.session_id, "generation": state.clear_generation}
     state.clear_generation += 1
     await ws.send(_sendable("session_cleared", state.session_id, 0, payload))
@@ -393,6 +461,7 @@ async def handle_connection(ws: Any, state: CoordinatorState) -> None:
         connection_close()
         if state.planner is not None:
             await state.clear_voice()
+        await _close_live(state)
         clear_jobs(state.jobs, state.artifact_root)
 
 

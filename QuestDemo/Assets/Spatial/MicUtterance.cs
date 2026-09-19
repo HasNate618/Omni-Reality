@@ -16,6 +16,8 @@ public class MicUtterance : MonoBehaviour
     public const float SilenceRms = VoiceActivityGate.SilenceRms;
     public const int SilenceEndMs = VoiceActivityGate.SilenceChunksToEnd * 100;
     public const int MaxUtteranceMs = VoiceActivityGate.MaxUtteranceChunks * 100;
+    /// <summary>Voice barge-in floor during playback (5x the VAD floor).</summary>
+    public const float BargeInRms = 0.05f;
 
     CoordinatorClient _client;
     AudioClip _clip;
@@ -89,9 +91,14 @@ public class MicUtterance : MonoBehaviour
             DropLocalTurn();
             return;
         }
-        if (_closing || _client.AwaitingReply || (_client.SpeakPlayer != null && _client.SpeakPlayer.IsPlaying))
+        if (_closing || _client.AwaitingReply)
         {
             DiscardMicWindow();
+            return;
+        }
+        if (_client.SpeakPlayer != null && _client.SpeakPlayer.IsPlaying)
+        {
+            PumpMicBargeIn();
             return;
         }
         if (_manualCapture)
@@ -181,6 +188,61 @@ public class MicUtterance : MonoBehaviour
             return;
         _lastLoggedMicGrant = granted;
         VoiceBootstrapLog.MicPermission(granted);
+    }
+
+    /// <summary>VAD stays open during playback: a loud onset interrupts.</summary>
+    void PumpMicBargeIn()
+    {
+        if (_clip == null || _utteranceId != null)
+            return;
+        AppendMicSamples();
+        while (_pending.Count >= ChunkSamples)
+        {
+            var chunk = TakeChunk();
+            VoiceActivityDecision decision = _gate.Observe(chunk);
+            if (decision.State == VoiceActivityState.Started)
+            {
+                if (!IsBargeInLoud(decision.Chunks))
+                {
+                    _gate = new VoiceActivityGate();
+                    continue;
+                }
+                SpeakCloudPlayer player = _client.SpeakPlayer;
+                if (player != null)
+                    player.StopPlayback();
+                _client.AbandonReply();
+                OpenUtterance();
+                VoiceBootstrapLog.VadOpened(decision.Chunks != null ? decision.Chunks.Count : 0);
+                SendChunks(decision.Chunks);
+            }
+            else if (decision.State == VoiceActivityState.Ended)
+            {
+                _gate = new VoiceActivityGate();
+            }
+        }
+    }
+
+    /// <summary>Loud-enough pre-roll to count as a voice interruption.</summary>
+    public static bool IsBargeInLoud(List<List<short>> chunks)
+    {
+        if (chunks == null || chunks.Count == 0)
+            return false;
+        double sum = 0;
+        long count = 0;
+        foreach (List<short> chunk in chunks)
+        {
+            if (chunk == null)
+                continue;
+            foreach (short s in chunk)
+            {
+                double v = s / 32768.0;
+                sum += v * v;
+                count++;
+            }
+        }
+        if (count == 0)
+            return false;
+        return (float)System.Math.Sqrt(sum / count) >= BargeInRms;
     }
 
     void PumpMicVad()
