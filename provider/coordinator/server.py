@@ -29,8 +29,10 @@ from typing import Any
 
 from jsonschema import ValidationError
 
+from coordinator.live_config import ensure_live_voice_only_config
 from coordinator.session import CoordinatorState, UtteranceBuffer
 from coordinator.turn import cancel_turn, ingest_audio_chunk, start_turn
+from yibu_audit import ApiKeyConfigurationError
 from protocol.ids import new_ulid
 from protocol.validate import validate_instance
 
@@ -407,6 +409,7 @@ async def run_server(
     voice_only: bool = False,
 ) -> None:
     """Bind the coordinator WebSocket server (CLI: python -m coordinator.server)."""
+    ensure_live_voice_only_config(planner_kind, voice_only)
     import websockets
 
     async def _serve_one(ws) -> None:
@@ -458,6 +461,13 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     _validate_cli_args(parser, args)
+    try:
+        ensure_live_voice_only_config(args.planner, args.voice_only)
+    except ApiKeyConfigurationError as exc:
+        parser.error(
+            f"--planner yibu --voice-only requires environment variable {exc.name} "
+            "(set on the laptop only; no API call is made when it is missing)."
+        )
     logging.basicConfig(level=logging.INFO)
     asyncio.run(
         run_server(

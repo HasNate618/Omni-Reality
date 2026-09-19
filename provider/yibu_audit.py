@@ -18,6 +18,27 @@ from typing import Any, Mapping
 DEFAULT_AUDIT_LOG = Path(__file__).resolve().parent / "artifacts" / "yibu_api_calls.jsonl"
 
 
+class ApiKeyConfigurationError(Exception):
+    """Missing or unusable API key env var (name only; never carries the secret)."""
+
+    def __init__(self, name: str = "YIBU_API_KEY") -> None:
+        self.name = name
+        super().__init__(name)
+
+    def __str__(self) -> str:
+        return self.name
+
+
+def ensure_env_api_key(name: str = "YIBU_API_KEY") -> str:
+    """Validate env var for live startup; raises ApiKeyConfigurationError, not SystemExit."""
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise ApiKeyConfigurationError(name)
+    if any(ord(char) < 33 or ord(char) > 126 for char in value):
+        raise ApiKeyConfigurationError(name)
+    return value
+
+
 def require_env_api_key(name: str = "YIBU_API_KEY") -> str:
     """Load a printable single-token key without ever displaying its value."""
     value = os.environ.get(name, "").strip()

@@ -48,6 +48,20 @@ REJECT_DEFAULT = "I couldn't place that."
 Send = Callable[..., Awaitable[None]]
 
 
+def _turn_task_done(state: CoordinatorState, turn_id: int, task: asyncio.Task) -> None:
+    """Pop turn registry; log unhandled failures (class + turn id only)."""
+    state.turn_tasks.pop(turn_id, None)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.info(
+            "turn background task failed turn_id=%d exception_class=%s",
+            turn_id,
+            type(exc).__name__,
+        )
+
+
 def start_turn(state: CoordinatorState, send: Send, utterance_id: str) -> asyncio.Task | None:
     """Close an utterance. Returns the background turn task, or None."""
     buf = state.utterances.pop(utterance_id, None) or UtteranceBuffer()
@@ -58,7 +72,7 @@ def start_turn(state: CoordinatorState, send: Send, utterance_id: str) -> asynci
     turn_id = state.turn_id
     task = asyncio.create_task(_run_turn(state, send, turn_id, utterance_id, buf))
     state.turn_tasks[turn_id] = task
-    task.add_done_callback(lambda _t: state.turn_tasks.pop(turn_id, None))
+    task.add_done_callback(lambda t: _turn_task_done(state, turn_id, t))
     return task
 
 
@@ -144,6 +158,11 @@ async def _run_turn(
         )
     except asyncio.CancelledError:
         raise
+    except SystemExit:
+        planner_failed(turn_id=turn_id, exception_class="SystemExit")
+        if turn_id not in state.cancelled_turns:
+            await send("speak", turn_id, {"turn_id": turn_id, "text": SAY_MODEL_ERROR, "audio": None}, utterance_id)
+        return
     except Exception as exc:
         planner_failed(turn_id=turn_id, exception_class=type(exc).__name__)
         if turn_id not in state.cancelled_turns:

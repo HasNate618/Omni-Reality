@@ -57,7 +57,11 @@ ops over LAN; Unity renders and ACKs. No model calls in these slices.
 - **Headset bootstrap live audio-only smoke (spends credit):** from `provider/`,
   `python -m coordinator.server --planner yibu --voice-only` — PCM-only turn,
   no JPEG or spatial tools; cloud reply plays through Quest `SpeakCloudPlayer`.
-  Requires explicit go-ahead and `YIBU_API_KEY` on the laptop only.
+  Requires explicit go-ahead and a non-empty `YIBU_API_KEY` on the laptop only.
+  If the key is unset, the process exits immediately with a configuration error
+  (names `YIBU_API_KEY` only; no WebSocket listen, no API call). A rare
+  in-turn `SystemExit` from the planner is converted to redacted
+  `planner_failed` + the safe fallback speak line without killing the session.
 - Legacy offline planner: `--planner stub` (non-voice-stub slice-3 stub path).
 - Quest sends `frame` (with `utterance_id`, envelope, `jpeg_b64`), ~100 ms
   `audio_chunk`s, then `utterance_end`. Under 0.5 s of PCM → no turn.
@@ -126,8 +130,10 @@ Coordinator events: `connection_open`, `connection_close`,
   1. Offline transport: `cd provider && . .venv/bin/activate && python -m
      coordinator.server --planner voice-stub` — expect test-tone caption on
      Quest after a ≥0.5 s utterance (no yibu calls).
-  2. Live audio-only smoke (explicit credit go-ahead): same venv, `python -m
-     coordinator.server --planner yibu --voice-only`.
+  2. Live audio-only smoke (explicit credit go-ahead): same venv, confirm
+     `YIBU_API_KEY` is set, then `python -m coordinator.server --planner yibu
+     --voice-only`. Missing key → immediate config exit (no headset connection
+     needed to reproduce).
   3. Full spatial voice (later slice-3 demo): `python -m coordinator.server
      --planner yibu` (spends credit; key must be valid).
   4. Optional credit smoke first (no headset):
