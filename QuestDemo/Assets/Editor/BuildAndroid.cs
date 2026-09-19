@@ -26,19 +26,17 @@ public static class BuildAndroid
         BuildWithOptions(BuildOptions.Development | BuildOptions.AllowDebugging);
     }
 
+    /// <summary>Strip bootstrap-only scene objects before the in-memory build scene is baked.</summary>
+    public static void RemoveBootstrapDemoObjects(Scene scene)
+    {
+        BootstrapDemoRemoval.RemoveDemoCube(scene);
+    }
+
     static void BuildWithOptions(BuildOptions options)
     {
         const string scenePath = "Assets/Scenes/SampleScene.unity";
         Scene scene = EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Single);
-
-        if (GameObject.Find("DemoCube") == null)
-        {
-            GameObject cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            cube.name = "DemoCube";
-            cube.transform.position = new Vector3(0f, 1f, 2f);
-            EditorSceneManager.MarkSceneDirty(scene);
-        }
-        EditorSceneManager.SaveScene(scene);
+        RemoveBootstrapDemoObjects(scene);
 
         XRSetup.EnsureXR();
 

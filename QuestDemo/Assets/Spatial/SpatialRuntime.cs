@@ -140,7 +140,7 @@ public class SpatialRuntime : MonoBehaviour
     /// <summary>
     /// Task 7 coordinator supervision: slice-1 only while PlayerPrefs
     /// laptop_ipv4 is empty (no connect); otherwise create the client once
-    /// and tick it after PCA starts playing.
+    /// and tick it every frame while the IP is configured.
     /// </summary>
     void TickCoordinator()
     {
@@ -477,7 +477,7 @@ public class SpatialRuntime : MonoBehaviour
         {
             rightTouchConnected = false;
         }
-        if (!rightTouchConnected)
+        if (!ShouldEnableAimLineForController(rightTouchConnected))
         {
             _aimLine.enabled = false;
             return;
@@ -516,6 +516,10 @@ public class SpatialRuntime : MonoBehaviour
         if (_aimMaterial != null)
             _aimMaterial.color = color;
     }
+
+    /// <summary>Test seam: no connected right Touch controller means no aim line.</summary>
+    public static bool ShouldEnableAimLineForController(bool rightTouchConnected) =>
+        rightTouchConnected;
 
     internal static long ToUnixNanoseconds(DateTime timestamp)
     {
