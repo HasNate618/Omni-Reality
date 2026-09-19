@@ -4,8 +4,10 @@ using UnityEngine.Networking;
 
 /// <summary>
 /// Quest-side handler for coordinator-authored <c>place_generated</c> ops.
-/// Fetches GLB bytes from the laptop artifact HTTP server and pins a mesh
-/// at the capture-time surface (uniform scale to fit a 1 m sphere).
+/// Fetches GLB bytes from the laptop artifact HTTP server, imports the mesh
+/// with glTFast (com.atteneder.gltfast), and pins it at the capture-time
+/// surface (uniform scale to fit a 1 m sphere). If the import fails, a
+/// placeholder cube preserves the harness behaviour.
 /// </summary>
 public static class GeneratedMeshPlacer
 {
@@ -110,14 +112,50 @@ public static class GeneratedMeshPlacer
                 client.EnqueueAck(op, "rejected", null, "invalid", null);
                 yield break;
             }
-            GameObject root = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            root.name = "Generated_" + jobId;
+            GameObject root = null;
+            string tmpPath = null;
+            try
+            {
+                tmpPath = System.IO.Path.Combine(Application.temporaryCachePath, jobId + ".glb");
+                System.IO.File.WriteAllBytes(tmpPath, data);
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning("GeneratedMeshPlacer: cache write failed (" + e.GetType().Name + ")");
+                tmpPath = null;
+            }
+            if (tmpPath != null)
+            {
+                GameObject holder = new GameObject("Generated_" + jobId);
+                GLTFast.GltfAsset asset = holder.AddComponent<GLTFast.GltfAsset>();
+                System.Threading.Tasks.Task<bool> loadTask = asset.Load("file://" + tmpPath);
+                while (!loadTask.IsCompleted)
+                    yield return null;
+                bool ok = loadTask.Status == System.Threading.Tasks.TaskStatus.RanToCompletion
+                    && loadTask.Result
+                    && holder.GetComponentsInChildren<Renderer>().Length > 0;
+                if (ok)
+                {
+                    root = holder;
+                }
+                else
+                {
+                    Debug.LogWarning("GeneratedMeshPlacer: import failed, placeholder cube job=" + jobId);
+                    Object.Destroy(holder);
+                }
+                try { System.IO.File.Delete(tmpPath); } catch (System.Exception) { }
+            }
+            if (root == null)
+            {
+                root = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                root.name = "Generated_" + jobId;
+                root.transform.localScale = Vector3.one * 0.1f;
+            }
             root.transform.position = result.Point;
             Vector3 n = result.Normal;
             if (n.sqrMagnitude < 1e-6f)
                 n = Vector3.up;
             root.transform.rotation = Quaternion.FromToRotation(Vector3.up, n.normalized);
-            root.transform.localScale = Vector3.one * 0.1f;
             FitInsideUnitSphere(root);
             string drawingId = client.NewDrawingId != null
                 ? client.NewDrawingId()
