@@ -1,8 +1,10 @@
 """Offline LAN coordinator server (Task 6).
 
 Handles WebSocket `hello`/`hello_ok`, `ping`/`pong`, and emits exactly one
-laptop-authored hardcoded `scene_op` mark after the first valid `frame`
-(or the allowed hello-only test path when no JPEG frames are available).
+laptop-authored hardcoded `scene_op` mark after the first valid `frame`.
+`hello` alone never emits a mark: the production Quest sequence is hello
+first and a real frame later, and only the frame carries a resolvable
+frame_id/stage_epoch for the mark target.
 
 Offline by construction: this module never imports yibuapi, never reads
 any API key, never invokes a model, and never produces speech. Outbound
@@ -134,9 +136,11 @@ async def _handle_hello(ws: Any, state: CoordinatorState, message: dict) -> None
             {"session_id": session_id, "laptop_t_unix_ns": _laptop_now_ns()},
         )
     )
-    # Allowed JPEG-less test path: hello stands in for the first frame.
-    if not state.mark_sent:
-        await _send_mark(ws, state, stage_epoch=1, frame_id=new_ulid())
+    # NOTE: no mark here by design. The production Quest sequence is hello
+    # first, real frame later; emitting a mark on hello would carry a random
+    # frame_id no client can resolve and would consume the single mark
+    # (mark_sent) before the resolvable frame arrives. First valid frame
+    # emits the one mark; see _handle_frame.
 
 
 async def _handle_ping(ws: Any, state: CoordinatorState, message: dict) -> None:

@@ -164,6 +164,7 @@ class AckPriorityTests(unittest.TestCase):
             task = asyncio.create_task(handle_connection(ws, state))
             try:
                 await ws.inject(make_hello())
+                await ws.inject(make_frame())
                 mark = await wait_for(ws, lambda m: m["type"] == "scene_op")
                 op = mark["payload"]
                 self.assertIn(op["op_id"], state.pending_ops)
@@ -192,6 +193,7 @@ class AckPriorityTests(unittest.TestCase):
             task = asyncio.create_task(handle_connection(ws, state))
             try:
                 await ws.inject(make_hello())
+                await ws.inject(make_frame())
                 mark = await wait_for(ws, lambda m: m["type"] == "scene_op")
                 op = mark["payload"]
                 await ws.inject(
@@ -228,6 +230,7 @@ class AckPriorityTests(unittest.TestCase):
             task = asyncio.create_task(handle_connection(ws, state))
             try:
                 await ws.inject(make_hello())
+                await ws.inject(make_frame())
                 mark = await wait_for(ws, lambda m: m["type"] == "scene_op")
                 op = mark["payload"]
                 # Large fake frame queued first, then the cancel: the
@@ -258,6 +261,7 @@ class AckPriorityTests(unittest.TestCase):
             task = asyncio.create_task(handle_connection(ws, state))
             try:
                 await ws.inject(make_hello())
+                await ws.inject(make_frame())
                 mark = await wait_for(ws, lambda m: m["type"] == "scene_op")
                 op = dict(mark["payload"])
                 op["op_id"] = "01k5j8g0099q3m7b2d6h9n4r5v"
@@ -315,6 +319,7 @@ class AckPriorityTests(unittest.TestCase):
             task = asyncio.create_task(handle_connection(ws, state))
             try:
                 await ws.inject(make_hello())
+                await ws.inject(make_frame())
                 mark = await wait_for(ws, lambda m: m["type"] == "scene_op")
                 op = mark["payload"]
                 sess = mark["session_id"]

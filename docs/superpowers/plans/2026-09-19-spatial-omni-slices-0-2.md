@@ -654,7 +654,7 @@ EOF
 
 **Interfaces:**
 - Consumes: `protocol.validate`, `protocol.ids.new_ulid`, `websockets` (already in requirements).
-- Produces: `async def run_server(host: str = "0.0.0.0", port: int = 8765) -> None`. On Quest `hello` (`session_id` null), reply `hello_ok` with new `session_id` and `laptop_t_unix_ns`. On `ping`, reply `pong`. After first `frame` (or `hello` if testing without JPEG), send one `scene_op` `kind=mark` `target.type=capture_hint` `motion.pulse` with new `op_id`, `turn_id=1`, `stage_epoch` copied from envelope (or 1). Do not call yibuapi. Log clock skew if `|quest - laptop| > 2s` as `clock_skew_ns`; do not rewrite poses.
+- Produces: `async def run_server(host: str = "0.0.0.0", port: int = 8765) -> None`. On Quest `hello` (`session_id` null), reply `hello_ok` with new `session_id` and `laptop_t_unix_ns`. On `ping`, reply `pong`. After the first valid `frame`, send one `scene_op` `kind=mark` `target.type=capture_hint` `motion.pulse` with new `op_id`, `turn_id=1`, and the envelope stage epoch. The default coordinator never sends a production mark on `hello`; a future explicit `--plant-on-hello` test flag may do so only when it supplies a resolvable cached frame id. Do not call yibuapi. Log clock skew if `|quest - laptop| > 2s` as `clock_skew_ns`; do not rewrite poses.
 
 - [ ] **Step 1: Write the failing test**
 

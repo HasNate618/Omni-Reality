@@ -2,8 +2,9 @@
 
 In-process fake WebSocket tests only: no bound ports, no live service,
 no yibuapi calls. Covers hello/hello_ok, ping/pong, one hardcoded
-scene_op mark after a valid frame (or the allowed hello-only test path),
-session/stage fencing, clock-skew logging, and defensive invalid input.
+scene_op mark after the first valid frame (hello alone never emits a
+mark), session/stage fencing, clock-skew logging, and defensive
+invalid input.
 """
 
 from __future__ import annotations
@@ -173,28 +174,46 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(op["motion"], {"kind": "pulse", "period_s": 1.2})
         self.assertIn(op["op_id"], state.pending_ops)
 
-    def test_hello_without_frame_triggers_mark_with_stage_epoch_1(self) -> None:
-        """Allowed JPEG-less test path: hello alone yields the one mark."""
+    def test_hello_alone_sends_no_scene_op(self) -> None:
+        """Production starvation guard: hello returns only hello_ok."""
 
         async def scenario():
             return await run_session([make_hello()])
 
-        ws, _ = asyncio.run(scenario())
-        marks = [m for m in ws.sent if m["type"] == "scene_op"]
-        self.assertEqual(len(marks), 1)
-        validate_instance("scene_op", marks[0]["payload"])
-        self.assertEqual(marks[0]["payload"]["stage_epoch"], 1)
-        self.assertEqual(marks[0]["payload"]["turn_id"], 1)
+        ws, state = asyncio.run(scenario())
+        self.assertEqual([m["type"] for m in ws.sent], ["hello_ok"])
+        self.assertFalse(state.mark_sent)
+        self.assertEqual(state.pending_ops, {})
 
-    def test_mark_sent_exactly_once_across_hello_and_frames(self) -> None:
+    def test_production_sequence_hello_then_frame_emits_one_real_mark(self) -> None:
+        """hello, then first valid frame emits exactly one mark on the
+        real envelope frame_id/stage_epoch; repeated frames add none."""
+
         async def scenario():
             envelope = load_fixture("valid", "capture_envelope.json")
             frame = make_frame()
-            return await run_session([make_hello(), frame, copy.deepcopy(frame)])
+            ws, state = await run_session(
+                [make_hello(), frame, copy.deepcopy(frame)]
+            )
+            return ws, state, envelope
 
-        ws, _ = asyncio.run(scenario())
-        marks = [m for m in ws.sent if m["type"] == "scene_op"]
-        self.assertEqual(len(marks), 1)
+        ws, state, envelope = asyncio.run(scenario())
+        # hello_ok first, then exactly one mark, then silence.
+        self.assertEqual(
+            [m["type"] for m in ws.sent], ["hello_ok", "scene_op"]
+        )
+        mark_msg = ws.sent[1]
+        validate_instance("message", mark_msg)
+        op = mark_msg["payload"]
+        validate_instance("scene_op", op)
+        self.assertEqual(op["kind"], "mark")
+        self.assertEqual(op["turn_id"], 1)
+        self.assertEqual(op["stage_epoch"], envelope["stage_epoch"])
+        self.assertEqual(op["target"]["type"], "capture_hint")
+        self.assertEqual(op["target"]["frame_id"], envelope["frame_id"])
+        self.assertEqual(op["motion"], {"kind": "pulse", "period_s": 1.2})
+        self.assertIn(op["op_id"], state.pending_ops)
+        self.assertTrue(state.mark_sent)
 
     def test_session_fencing_ignores_foreign_session_frame(self) -> None:
         async def scenario():
