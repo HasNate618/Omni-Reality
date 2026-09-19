@@ -64,6 +64,24 @@ Everything an agent needs to use the sponsor model gateway. Code lives in `provi
 
 Takeaways: realtime first-turn setup is slow (~12s — budget for session warm-up); Gemini Live threw one transient upstream failure then succeeded (retry before concluding quota issues); Live token overhead is high (147 in / 39 out for a one-liner).
 
+## Audio input (2026-09-19 voice smoke, `qwen3.8-omni-flash`)
+
+Mic PCM is wrapped as WAV (16 kHz mono s16le) and sent as an `input_audio` data URL (`voice/audio.py: build_voice_messages`). This default shape works; `raw_b64` was not needed. Test speech comes from macOS `say` (`python -m voice.audio_smoke --say ...`).
+
+| Call | Result | Latency | Tokens in / out (reasoning) |
+| --- | --- | --- | --- |
+| audio only, 1.82 s (58 KB WAV) | heard verbatim: "Mark the red bottle on the left." | 6.02s | 103 (9 audio) / 523 (492) |
+| control, `--no-audio` | invented speech and an image that were never sent | 7.71s | 94 / 796 (765) |
+| audio 1.23 s + JPEG 612x408 (34 KB) | heard verbatim; described image correctly | 2.45s | 352 (9 audio, 249 image) / 106 (71) |
+| full voice turn via coordinator + fake Quest | `mark` image_point u=0.62 v=0.72 (on the laptop), ACK placed, spoke | ~3.5s model | — |
+
+Takeaways:
+
+- Audio really reaches the model: exact transcripts with audio, fabrication without. Slice-3 "mic audio in the HTTP call" is met.
+- `qwen3.8-omni-flash` does hidden reasoning that dominates latency (up to ~765 reasoning tokens) and `max_tokens` did not cap it (64 requested, 523 returned). Trying to disable thinking is the next latency lever.
+- With no image the model may invent one. The planner adds no ops when no JPEG was sent, whatever the model says.
+- The model said "I've marked…" despite the prompt. The coordinator only speaks that line after an ACK `placed`, so the claim stays honest.
+
 ## Known gap: multi-turn + interruption
 
 The WS scripts record single-turn usage only and have no barge-in handling. Planned conversation work needs: session reuse across turns, per-event usage classification (per-response vs cumulative — verify, never double-count), missing-usage retention, retry dedupe, TTS cancellation on interruption, and stale-frame pose discipline (late replies use capture-time pose). Extend `yibu_audit.py`; see AGENTS.md doc procedure before adding new scripts.
