@@ -1,0 +1,80 @@
+"""OpenAI tool definitions and model op filtering."""
+
+from __future__ import annotations
+
+from jsonschema import ValidationError
+
+from protocol.validate import validate_instance
+
+TOOL_DEFINITIONS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "inspect_objects",
+            "description": "Find salient objects in the current frame near a target.",
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["frame_id", "target"],
+                "properties": {
+                    "frame_id": {"type": "string"},
+                    "target": {"type": "object"},
+                    "phrase": {"type": "string", "maxLength": 40},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_generation",
+            "description": "Queue async mesh generation for a detected object.",
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "object_id": {"type": "string"},
+                    "target": {"type": "object"},
+                    "prompt": {"type": "string", "maxLength": 80},
+                    "frame_id": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "emit_scene_ops",
+            "description": "Propose up to three scene operations (ghost/mark only).",
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["ops"],
+                "properties": {
+                    "ops": {"type": "array", "maxItems": 3, "items": {"type": "object"}},
+                },
+            },
+        },
+    },
+]
+
+_COORDINATOR_KINDS = frozenset({"place_generated", "place_known"})
+
+
+def accept_model_ops(raw_ops: list, *, max_ops: int = 3) -> list[dict]:
+    """Validate model ops; drop mesh placement kinds and cap count."""
+    accepted: list[dict] = []
+    for item in raw_ops:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        if kind in _COORDINATOR_KINDS:
+            continue
+        try:
+            validate_instance("model_scene_op", item)
+        except ValidationError:
+            continue
+        accepted.append(item)
+        if len(accepted) >= max_ops:
+            break
+    return accepted[:max_ops]
