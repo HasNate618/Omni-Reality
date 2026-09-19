@@ -4,7 +4,7 @@
   "additionalProperties": false,
   "required": ["kind"],
   "properties": {
-    "kind": { "enum": ["mark", "label", "connect", "ghost", "place_known", "place_generated", "remove", "undo"] },
+    "kind": { "enum": ["mark", "label", "connect", "ghost", "remove", "undo"] },
     "drawing_id": { "anyOf": [{ "$ref": "#/$defs/ulid" }, { "type": "null" }] },
     "target": { "$ref": "#/$defs/target" },
     "from": { "$ref": "#/$defs/target" },
@@ -25,7 +25,7 @@
   },
   "allOf": [
     {
-      "if": { "properties": { "kind": { "enum": ["mark", "label", "ghost", "place_known", "place_generated", "remove"] } }, "required": ["kind"] },
+      "if": { "properties": { "kind": { "enum": ["mark", "label", "ghost", "remove"] } }, "required": ["kind"] },
       "then": { "required": ["target"] }
     },
     {
@@ -42,10 +42,6 @@
         "required": ["motion"],
         "properties": { "motion": { "type": "object", "properties": { "kind": { "enum": ["rotate", "slide"] } }, "required": ["kind"] } }
       }
-    },
-    {
-      "if": { "properties": { "kind": { "const": "place_known" } }, "required": ["kind"] },
-      "then": { "required": ["asset_id", "scale"] }
     },
     {
       "if": { "properties": { "kind": { "const": "remove" } }, "required": ["kind"] },
