@@ -22,8 +22,10 @@ ops over LAN; Unity renders and ACKs. No model calls in these slices.
 - Misses are honest chips, never floating pins: no-surface "I can't plant
   that on a surface.", stale "That moved, look again.", too-close "Too close
   for depth.", socket down "Laptop not connected."
-- **No yibuapi in these slices.** The coordinator never imports model code and
-  never reads an API key; Unity has no key path and never POSTs anywhere.
+- **No yibuapi in slices 0-2.** With the default `--planner mark` the
+  coordinator never calls a model or reads an API key. Only `--planner yibu`
+  (slice 3, below) does, via `provider/` helpers and `YIBU_API_KEY`. Unity has
+  no key path and never POSTs anywhere.
 
 ## Pointers
 
