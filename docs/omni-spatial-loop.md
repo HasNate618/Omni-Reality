@@ -91,3 +91,18 @@ ops over LAN; Unity renders and ACKs. No model calls in these slices.
 - Note: the headset and LAN pass/fail steps above are the acceptance gate for
   slices 1-2 and have **not** been run on device in this worktree; Python
   tests are the offline gate.
+- Voice proof runbook (needs headset + LAN + explicit credit go-ahead):
+  1. Laptop: `cd provider && . .venv/bin/activate && python -m coordinator.server
+     --planner yibu` (spends credit; key must be valid).
+  2. Optional credit smoke first (no headset):
+     `python -m omni.reasoner_smoke --purpose smoke_omni_tools --max-tokens 32`.
+  3. Quest: set `laptop_ipv4`, hold talk trigger, say "mark the inlet valve",
+     release. Expect: ghost/label/procedural pin on the surface, then cloud
+     speech playback with caption.
+  4. Say "generate that as a mesh" (or trigger a `start_generation` turn);
+     when the job is ready expect auto `place_generated`, real GLB render
+     (glTFast; cube means import fell back), and a short announce line.
+  5. Check laptop logs: `voice_gate` is `passed` for the turn; any `failed`
+     fails the voice-demo gate even if placement succeeded.
+  6. Barge-in: press PTT during speech → `cancel` stops the turn, no late
+     speech after the ACK.
