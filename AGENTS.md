@@ -6,13 +6,13 @@ Quest 3S spatial assistant for the Huawei OMNI Live track. Unity renders on-devi
 
 - `QuestDemo/` — Unity native app (camera, depth, raycast, overlays stay on-device).
 - `provider/` — yibuapi gateway client (Python). Setup/usage docs in `provider/README.md`.
-- `docs/` — one doc per topic (see Documentation procedure). Start here: `docs/omni-provider-api.md` (gateway contract), `docs/omni-live-pitch.md` (product), `docs/omni-live-research.md` (research). Design specs live in `docs/superpowers/specs/`.
+- `docs/` — one doc per topic (see Documentation procedure). Start here: `docs/omni-provider-api.md` (gateway contract), `docs/questdemo-build.md` (Unity→Quest build), `docs/omni-live-pitch.md` (product), `docs/omni-live-research.md` (research). Design specs live in `docs/superpowers/specs/`.
 
 ## Documentation procedure
 
 AGENTS.md is an index, not a manual. Details live in one doc per topic under `docs/`.
 
-- **Read:** before touching a topic, read its doc. Provider/API work → `docs/omni-provider-api.md`. Product direction → `docs/omni-live-pitch.md`. Longer evidence → `docs/omni-live-research.md`. Binding design decisions → newest spec in `docs/superpowers/specs/`.
+- **Read:** before touching a topic, read its doc. Provider/API work → `docs/omni-provider-api.md`. Unity/build/deploy work → `docs/questdemo-build.md`. Product direction → `docs/omni-live-pitch.md`. Longer evidence → `docs/omni-live-research.md`. Binding design decisions → newest spec in `docs/superpowers/specs/`.
 - **Update:** when behavior changes, update that topic's doc in the same commit as the code. A commit that changes the gateway, models, audit fields, or key lifecycle without touching `docs/omni-provider-api.md` is incomplete.
 - **Create:** when a new topic emerges (new subsystem, new contract, new workflow), add `docs/<kebab-topic>.md` with the same shape: what it is, contract/rules, how to verify. Then add one line for it in the Layout list above.
 - **Never:** duplicate a topic across two docs, paste secrets into any doc, or let AGENTS.md grow procedures that belong in a topic doc.
