@@ -40,7 +40,9 @@ ops over LAN; Unity renders and ACKs. No model calls in these slices.
 - Coordinator: `provider/coordinator/server.py`, run from `provider/` with
   `python -m coordinator.server` (binds `ws://0.0.0.0:8765`).
 - Unity side: `QuestDemo/Assets/Spatial/` (`SpatialRuntime`, `PlacementResolver`,
-  `PulsingRing`, `HonestyChip`, `CoordinatorClient`, `CaptureGeometryCache`).
+  `PulsingRing`, `HonestyChip`, `CoordinatorClient`, `CaptureGeometryCache`,
+  `GhostLabelConnect`, `Procedural/ProceduralFactory`, `Generated/`),
+  `QuestDemo/Assets/Voice/` (`SpeakCloudPlayer`).
 
 ## Voice turn (slice 3, laptop side)
 
@@ -50,19 +52,29 @@ ops over LAN; Unity renders and ACKs. No model calls in these slices.
   the slice-2 hardcoded mark above.
 - Quest sends `frame` (with `utterance_id`, envelope, `jpeg_b64`), ~100 ms
   `audio_chunk`s, then `utterance_end`. Under 0.5 s of PCM → no turn.
-- Turn order: `turn_started` → planner (full response, WAV + JPEG) → at most
-  3 schema-valid `scene_op`s (list frozen first) → wait 1500 ms for ACKs →
-  one `speak` (`audio: null`). Speech claims a drawing only if every op ACKed
-  `placed`/`applied`; rejected/stale use the honesty copy; a missing ACK says
-  "I couldn't confirm placement." once, and a late ACK never speaks again.
+- Turn order: `turn_started` → planner (WAV + JPEG; `--planner yibu` runs
+  the bounded tool loop — `inspect_objects` / `start_generation` /
+  `emit_scene_ops`, max 4 rounds — then one tools-disabled closing call
+  for the final line) → at most 3 schema-valid `scene_op`s (list frozen
+  first) → wait 1500 ms for ACKs → one `speak` with cloud PCM in
+  `speak.audio` (16 kHz mono s16le, Gemini Live leg; `audio: null` only
+  when no synthesizer is attached or synthesis fails). Speech claims a
+  drawing only if every op ACKed `placed`/`applied`; rejected/stale use
+  the honesty copy; a missing ACK says "I couldn't confirm placement."
+  once, and a late ACK never speaks again. Every turn records
+  `voice_gate` (`passed` / `failed` / `degraded`) in session context.
 - `cancel {turn_id}` tombstones the turn: no further ops or speech for it.
 - Planner seam: `provider/coordinator/planner.py` (`Planner.plan` →
   `PlanResult`). Spatial prompt/parse is Member A's `spatial_ops.parse_model_reply`
   when present; a JSON-extract fallback stands in until then.
 - Headset-free end-to-end: `python -m tools.fake_quest --say "mark the laptop"
   --jpeg photo.jpg` (`--reject`, `--no-ack` for honesty paths).
-- Not yet: spoken follow-up after the tool result (spec §7 step 5) is the
-  first reply's text, not a second tools-disabled call.
+- Quest renders `mark`, `label` (billboard card), `ghost` (rotate/slide),
+  `connect`, `place_procedural` (local composition: arrow/pointer/panel/
+  cube/sphere/cylinder, closed palette/sizes/materials), and
+  `revise_procedural` (enlarge/shrink/rotate/nudge/remove by drawing_id),
+  plus cloud-PCM `speak` playback with caption (`QuestDemo/Assets/Voice/`,
+  `Spatial/Procedural/`). Full GLB import is still open (placeholder cube).
 
 ## How to verify
 
