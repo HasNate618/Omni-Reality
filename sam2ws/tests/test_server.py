@@ -40,3 +40,17 @@ class ServerTest(unittest.TestCase):
                     err = json.loads(await sock.recv())
                     self.assertEqual(err["code"], "invalid")
         asyncio.run(go())
+
+    def test_stats_reply_shape(self):
+        from sam2ws import server
+
+        async def go():
+            async with server.serve_in_test(FakeSession()) as ws_port:
+                import websockets as ws
+                async with ws.connect(f"ws://127.0.0.1:{ws_port}") as sock:
+                    await sock.send(json.dumps({"v": 1, "type": "stats"}))
+                    reply = json.loads(await sock.recv())
+                    self.assertEqual(reply["type"], "stats_result")
+                    self.assertIn("dropped", reply)
+                    self.assertIn("peak_alloc_gb", reply)
+        asyncio.run(go())

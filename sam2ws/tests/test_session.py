@@ -1,5 +1,17 @@
+import io
 import tempfile
 import unittest
+
+from PIL import Image
+
+
+def _jpeg(w=8, h=8):
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), (200, 30, 30)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+JPEG = _jpeg()
 
 
 class FakePredictor:
@@ -8,8 +20,12 @@ class FakePredictor:
         self.points = []
 
     def init_state(self, video_path, **kw):
+        import torch
         self.inits.append(video_path)
-        return {"fake": True, "video_path": video_path}
+        return {"fake": True, "video_path": video_path,
+                "images": torch.zeros(0, 3, 1024, 1024),
+                "num_frames": 0, "device": torch.device("cpu"),
+                "offload_video_to_cpu": False}
 
     def add_new_points_or_box(self, state, frame_idx, obj_id, points, labels):
         self.points.append((frame_idx, obj_id, list(points), list(labels)))
@@ -33,12 +49,12 @@ class SessionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             s = TrackingSession(FakePredictor(), d, window=4, memory=7)
             for _ in range(4):
-                s.ingest(b"\xff\xd8" + b"0" * 10, 8, 8)
+                s.ingest(JPEG, 8, 8)
             self.assertEqual(len(s.predictor.inits), 1)
             s.click(0, 1, 1, 1, 1)
             # window-relative remap: global frame 0 is index 0 pre-slide
             self.assertEqual(s.predictor.points[-1][0], 0)
-            s.ingest(b"\xff\xd8" + b"0" * 10, 8, 8)
+            s.ingest(JPEG, 8, 8)
             self.assertEqual(len(s.predictor.inits), 2)
             with self.assertRaises(protocol.ProtocolError) as cm:
                 s.click(0, 1, 1, 1, 1)
@@ -59,7 +75,7 @@ class SessionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             s = TrackingSession(YieldingFake(), d, window=4, memory=7)
             for _ in range(3):
-                s.ingest(b"\xff\xd8" + b"0" * 10, 8, 8)
+                s.ingest(JPEG, 8, 8)
             s.click(0, 1, 1, 1, 1)
             out = s.masks_for_latest()
             self.assertEqual(len(out), 1)

@@ -55,6 +55,22 @@ def _process(session, msg):
         return protocol.build_error(req["frame_id"], "invalid", f"{name}: {e}")
 
 
+def _cuda_stats(dropped):
+    out = {"v": protocol.PROTOCOL_VERSION, "type": "stats_result",
+           "dropped": dropped, "peak_alloc_gb": None,
+           "peak_reserved_gb": None}
+    try:
+        import torch
+        if torch.cuda.is_available():
+            out["peak_alloc_gb"] = round(
+                torch.cuda.max_memory_allocated() / 1e9, 3)
+            out["peak_reserved_gb"] = round(
+                torch.cuda.max_memory_reserved() / 1e9, 3)
+    except Exception:
+        pass
+    return out
+
+
 def _make_handler(session_factory):
     async def handle(ws):
         session = session_factory()
@@ -83,6 +99,9 @@ def _make_handler(session_factory):
                 except ValueError:
                     await ws.send(json.dumps(
                         protocol.build_error(-1, "invalid", "not json")))
+                    continue
+                if isinstance(msg, dict) and msg.get("type") == "stats":
+                    await ws.send(json.dumps(_cuda_stats(slot["dropped"])))
                     continue
                 if slot["msg"] is not None:
                     slot["dropped"] += 1

@@ -1,6 +1,14 @@
 import os
 
+import numpy as np
+import torch
+from PIL import Image
+
 from sam2ws import protocol
+
+_IMG_MEAN = (0.485, 0.456, 0.406)
+_IMG_STD = (0.229, 0.224, 0.225)
+_IMG_SIZE = 1024
 
 
 class TrackingSession:
@@ -33,6 +41,37 @@ class TrackingSession:
                 points=[[x, y]], labels=[lab],
             )
 
+    def _encode_frame(self, jpeg_bytes):
+        """Mirror upstream _load_img_as_tensor + normalize, on model device."""
+        import io
+        img_pil = Image.open(io.BytesIO(jpeg_bytes))
+        img_np = np.array(img_pil.convert("RGB").resize((_IMG_SIZE, _IMG_SIZE)))
+        img = torch.from_numpy(img_np / 255.0).permute(2, 0, 1).float()
+        mean = torch.tensor(_IMG_MEAN).view(3, 1, 1)
+        std = torch.tensor(_IMG_STD).view(3, 1, 1)
+        img = (img - mean) / std
+        return img.to(self._state["device"], non_blocking=True)
+
+    def _try_append(self, jpeg_bytes):
+        """Fast path: cat one frame onto state images. Returns False to
+        signal the caller must re-init from the disk window instead."""
+        try:
+            if self._state.get("offload_video_to_cpu", False):
+                return False
+            imgs = self._state["images"]
+            if not isinstance(imgs, torch.Tensor):
+                return False
+            frame = self._encode_frame(jpeg_bytes)
+            if (tuple(frame.shape) != tuple(imgs.shape[1:])
+                    or frame.dtype != imgs.dtype
+                    or frame.device != imgs.device):
+                return False
+            self._state["images"] = torch.cat([imgs, frame.unsqueeze(0)], dim=0)
+            self._state["num_frames"] = int(self._state["num_frames"]) + 1
+            return True
+        except Exception:
+            return False
+
     def ingest(self, jpeg_bytes, w, h):
         self._last_wh = (w, h)
         idx = self._base + len(self._frames)
@@ -51,6 +90,8 @@ class TrackingSession:
             self._base += drop
             self._clicks = [(fi, x, y, l, o) for (fi, x, y, l, o) in self._clicks
                             if fi >= self._base]
+            self._boot()
+        elif not self._try_append(jpeg_bytes):
             self._boot()
         return self._base + len(self._frames) - 1
 
