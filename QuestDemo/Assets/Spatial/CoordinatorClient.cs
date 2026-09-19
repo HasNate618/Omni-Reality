@@ -130,6 +130,7 @@ public class CoordinatorClient : MonoBehaviour
     volatile bool _connecting;
     CancellationTokenSource _cts;
     string _sessionId;
+    int _artifactPort = 8766;
     float _lastPingAt;
     float _lastConnectAttemptAt = -1000f;
     bool _wasOpen;
@@ -373,6 +374,9 @@ public class CoordinatorClient : MonoBehaviour
                 string session;
                 if (ProtocolJson.TryGetSessionId(payload, out session) && session != null)
                     _sessionId = session;
+                int port;
+                if (ProtocolJson.TryGetIntField(payload, "artifact_port", out port) && port > 0)
+                    _artifactPort = port;
             }
             // New session never clears drawings: no Store call here by design.
             return;
@@ -390,6 +394,13 @@ public class CoordinatorClient : MonoBehaviour
                 Debug.LogWarning("CoordinatorClient: malformed scene_op ignored");
                 return;
             }
+            if (op.Kind == "place_generated")
+            {
+                if (!PrepareSceneOp(op))
+                    return;
+                GeneratedMeshPlacer.TryHandle(this, this, op, _ipv4, _artifactPort, Cache);
+                return;
+            }
             HandleMark(op);
             return;
         }
@@ -402,28 +413,35 @@ public class CoordinatorClient : MonoBehaviour
     /// Laptop mark path: dedupe, fence, resolve from the capture cache, pin,
     /// and ACK synchronously (same frame as render-or-reject).
     /// </summary>
-    internal void HandleMark(ProtocolJson.SceneOpMsg op)
+    bool PrepareSceneOp(ProtocolJson.SceneOpMsg op)
     {
         if (op == null || string.IsNullOrEmpty(op.OpId))
-            return;
+            return false;
         if (!_seenOpIds.Add(op.OpId))
         {
             Debug.Log("CoordinatorClient: duplicate op ignored op=" + op.OpId);
-            return;
+            return false;
         }
         if (!op.HasTurnId || op.TurnId == 0)
         {
             EnqueueAck(op, "rejected", null, "invalid", null);
             Debug.LogWarning("CoordinatorClient: op rejected invalid turn op=" + op.OpId);
-            return;
+            return false;
         }
         int epoch = GetStageEpoch != null ? GetStageEpoch() : 1;
         if (!op.HasStageEpoch || op.StageEpoch != epoch)
         {
             EnqueueAck(op, "stale", null, "superseded", null);
             Debug.Log("CoordinatorClient: op fenced superseded op=" + op.OpId);
-            return;
+            return false;
         }
+        return true;
+    }
+
+    internal void HandleMark(ProtocolJson.SceneOpMsg op)
+    {
+        if (!PrepareSceneOp(op))
+            return;
         if (op.Kind != "mark")
         {
             Debug.Log("CoordinatorClient: ignoring non-mark kind=" + op.Kind);

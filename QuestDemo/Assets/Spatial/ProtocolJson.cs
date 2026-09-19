@@ -346,6 +346,7 @@ public static class ProtocolJson
         public bool HasStageEpoch;
         public int StageEpoch;
         public string Kind;
+        public string JobId;
         public string TargetFrameId;
         public bool HasMotion;
         public float MotionPeriodS;
@@ -381,6 +382,8 @@ public static class ProtocolJson
         if (!TryGetStringOrNull(payloadJson, "kind", out s, out found) || !found || s == null)
             return false;
         parsed.Kind = s;
+        if (TryGetStringOrNull(payloadJson, "job_id", out s, out found) && found)
+            parsed.JobId = s;
         int targetAt = IndexOfKey(payloadJson, "target", 0);
         if (targetAt >= 0)
         {
@@ -466,6 +469,19 @@ public static class ProtocolJson
         if (!TryReadString(json, i, out parsed, out endAt))
             return false;
         value = parsed;
+        return true;
+    }
+
+    /// <summary>Integer field read (hello_ok artifact_port, etc.).</summary>
+    public static bool TryGetIntField(string json, string key, out int value)
+    {
+        long l;
+        if (!TryGetLong(json, key, out l))
+        {
+            value = 0;
+            return false;
+        }
+        value = (int)l;
         return true;
     }
 
