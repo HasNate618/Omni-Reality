@@ -11,6 +11,11 @@ using UnityEngine.Rendering;
 /// <see cref="EnvironmentRaycastManager"/> depth hit that fills
 /// <c>world_hint</c>. Capture range is [0.25 m, 4 m]; misses are honest
 /// (<c>world_hint</c> null, unchanged honesty) with no pin.
+/// Task 5 placement resolves from the capture-time cache entry and a delayed
+/// re-query of the SAME capture-time ray (never the live head pose): a cached
+/// hit pins a world-locked pulsing ring only when the delayed hit agrees via
+/// StaleMath; too_close / no_surface / stale show the exact honest chip. The
+/// left trigger forces a miss (depth briefly disabled) and never pins.
 /// Coherence rule: no-trigger captures serialize <c>pointing: null</c> and use
 /// the capture-time centre ray; trigger captures serialize exactly the sampled
 /// controller ray stamped with its actual sample time (never the PCA image
@@ -45,6 +50,8 @@ public class SpatialRuntime : MonoBehaviour
     Material _aimMaterial;
     readonly CaptureGeometryCache _cache = new CaptureGeometryCache();
     int _stageEpoch = 1;
+    DrawingStore _store;
+    HonestyChip _chip;
 
     void Awake()
     {
@@ -89,9 +96,141 @@ public class SpatialRuntime : MonoBehaviour
             Pose cameraPose;
             Ray ray;
             if (TryCapture(out env, out cameraPose, out ray))
+            {
                 Debug.Log("ENVELOPE " + env.ToSpecJson());
+                ResolveAndPlace(env);
+            }
             else
                 Debug.Log("SpatialRuntime: capture skipped (camera or raycast unavailable)");
+        }
+        // Second binding (Task 5 forced miss): the left trigger captures,
+        // then resolves with depth briefly disabled (no delayed hit), so the
+        // outcome is always the honest chip with no pin in mid-air.
+        try
+        {
+            if (OVRInput.GetDown(OVRInput.Button.SecondaryIndexTrigger, OVRInput.Controller.LTouch))
+            {
+                CaptureEnvelope missEnv;
+                Pose missPose;
+                Ray missRay;
+                if (TryCapture(out missEnv, out missPose, out missRay))
+                {
+                    Debug.Log("ENVELOPE " + missEnv.ToSpecJson());
+                    ForceMiss(missEnv);
+                }
+                else
+                    Debug.Log("SpatialRuntime: forced-miss capture skipped (camera or raycast unavailable)");
+            }
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    /// <summary>
+    /// Task 5 resolve + place: delayed validation re-queries the CACHED
+    /// capture-time ray (never the live head pose) and pins only on a
+    /// confident <c>placed</c> verdict; misses show the exact honest chip.
+    /// </summary>
+    internal void ResolveAndPlace(CaptureEnvelope env)
+    {
+        if (env == null)
+            return;
+        EnsurePlacementRefs();
+        CaptureGeometryCache.Entry entry;
+        if (!_cache.TryGet(env.FrameId, out entry) || entry == null)
+        {
+            ShowChip(PlacementResolver.ChipNoSurfaceText);
+            return;
+        }
+        Vector3? delayedPoint = DelayedHitPoint(PlacementResolver.CachedRay(entry));
+        PlacementResult result = PlacementResolver.TryPlaceFromCapture(entry, env.Honesty, delayedPoint, true);
+        if (result.ShouldPin)
+        {
+            _store.PlaceMark(result.Point, result.Normal, env.FrameId);
+            Debug.Log("PLACED drawing=" + env.FrameId);
+        }
+        else if (result.ChipText != null)
+        {
+            ShowChip(result.ChipText);
+        }
+    }
+
+    /// <summary>
+    /// Task 5 forced miss: resolves with depth briefly disabled (no delayed
+    /// hit, different-ray sky equivalent), so the outcome is always the
+    /// honest chip and no pin floats in mid-air.
+    /// </summary>
+    internal void ForceMiss(CaptureEnvelope env)
+    {
+        if (env == null)
+            return;
+        EnsurePlacementRefs();
+        CaptureGeometryCache.Entry entry;
+        _cache.TryGet(env.FrameId, out entry);
+        // Depth disabled: delayedPoint stays null. StaleMath maps a null
+        // delayed hit to no_surface (or too_close from capture honesty);
+        // the resolver never pins here by construction.
+        PlacementResult result = PlacementResolver.TryPlaceFromCapture(entry, env.Honesty, null, false);
+        Debug.Log("FORCED_MISS chip=" + result.ChipText);
+        if (result.ChipText != null)
+            ShowChip(result.ChipText);
+    }
+
+    /// <summary>Delayed depth query from a capture-time ray. Null on any miss.</summary>
+    internal Vector3? DelayedHitPoint(Ray cachedRay)
+    {
+        if (_raycast == null)
+            return null;
+        try
+        {
+            EnvironmentRaycastHit hit;
+            if (_raycast.Raycast(cachedRay, out hit, MaxCaptureDistanceM)
+                && hit.status == EnvironmentRaycastHitStatus.Hit)
+                return hit.point;
+        }
+        catch (Exception)
+        {
+        }
+        return null;
+    }
+
+    /// <summary>Test/injection seam for the Task 5 placement refs.</summary>
+    internal void SetPlacementRefs(DrawingStore store, HonestyChip chip)
+    {
+        _store = store;
+        _chip = chip;
+    }
+
+    void EnsurePlacementRefs()
+    {
+        // Dedicated GameObjects: HonestyChip.Show/Hide toggles its own
+        // object, so sharing ARDirector would hide the whole director.
+        if (_store == null)
+        {
+            _store = FindAnyObjectByType<DrawingStore>();
+            if (_store == null)
+                _store = new GameObject("DrawingStore").AddComponent<DrawingStore>();
+        }
+        if (_chip == null)
+        {
+            _chip = FindAnyObjectByType<HonestyChip>();
+            if (_chip == null)
+                _chip = new GameObject("HonestyChip").AddComponent<HonestyChip>();
+        }
+    }
+
+    void ShowChip(string text)
+    {
+        if (_chip == null)
+            return;
+        try
+        {
+            _chip.Show(text, _centerEye);
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning("SpatialRuntime: honesty chip unavailable (" + e.GetType().Name + ")");
         }
     }
 
