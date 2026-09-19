@@ -10,6 +10,10 @@ turn (coordinator/turn.py). Only the yibu planner calls a model.
 first and a real frame later, and only the frame carries a resolvable
 frame_id/stage_epoch for the mark target.
 
+--sam2-url opts into voice-seeded tracking: frame JPEGs feed a bounded history,
+utterance_end names the selected frame, and tracking results return on the
+same Quest socket. The receive loop stays active while selection/tracking run.
+
 This module never imports yibuapi or reads an API key itself; the
 default (no planner) path never invokes a model or produces speech. Outbound
 frames are always v1 JSON text. Inbound frames are validated defensively;
@@ -175,6 +179,25 @@ async def _handle_frame(ws: Any, state: CoordinatorState, message: dict) -> None
         )
         return
     state.accept_envelope(envelope)
+    if state.tracking is not None:
+        bridge = state.tracking
+        if bridge.epoch != envelope["stage_epoch"]:
+            if bridge.epoch is not None:
+                for turn_id in list(state.turn_tasks):
+                    cancel_turn(state, turn_id)
+                await bridge.reset()
+                await bridge.status("stopped", "Tracking origin changed; select the object again.")
+            bridge.epoch = envelope["stage_epoch"]
+        from coordinator.sam2_bridge import TrackingError
+        try:
+            encoded = message["payload"].get("jpeg_b64")
+            if not isinstance(encoded, str) or len(encoded) > 470_000:
+                raise TrackingError("Missing or oversized camera JPEG.")
+            jpeg = base64.b64decode(encoded, validate=True)
+            bridge.history.add(envelope, jpeg)
+        except (TrackingError, binascii.Error, ValueError) as exc:
+            logger.warning("Tracking frame rejected: %s", exc)
+        return
     _check_clock_skew(state, envelope.get("t_unix_ns"))
     if state.planner is not None:
         _attach_frame_to_utterance(state, message, envelope)
@@ -229,6 +252,11 @@ async def _handle_utterance_end(ws: Any, state: CoordinatorState, message: dict)
     if not isinstance(utterance_id, str):
         logger.info("ignoring utterance_end without utterance_id")
         return
+    if state.tracking is not None:
+        frame_id = message["payload"].get("frame_id")
+        state.utterances.setdefault(utterance_id, UtteranceBuffer()).selected_frame_id = (
+            frame_id if isinstance(frame_id, str) else None
+        )
     start_turn(state, _turn_sender(ws, state), utterance_id)
 
 
@@ -263,6 +291,9 @@ async def _handle_cancel(ws: Any, state: CoordinatorState, message: dict) -> Non
     turn_id = payload.get("turn_id")
     if isinstance(turn_id, int) and not isinstance(turn_id, bool) and "op_id" not in payload:
         cancel_turn(state, turn_id)
+        if state.tracking is not None and state.tracking.turn_id == turn_id:
+            await state.tracking.stop()
+            await state.tracking.status("stopped", "Tracking stopped.")
         logger.info("cancel turn=%d", turn_id)
         return
     op_id = payload.get("op_id")
@@ -345,15 +376,25 @@ async def handle_connection(ws: Any, state: CoordinatorState) -> None:
             return
 
 
-def make_planner(kind: str, model: str | None = None):
+def make_planner(kind: str, model: str | None = None, tracking: bool = False):
     """None (slice-2 hardcoded mark), a StubPlanner, or a live YibuPlanner."""
     if kind == "mark":
         return None
     from coordinator.planner import StubPlanner, YibuPlanner
 
     if kind == "stub":
+        if tracking:
+            from coordinator.planner import PlanResult
+
+            class TrackingStub(StubPlanner):
+                async def plan(self, **kwargs):
+                    return PlanResult(ops=[], text="", tracking_target={"type": "image_point", "u": 0.5, "v": 0.5})
+            return TrackingStub()
         return StubPlanner()
-    return YibuPlanner(model=model) if model else YibuPlanner()
+    options = {"tracking": tracking, "purpose": "track-object" if tracking else "voice-turn"}
+    if model:
+        options["model"] = model
+    return YibuPlanner(**options)
 
 
 async def run_server(
@@ -361,12 +402,25 @@ async def run_server(
     port: int = 8765,
     planner_kind: str = "mark",
     model: str | None = None,
+    sam2_url: str | None = None,
 ) -> None:
     """Bind the coordinator WebSocket server (CLI: python -m coordinator.server)."""
     import websockets
 
     async def _serve_one(ws) -> None:
-        await handle_connection(ws, CoordinatorState(planner=make_planner(planner_kind, model)))
+        state = CoordinatorState(planner=make_planner(planner_kind, model, bool(sam2_url)))
+        if sam2_url:
+            from coordinator.sam2_bridge import Sam2Bridge
+            state.tracking = Sam2Bridge(sam2_url, _turn_sender(ws, state))
+        try:
+            await handle_connection(ws, state)
+        finally:
+            tasks = list(state.turn_tasks.values())
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if state.tracking:
+                await state.tracking.stop()
 
     async with websockets.serve(_serve_one, host, port):
         logger.info("coordinator listening on %s:%d (planner=%s)", host, port, planner_kind)
@@ -384,6 +438,9 @@ if __name__ == "__main__":
         help="mark: slice-2 hardcoded mark (default); stub: offline voice turns; yibu: live model (spends credit)",
     )
     parser.add_argument("--model", help="yibu model id (default qwen3.8-omni-flash)")
+    parser.add_argument("--sam2-url", help="enable single-object tracking, e.g. ws://127.0.0.1:8766")
     args = parser.parse_args()
+    if args.sam2_url and args.planner == "mark":
+        parser.error("--sam2-url requires --planner stub or --planner yibu")
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(run_server(args.host, args.port, args.planner, args.model))
+    asyncio.run(run_server(args.host, args.port, args.planner, args.model, args.sam2_url))

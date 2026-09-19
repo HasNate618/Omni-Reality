@@ -56,6 +56,8 @@ public class SpatialRuntime : MonoBehaviour
     string _laptopIpv4 = "";
     DrawingStore _store;
     HonestyChip _chip;
+    QuestTrackingSettings _trackingSettings;
+    public CoordinatorClient Coordinator { get { return _coord; } }
 
     void Awake()
     {
@@ -73,6 +75,9 @@ public class SpatialRuntime : MonoBehaviour
             _rightAim = rightGO.transform;
         SetupAimLine();
         _laptopIpv4 = PlayerPrefs.GetString(CoordinatorClient.LaptopIpv4PrefKey, "");
+        _trackingSettings = QuestTrackingSettings.Load();
+        if (_trackingSettings != null && _trackingSettings.enableTracking)
+            _laptopIpv4 = _trackingSettings.laptopIpv4.Trim();
     }
 
     void OnEnable()
@@ -93,6 +98,8 @@ public class SpatialRuntime : MonoBehaviour
     void Update()
     {
         TickCoordinator();
+        if (_trackingSettings != null && _trackingSettings.enableTracking)
+            return; // QuestStreamInput owns capture/buttons in tracking mode.
         if (_pca == null || !_pca.IsPlaying)
             return;
         UpdateAimLine();
@@ -280,12 +287,12 @@ public class SpatialRuntime : MonoBehaviour
     /// <c>world_hint</c>, and the capture-time <paramref name="cameraPose"/>
     /// and <paramref name="ray"/> used. The capture is always cached.
     /// </summary>
-    public bool TryCapture(out CaptureEnvelope env, out Pose cameraPose, out Ray ray)
+    public bool TryCapture(out CaptureEnvelope env, out Pose cameraPose, out Ray ray, bool captureGeometry = true)
     {
         env = null;
         cameraPose = default(Pose);
         ray = default(Ray);
-        if (_pca == null || !_pca.IsPlaying || _raycast == null)
+        if (_pca == null || !_pca.IsPlaying || (captureGeometry && _raycast == null))
             return false;
 
         // Capture-time state only: pose and timestamp belong to this frame.
@@ -357,7 +364,7 @@ public class SpatialRuntime : MonoBehaviour
         Vector3 hitPoint = default(Vector3);
         Vector3 hitNormal = default(Vector3);
         EnvironmentRaycastHit hit;
-        if (_raycast.Raycast(ray, out hit, MaxCaptureDistanceM)
+        if (captureGeometry && _raycast != null && _raycast.Raycast(ray, out hit, MaxCaptureDistanceM)
             && hit.status == EnvironmentRaycastHitStatus.Hit)
         {
             float distance = Vector3.Distance(origin, hit.point);
@@ -392,7 +399,7 @@ public class SpatialRuntime : MonoBehaviour
 
         // Every valid capture is cached, including misses and too-close
         // frames; availability is cache existence, not hit success.
-        _cache.Store(frameId, new CaptureGeometryCache.Entry
+        if (captureGeometry) _cache.Store(frameId, new CaptureGeometryCache.Entry
         {
             CameraPose = cameraPose,
             FocalLength = new Vector2(fx, fy),

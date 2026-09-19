@@ -259,6 +259,8 @@ async def handler(websocket):
 
             result = process_frame(session, frame, data.get("clicks", []))
             response = {"type": "result", "objects": []}
+            if isinstance(data.get("frame_id"), str):
+                response["frame_id"] = data["frame_id"]
             if result is not None:
                 obj_ids, masks = result
                 for obj_id, mask in zip(obj_ids, masks):

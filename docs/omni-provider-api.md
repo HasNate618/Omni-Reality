@@ -82,6 +82,21 @@ Takeaways:
 - With no image the model may invent one. The planner adds no ops when no JPEG was sent, whatever the model says.
 - The model said "I've marked…" despite the prompt. The coordinator only speaks that line after an ACK `placed`, so the claim stays honest.
 
+### Single-object tracking selection
+
+With coordinator `--sam2-url`, `YibuPlanner(tracking=True)` reuses the same
+audited audio + JPEG HTTP call, with purpose `track-object`. The tracking prompt
+requests `{"heard":"...","say":"...","track":{"type":"image_point","u":0.5,"v":0.5}}`
+or `track:null`. It asks for one point inside the visible foreground object;
+coordinates are normalized top-left in the exact submitted JPEG. The parser
+rejects nonfinite, boolean, out-of-range, and non-point coordinates, strips
+model-supplied frame IDs, and accepts no target without an image and envelope.
+The coordinator owns snapshot identity and converts UVs to the existing SAM 2
+pixel-click protocol. Selection is called once per utterance, not per tracked
+frame. This path emits tracking status/masks, not placement ACKs or success
+speech. Defaults remain `qwen3.8-omni-flash`, 256 requested output tokens, and
+the same env-only key/audit handling. See [Quest camera + push-to-talk setup](quest-audio-setup.md).
+
 ## Known gap: multi-turn + interruption
 
 The WS scripts record single-turn usage only and have no barge-in handling. Planned conversation work needs: session reuse across turns, per-event usage classification (per-response vs cumulative — verify, never double-count), missing-usage retention, retry dedupe, TTS cancellation on interruption, and stale-frame pose discipline (late replies use capture-time pose). Extend `yibu_audit.py`; see AGENTS.md doc procedure before adding new scripts.

@@ -8,6 +8,9 @@ turn loop never sees prompts or raw model output, only a PlanResult.
 - YibuPlanner: live yibu omni call over HTTP. Prompting/parsing for spatial
   ops is Member A's lane; when `spatial_ops.parse_model_reply(text) ->
   (say, heard, ops)` exists it is used, otherwise a minimal JSON extractor stands in.
+
+YibuPlanner(tracking=True) instead requests one interior image point in
+PlanResult.tracking_target; frame identity remains owned by the coordinator.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -38,6 +42,7 @@ class PlanResult:
     heard: str | None = None
     audit_id: str | None = None
     proposed_op_count: int = 0  # before validation/capping
+    tracking_target: dict | None = None
 
 
 class Planner(Protocol):
@@ -149,6 +154,34 @@ Rules:
 - Never guess safety-critical facts (live power, load ratings, food doneness)."""
 
 
+TRACKING_PROMPT = """You hear a user's recorded request and see one Quest camera image.
+Select the single visible object the user asks to track/find. Reply ONLY with:
+{"heard":"the user's words", "say":"short clarification if needed",
+ "track":{"type":"image_point","u":0.5,"v":0.5}}
+u is left-to-right and v is top-to-bottom, normalized 0..1 in THIS image.
+Choose a point INSIDE the object's visible solid surface, not background,
+a hole, a shadow, or merely the centre of its bounding box. For a laptop,
+prefer the middle of its screen or keyboard. Return "track":null if no image
+is provided, the object is absent, the request isn't to select an object,
+or you cannot determine which instance is meant. Do not invent a target.
+Return one point only, not a box, world coordinates, or drawing ops.
+Never claim tracking or rendering has started; the application does that later."""
+
+
+def parse_tracking_reply(text: str) -> tuple[str, str | None, dict | None]:
+    obj = _extract_json_object(text) or {}
+    say = obj.get("say") if isinstance(obj.get("say"), str) else ""
+    heard = obj.get("heard") if isinstance(obj.get("heard"), str) else None
+    target = obj.get("track")
+    if not isinstance(target, dict) or target.get("type") != "image_point":
+        return say, heard, None
+    coords = [target.get("u"), target.get("v")]
+    if any(isinstance(n, bool) or not isinstance(n, (int, float)) or not math.isfinite(n)
+           or not 0 <= n <= 1 for n in coords):
+        return say, heard, None
+    return say, heard, {"type": "image_point", "u": coords[0], "v": coords[1]}
+
+
 def _extract_json_object(text: str) -> dict | None:
     """Fallback parser: first {...} object in the reply, fences tolerated."""
     stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
@@ -190,11 +223,13 @@ class YibuPlanner:
         purpose: str = "voice-turn",
         max_tokens: int = 256,
         audio_as: str = "data_url",
+        tracking: bool = False,
     ) -> None:
         self.model = model
         self.purpose = purpose
         self.max_tokens = max_tokens
         self.audio_as = audio_as
+        self.tracking = tracking
 
     def _call(self, messages: list[dict[str, Any]]) -> tuple[str, dict]:
         from yibu_http import chat_completion, require_api_key
@@ -216,17 +251,22 @@ class YibuPlanner:
         if history:
             prompt += "\nRecent turns:\n" + history
         if jpeg is None:
-            prompt += "\nNo camera image this turn: add no ops."
+            prompt += "\nNo camera image this turn: " + ("return track:null." if self.tracking else "add no ops.")
         messages = build_voice_messages(
             prompt,
             wav=pcm_to_wav_bytes(pcm),
             jpeg=jpeg,
-            system=SYSTEM_PROMPT,
+            system=TRACKING_PROMPT if self.tracking else SYSTEM_PROMPT,
             audio_as=self.audio_as,
         )
         started = time.monotonic()
         text, record = await asyncio.to_thread(self._call, messages)
         latency_ms = int((time.monotonic() - started) * 1000)
+        if self.tracking:
+            say, heard, target = parse_tracking_reply(text)
+            return PlanResult(ops=[], text=say, heard=heard, latency_ms=latency_ms,
+                              audit_id=record.get("call_id"),
+                              tracking_target=target if jpeg is not None and envelope else None)
         say, heard, raw_ops = _parse_reply(text)
         frame_id = envelope["frame_id"] if envelope and jpeg is not None else None
         ops = accept_model_ops(raw_ops, frame_id) if frame_id else []

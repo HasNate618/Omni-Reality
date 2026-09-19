@@ -42,6 +42,15 @@ ops over LAN; Unity renders and ACKs. No model calls in these slices.
 
 ## Voice turn (slice 3, laptop side)
 
+**Tracking integration:** `--sam2-url ws://127.0.0.1:8766` with `--planner
+stub|yibu` opts into a separate single-object tracking turn. Quest's
+`QuestStreamInput` sends real JPEGs and A-button push-to-talk PCM. The selected
+frame and Huawei point seed the existing SAM 2 click protocol; results return
+as `tracking_result` instead of spatial `scene_op`s. Follow
+[Quest camera + push-to-talk setup](quest-audio-setup.md); the frame contract
+lives in [omni-sam2-streaming.md](omni-sam2-streaming.md#quest--voice-automatic-initialization).
+The existing placement/ACK turn below remains the default without that flag.
+
 - Coordinator runs voice turns only with a planner:
   `python -m coordinator.server --planner stub` (offline) or `--planner yibu`
   (live `qwen3.8-omni-flash`, spends credit). Default `--planner mark` keeps
@@ -61,6 +70,9 @@ ops over LAN; Unity renders and ACKs. No model calls in these slices.
   --jpeg photo.jpg` (`--reject`, `--no-ack` for honesty paths).
 - Not yet: spoken follow-up after the tool result (spec §7 step 5) is the
   first reply's text, not a second tools-disabled call.
+
+Tracking uses status/result events rather than the placement-ACK speech path.
+Its Unity source does not implement speech playback or a new passthrough renderer.
 
 ## How to verify
 

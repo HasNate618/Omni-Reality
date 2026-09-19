@@ -184,6 +184,8 @@ public static class ARSetup
             director.AddComponent<ARRuntime>();
         if (director.GetComponent<SpatialRuntime>() == null)
             director.AddComponent<SpatialRuntime>();
+        if (director.GetComponent<QuestStreamInput>() == null)
+            director.AddComponent<QuestStreamInput>();
         Debug.Log("ARSetup: ARRuntime + SpatialRuntime on ARDirector");
 
         // 8. Camera-texture quad + director (camera API demo, deferred).

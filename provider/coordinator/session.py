@@ -22,6 +22,7 @@ class UtteranceBuffer:
     pcm: bytearray = field(default_factory=bytearray)
     jpeg: bytes | None = None
     envelope: dict | None = None
+    selected_frame_id: str | None = None
 
 
 class CoordinatorState:
@@ -49,6 +50,7 @@ class CoordinatorState:
         self.completed_ops: dict[str, dict] = {}
         self.cancelled_op_ids: list[str] = []
         self.mark_sent: bool = False
+        self.tracking = None  # optional Sam2Bridge; existing mark/voice paths stay default
         self.last_clock_skew_ns: int | None = None
 
     def is_session_allowed(self, incoming: str | None) -> bool:

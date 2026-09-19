@@ -9,7 +9,8 @@ A decoupled client-server architecture for real-time SAM 2 tracking.
 - **Dependencies**: The architecture requires `websockets>=11.0` and `opencv-python>=4.8.0`. Install them via `pip install -r sam2/requirements-ws.txt`.
 - **Payload Format**: 
   - Client sends `{"type": "frame", "jpeg_b64": <string>, "clicks": [{"x": int, "y": int, "obj_id": int}]}`. Click coordinates are in the pixels of the sent (downscaled) frame.
-  - Server replies `{"type": "result", "objects": [{"obj_id": int, "mask_b64": <string>}]}`; masks are PNGs at the sent frame's resolution.
+  - Server replies `{"type": "result", "objects": [{"obj_id": int, "mask_b64": <string>}]}`; masks are PNGs at the first frame's resolution. Keep dimensions fixed within a connection.
+  - An optional string `frame_id` on a request is echoed in its result. Existing webcam requests without it still work.
   - Object removal (`removes`, right-click) is **not implemented** on either side yet.
 - **Memory Safety**: The server keeps a rolling window. It drops raw image tensors older than 5 frames and keeps only a small set of past frames per object in tracking memory (`SAM2_MEMORY`, below). Clicked (conditioning) frames are kept, and attention uses at most the 2 closest per object. Device memory stays flat over long sessions.
 - **Backpressure**: One frame in flight. The client waits for each result before sending the newest frame, so frames never queue up and there is no fixed sleep.
@@ -64,3 +65,97 @@ Benchmark without a webcam (works on both machines):
 2. Run the server: `cd sam2 && python sam2_ws_server.py`. Wait for `Starting SAM 2 WebSocket Server`.
 3. In a separate terminal, run the client: `cd sam2 && python sam2_ws_client.py`.
 4. The webcam will open. Left-click to add distinct tracked objects. Validate that the camera maintains a stable FPS on screen. Restart the client to clear objects (removal isn't implemented).
+
+## Quest + voice automatic initialization
+
+This opt-in integration replaces one manual click with one Huawei-selected
+**interior point**. Quest supplies RGB and push-to-talk audio. Huawei sees one
+selected JPEG plus that audio; the existing SAM 2 server gets the exact JPEG
+and a normal `clicks` entry, then subsequent Quest images with empty `clicks`.
+It does not call Huawei per video frame. One active object is supported in this
+mode; a new utterance replaces the previous selection/tracker connection.
+
+For Python server commands, Unity configuration, USB/Wi-Fi connectivity,
+microphone permissions, controls, and troubleshooting, follow
+[Quest camera + push-to-talk setup](quest-audio-setup.md).
+
+### Unity result handoff
+
+`CoordinatorClient.TrackingResultReceived` is the **main-thread handoff to the
+existing visualization code**. `LatestTrackingResult` also exposes the latest
+result. It carries `frame_id`, `seed_frame_id`, `width`, `height`, `generation`,
+`stage_epoch`, and `objects[]` with the existing `obj_id`/`mask_b64` fields.
+`RawPayloadJson` includes the original capture envelope. For example, attach
+your existing renderer by subscribing once the client exists:
+
+```csharp
+// SpatialRuntime creates its client after the camera starts and an endpoint is set.
+var client = FindAnyObjectByType<SpatialRuntime>().Coordinator;
+// In your renderer: subscribe when client becomes non-null; unsubscribe on disable.
+client.TrackingResultReceived += OnTrackingResult;
+// OnTrackingResult(TrackingResult result) consumes result.objects[n].mask_b64.
+```
+
+This integration delivers masks to that hook; it does not implement a new
+passthrough renderer. The webcam client's existing markers/labels are OpenCV
+rendering on the computer, so they do not automatically become Unity objects.
+Use `TrackingStatusReceived` to clear/fade visuals on `selecting`, `error`,
+`stopped`, or disconnection. Never treat a pixel mask as world coordinates.
+
+### Frame and queue rules
+
+- Tracking explicitly enables continuous capture (default 3 fps); the old
+  event-driven 2 fps drawing contract still applies to spatial-mark mode.
+- An utterance ends with its selected `frame_id`. The server waits up to 5 s
+  for that JPEG if control messages overtake it. The same immutable bytes go
+  to Huawei and to SAM 2. No additional resize occurs in the bridge.
+- UVs use the existing top-left/pixel-centre convention: `x=u*w-0.5`,
+  `y=v*h-0.5`, clamped at image edges. Only a foreground point is requested;
+  bounding-box centroids are not substituted for foreground points.
+- Capture retains matched pose/intrinsics. Image streaming does not require
+  a depth hit and does not populate the spatial-mark single-ray cache.
+- While selection runs, a CPU JPEG history is bounded to **20 s, 24 MiB,
+  and 160 frames**. SAM 2 starts a fresh session at the selected frame and
+  replays successors in order. It then switches to one frame in flight,
+  latest-frame mode. Expired history or a catch-up timeout asks for a new
+  selection instead of silently applying stale coordinates to a current frame.
+- The selected snapshot is reliable/queued; ordinary outgoing video is
+  replaceable. Audio chunks and their end marker share FIFO ordering.
+- Session disconnect, tracking-origin reset, B-button stop, and replacement
+  requests fence old work. Fixed image dimensions are required per stream.
+- `Flip Image Vertically` is a diagnostic option. Check an asymmetric scene
+  in the received image first; if changed, its inverse is recorded in `crop`.
+  `LateUpdate` uses PCA's `GetColors()` (ordered GPU readback after its native
+  camera update) and CPU downsampling. A direct `Graphics.Blit(GetTexture())`
+  can read the previous image in MRUK 205 and is deliberately avoided.
+  Readback is synchronous in this first implementation; lower Stream
+  FPS if it causes device hitches. Raising FPS above tracker throughput makes
+  catch-up fail, rather than making tracking faster.
+
+### Integration verification
+
+Offline tests, working directory `provider/`:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+For on-device checks and the headset-free smoke, see
+[Quest setup verification](quest-audio-setup.md#how-to-verify).
+The offline suite delays selection and checks exact JPEG identity,
+ordered replay, wrong-frame rejection, cancellation, and bounded history.
+
+Verification recorded for this integration (2026-09-19): **82 Python tests**
+passed; **28 Unity EditMode tests** passed with Android selected, and the four
+input/transport tests passed again after the final camera-readback change.
+A stub-coordinator smoke against the real MPS SAM 2 server returned ten masks
+from repeated camera-fixture frames without clicks. **Physical Quest capture,
+microphone behavior, and live Huawei object-selection accuracy still require
+the on-device run in the setup guide**; the smoke used synthesized audio and
+no cloud calls.
+
+The original webcam fallback still runs from `sam2/`:
+
+```bash
+SAM2_WS_URL=ws://localhost:8766 python sam2_ws_client.py
+```

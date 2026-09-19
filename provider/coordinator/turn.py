@@ -55,6 +55,10 @@ def start_turn(state: CoordinatorState, send: Send, utterance_id: str) -> asynci
         return None
     state.turn_id += 1
     turn_id = state.turn_id
+    if state.tracking is not None:
+        # Single-target mode: newest utterance replaces a pending selection.
+        for old_id in list(state.turn_tasks):
+            cancel_turn(state, old_id)
     task = asyncio.create_task(_run_turn(state, send, turn_id, utterance_id, buf))
     state.turn_tasks[turn_id] = task
     task.add_done_callback(lambda _t: state.turn_tasks.pop(turn_id, None))
@@ -108,6 +112,9 @@ async def _run_turn(
     buf: UtteranceBuffer,
 ) -> None:
     await send("turn_started", turn_id, {"utterance_id": utterance_id, "turn_id": turn_id}, utterance_id)
+    if state.tracking is not None:
+        await _run_tracking_turn(state, turn_id, utterance_id, buf)
+        return
     try:
         plan = await state.planner.plan(
             pcm=bytes(buf.pcm),
@@ -165,6 +172,35 @@ async def _run_turn(
         }
     )
     del state.context[:-CONTEXT_TURNS]
+
+
+async def _run_tracking_turn(state, turn_id, utterance_id, buf):
+    from coordinator.sam2_bridge import TrackingError
+
+    bridge = state.tracking
+    generation = await bridge.begin(turn_id, utterance_id)
+    try:
+        if not buf.selected_frame_id:
+            raise TrackingError("No snapshot was selected for this utterance.")
+        frame = await bridge.history.wait_for(buf.selected_frame_id)
+        # The reference pins immutable JPEG bytes while newer frames arrive.
+        plan = await asyncio.wait_for(state.planner.plan(
+            pcm=bytes(buf.pcm), jpeg=frame.jpeg, envelope=frame.envelope,
+            context=state.context[-CONTEXT_TURNS:],
+        ), bridge.history.seconds)
+        if turn_id in state.cancelled_turns or generation != bridge.generation:
+            return
+        target = plan.tracking_target
+        if target is None:
+            raise TrackingError("I couldn't identify one target. Look at it and try again.")
+        await bridge.seed(frame, target, generation)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("Tracking selection failed: %s", type(exc).__name__)
+        if generation == bridge.generation:
+            text = str(exc) if isinstance(exc, TrackingError) else "Object selection failed or timed out. Try again."
+            await bridge.status("error", text)
 
 
 def ingest_audio_chunk(state: CoordinatorState, utterance_id: str | None, payload: dict[str, Any]) -> None:

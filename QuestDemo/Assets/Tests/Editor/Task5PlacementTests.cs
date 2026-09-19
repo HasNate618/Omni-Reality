@@ -48,7 +48,7 @@ public class Task5PlacementTests
             Assert.That(PulsingRing.PulseScaleFactor(phase),
                 Is.InRange(0.85f, 1.15f), "phase " + phase);
             Assert.That(PulsingRing.PulseAlpha(phase),
-                Is.InRange(0.55f, 1.0f), "phase " + phase);
+                Is.InRange(0.55f - 1e-6f, 1.0f + 1e-6f), "phase " + phase);
         }
     }
 
@@ -174,13 +174,8 @@ public class Task5PlacementTests
     {
         Vector3 eye = new Vector3(0f, 1.6f, 0f);
         Vector3 pos = HonestyChip.ComputeChipPosition(eye, Vector3.forward);
-        Assert.That(pos, Is.EqualTo(eye + Vector3.forward * 0.12f).Using<Vector3>(Vector3Comparer));
+        Assert.That(Vector3.Distance(pos, eye + Vector3.forward * 0.12f), Is.LessThan(1e-5f));
         Assert.That(HonestyChip.ForwardDistanceM, Is.EqualTo(0.12f));
-    }
-
-    static bool Vector3Comparer(Vector3 a, Vector3 b)
-    {
-        return Vector3.Distance(a, b) < 1e-5f;
     }
 
     [Test]
@@ -210,7 +205,7 @@ public class Task5PlacementTests
             Vector3 point = new Vector3(0f, 1f, 2f);
             GameObject mark = store.PlaceMark(point, Vector3.up, "test-draw-1");
             Assert.That(mark.transform.parent, Is.Null, "mark must never attach to a camera");
-            Assert.That(mark.transform.position, Is.EqualTo(point).Using<Vector3>(Vector3Comparer));
+            Assert.That(Vector3.Distance(mark.transform.position, point), Is.LessThan(1e-5f));
             Assert.That(store.Count, Is.EqualTo(1));
             for (int i = 2; i <= 9; i++)
                 store.PlaceMark(point, Vector3.up, "test-draw-" + i);

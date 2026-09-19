@@ -219,7 +219,7 @@ public static class ProtocolJson
         }
     }
 
-    static string WrapMessage(string type, string sessionId, int turnId, string payloadJson)
+    static string WrapMessage(string type, string sessionId, int turnId, string payloadJson, string utteranceId = null)
     {
         var sb = new StringBuilder(payloadJson.Length + 96);
         sb.Append("{\"v\":1,\"type\":\"");
@@ -228,7 +228,9 @@ public static class ProtocolJson
         AppendSessionId(sb, sessionId);
         sb.Append(",\"turn_id\":");
         sb.Append(turnId);
-        sb.Append(",\"utterance_id\":null,\"payload\":");
+        sb.Append(",\"utterance_id\":");
+        AppendNullable(sb, utteranceId);
+        sb.Append(",\"payload\":");
         sb.Append(payloadJson);
         sb.Append('}');
         return sb.ToString();
@@ -238,6 +240,14 @@ public static class ProtocolJson
     public static string BuildHello(string sessionId)
     {
         return WrapMessage("hello", sessionId, 0, HelloPayload);
+    }
+
+    public static string BuildTrackingHello(string osVersion)
+    {
+        var sb = new StringBuilder("{\"device\":\"quest\",\"app\":\"QuestDemo\",\"os_version\":");
+        AppendNullable(sb, osVersion);
+        sb.Append(",\"capabilities\":{\"pca\":true,\"depth\":false,\"tts\":false}}");
+        return WrapMessage("hello", null, 0, sb.ToString());
     }
 
     /// <summary>Quest ping wrapper (server replies pong).</summary>
@@ -258,6 +268,32 @@ public static class ProtocolJson
         sb.Append(ToSpecJson(env));
         sb.Append('}');
         return WrapMessage("frame", sessionId, 0, sb.ToString());
+    }
+
+    public static string BuildVideoFrame(string sessionId, CaptureEnvelope env, byte[] jpeg)
+    {
+        return WrapMessage("frame", sessionId, 0, "{\"envelope\":" + ToSpecJson(env)
+            + ",\"jpeg_b64\":\"" + Convert.ToBase64String(jpeg) + "\"}");
+    }
+
+    public static string BuildAudioChunk(string sessionId, string utteranceId, byte[] pcm, int offset, int count)
+    {
+        return WrapMessage("audio_chunk", sessionId, 0,
+            "{\"audio\":{\"encoding\":\"pcm_s16le\",\"sample_rate\":16000,\"channels\":1,\"data_b64\":\""
+            + Convert.ToBase64String(pcm, offset, count) + "\"}}", utteranceId);
+    }
+
+    public static string BuildUtteranceEnd(string sessionId, string utteranceId, string frameId)
+    {
+        var sb = new StringBuilder("{\"frame_id\":");
+        AppendNullable(sb, frameId);
+        sb.Append('}');
+        return WrapMessage("utterance_end", sessionId, 0, sb.ToString(), utteranceId);
+    }
+
+    public static string BuildTrackingCancel(string sessionId, int turnId)
+    {
+        return WrapMessage("cancel", sessionId, turnId, "{\"turn_id\":" + turnId + "}");
     }
 
     /// <summary>

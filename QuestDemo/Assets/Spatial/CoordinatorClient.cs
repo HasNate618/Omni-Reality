@@ -29,7 +29,8 @@ using UnityEngine;
 /// ignored); stage-epoch mismatch fences as superseded; missing turn_id or
 /// turn_id 0 rejects as invalid; omitted mark motion defaults to a 1.2 s
 /// pulse. Non-mark kinds are ignored (no other scene operations in
-/// slice 2) and audio_chunk is not implemented (slice 3).
+/// slice 2). Opt-in QuestStreamInput adds JPEGs, recorded PCM, and tracking
+/// result events without routing segmentation through surface placement.
 ///
 /// Offline honesty: on socket down the exact chip "Laptop not connected."
 /// shows; existing rings are kept (never cleared) and a reconnect mints a
@@ -60,6 +61,22 @@ public class CoordinatorClient : MonoBehaviour
         readonly SortedDictionary<int, Queue<string>> _queues =
             new SortedDictionary<int, Queue<string>>();
         readonly object _gate = new object();
+        string _latestVideoFrame;
+
+        public void VideoFrame(string json, bool selected)
+        {
+            lock (_gate)
+            {
+                _latestVideoFrame = null;
+                if (selected) Enqueue(7, json); // pinned snapshot, not replaceable
+                else _latestVideoFrame = json;
+            }
+        }
+
+        public void Clear()
+        {
+            lock (_gate) { _queues.Clear(); _latestVideoFrame = null; }
+        }
 
         public void Enqueue(int priority, string json)
         {
@@ -89,6 +106,12 @@ public class CoordinatorClient : MonoBehaviour
                         return true;
                     }
                 }
+                if (_latestVideoFrame != null)
+                {
+                    json = _latestVideoFrame;
+                    _latestVideoFrame = null;
+                    return true;
+                }
             }
             json = null;
             return false;
@@ -100,7 +123,7 @@ public class CoordinatorClient : MonoBehaviour
             {
                 lock (_gate)
                 {
-                    int n = 0;
+                    int n = _latestVideoFrame == null ? 0 : 1;
                     foreach (var kv in _queues)
                         n += kv.Value.Count;
                     return n;
@@ -135,11 +158,25 @@ public class CoordinatorClient : MonoBehaviour
     bool _wasOpen;
     bool _offlineShown;
     bool _attemptFailed;
+    int _trackingGeneration;
+    int _activeTurn;
+    string _activeUtterance;
+    string _stoppedUtterance;
+    string _helloJson;
+    public bool IsReady { get { return IsOpen && _sessionId != null; } }
+    public string SessionId { get { return _sessionId; } }
+    public TrackingResult LatestTrackingResult { get; private set; }
+    public event Action<TrackingResult> TrackingResultReceived;
+    public event Action<TrackingStatus> TrackingStatusReceived;
 
     /// <summary>Queue a hello + start supervision. No socket work happens here.</summary>
     internal void Begin(string ipv4)
     {
         _ipv4 = ipv4;
+        var settings = QuestTrackingSettings.Load();
+        _helloJson = settings != null && settings.enableTracking
+            ? ProtocolJson.BuildTrackingHello(SystemInfo.operatingSystem)
+            : ProtocolJson.BuildHello(null);
         _beginRequested = true;
     }
 
@@ -229,6 +266,8 @@ public class CoordinatorClient : MonoBehaviour
     {
         _lastConnectAttemptAt = now;
         _connecting = true;
+        _outbox.Clear();
+        while (_inbound.TryDequeue(out _)) { }
         if (_cts == null)
             _cts = new CancellationTokenSource();
         string host = _ipv4;
@@ -239,9 +278,10 @@ public class CoordinatorClient : MonoBehaviour
 
     async Task ConnectAndServeAsync(string host, int port, CancellationToken token)
     {
+        ClientWebSocket connectingSocket = null;
         try
         {
-            var sock = new ClientWebSocket();
+            var sock = connectingSocket = new ClientWebSocket();
             using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
             using (var linked = CancellationTokenSource.CreateLinkedTokenSource(token, timeout.Token))
             {
@@ -254,12 +294,13 @@ public class CoordinatorClient : MonoBehaviour
             }
             _socketDown = false;
             _socket = sock;
-            _outbox.Enqueue(PriorityHello, ProtocolJson.BuildHello(null));
+            _outbox.Enqueue(PriorityHello, _helloJson);
             Task.Run(() => SendLoopAsync(sock, token));
             Task.Run(() => ReceiveLoopAsync(sock, token));
         }
         catch (Exception e)
         {
+            try { connectingSocket?.Dispose(); } catch (Exception) { }
             _errors.Enqueue("coordinator connect (" + e.GetType().Name + ")");
             _attemptFailed = true;
         }
@@ -321,6 +362,8 @@ public class CoordinatorClient : MonoBehaviour
                 {
                     string text = Encoding.UTF8.GetString(frame.ToArray());
                     frame.Clear();
+                    if (token.IsCancellationRequested || !ReferenceEquals(_socket, sock))
+                        return;
                     if (!string.IsNullOrEmpty(text))
                         _inbound.Enqueue(text);
                 }
@@ -379,6 +422,48 @@ public class CoordinatorClient : MonoBehaviour
         }
         if (type == "pong")
             return;
+        if (type == "turn_started" || type == "tracking_status" || type == "tracking_result")
+        {
+            string session;
+            if (!ProtocolJson.TryGetSessionId(text, out session) || session != _sessionId)
+                return;
+            var header = JsonUtility.FromJson<TrackingMessageHeader>(text);
+            if (header.utterance_id != _activeUtterance)
+                return; // a new push-to-talk request supersedes old results locally
+            if (type == "turn_started")
+            {
+                _activeTurn = header.turn_id;
+                if (_stoppedUtterance == _activeUtterance)
+                    _outbox.Enqueue(PriorityCancel, ProtocolJson.BuildTrackingCancel(_sessionId, _activeTurn));
+                return;
+            }
+            if (_stoppedUtterance != null && _stoppedUtterance == _activeUtterance)
+                return;
+            string payload;
+            if (!ProtocolJson.TryGetPayloadObject(text, out payload))
+                return;
+            if (type == "tracking_status")
+            {
+                var status = JsonUtility.FromJson<TrackingStatus>(payload);
+                if (status.generation < _trackingGeneration) return;
+                _trackingGeneration = status.generation;
+                if (status.state != "tracking") LatestTrackingResult = null;
+                Debug.Log("QUEST_TRACKING " + status.state + ": " + status.text);
+                TrackingStatusReceived?.Invoke(status);
+            }
+            else
+            {
+                var result = JsonUtility.FromJson<TrackingResult>(payload);
+                if (result.generation < _trackingGeneration || result.stage_epoch != GetStageEpoch()) return;
+                _trackingGeneration = result.generation;
+                result.RawPayloadJson = payload;
+                bool first = LatestTrackingResult == null;
+                LatestTrackingResult = result;
+                if (first) Debug.Log("QUEST_TRACKING first mask frame=" + result.frame_id);
+                TrackingResultReceived?.Invoke(result);
+            }
+            return;
+        }
         if (type == "scene_op")
         {
             string payload;
@@ -393,8 +478,7 @@ public class CoordinatorClient : MonoBehaviour
             HandleMark(op);
             return;
         }
-        // Slice 2 handles nothing else: no audio_chunk (slice 3), no other
-        // scene operations, no speak path.
+        // Other scene operations and speech playback are not handled here.
         Debug.Log("CoordinatorClient: ignoring " + type);
     }
 
@@ -520,6 +604,45 @@ public class CoordinatorClient : MonoBehaviour
         _outbox.Enqueue(PriorityFrame, ProtocolJson.BuildFrame(_sessionId, env));
     }
 
+    [Serializable]
+    class TrackingMessageHeader
+    {
+        public string utterance_id;
+        public int turn_id;
+    }
+
+    public void EnqueueVideoFrame(CaptureEnvelope env, byte[] jpeg, bool selected)
+    {
+        if (!IsReady) return;
+        _outbox.VideoFrame(ProtocolJson.BuildVideoFrame(_sessionId, env, jpeg), selected);
+    }
+
+    public void EnqueueUtterance(string utteranceId, byte[] pcm, string frameId)
+    {
+        if (!IsReady) return;
+        _activeUtterance = utteranceId;
+        _activeTurn = 0;
+        _stoppedUtterance = null;
+        LatestTrackingResult = null;
+        // All audio chunks and utterance_end share a FIFO priority: end cannot
+        // overtake its own PCM. The pinned JPEG occupies the next higher lane.
+        const int chunkBytes = 3200;
+        for (int i = 0; i < pcm.Length; i += chunkBytes)
+            _outbox.Enqueue(8, ProtocolJson.BuildAudioChunk(_sessionId, utteranceId, pcm, i,
+                Math.Min(chunkBytes, pcm.Length - i)));
+        _outbox.Enqueue(8, ProtocolJson.BuildUtteranceEnd(_sessionId, utteranceId, frameId));
+    }
+
+    public void StopTracking()
+    {
+        _stoppedUtterance = _activeUtterance;
+        LatestTrackingResult = null;
+        if (IsReady && _activeTurn > 0)
+            _outbox.Enqueue(PriorityCancel, ProtocolJson.BuildTrackingCancel(_sessionId, _activeTurn));
+        TrackingStatusReceived?.Invoke(new TrackingStatus { state = "stopped", text = "Tracking stopped.", generation = _trackingGeneration });
+        Debug.Log("QUEST_TRACKING stopped locally");
+    }
+
     /// <summary>
     /// Cancel enqueue (priority 0). No slice-2 trigger calls this yet; the
     /// slot exists so a future trigger jumps ahead of queued frames.
@@ -552,6 +675,17 @@ public class CoordinatorClient : MonoBehaviour
 
     void CleanupSocket()
     {
+        TrackingStatusReceived?.Invoke(new TrackingStatus {
+            state = "stopped", text = "Laptop disconnected.", generation = _trackingGeneration
+        });
+        _sessionId = null;
+        _activeTurn = 0;
+        _trackingGeneration = 0;
+        _activeUtterance = null;
+        _stoppedUtterance = null;
+        LatestTrackingResult = null;
+        _outbox.Clear();
+        while (_inbound.TryDequeue(out _)) { }
         try
         {
             if (_cts != null)
@@ -576,6 +710,8 @@ public class CoordinatorClient : MonoBehaviour
         {
         }
         _cts = null;
+        _outbox.Clear();
+        while (_inbound.TryDequeue(out _)) { }
     }
 
     void Shutdown()

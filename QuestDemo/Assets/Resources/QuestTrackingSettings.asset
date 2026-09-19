@@ -1,0 +1,20 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 1bf4c6f59cbe479a93e502d9caf98d20, type: 3}
+  m_Name: QuestTrackingSettings
+  m_EditorClassIdentifier: Omni.Spatial::QuestTrackingSettings
+  enableTracking: 1
+  laptopIpv4: 127.0.0.1
+  streamFps: 3
+  maxImageSide: 640
+  jpegQuality: 70
+  flipImageVertically: 0

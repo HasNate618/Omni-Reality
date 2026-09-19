@@ -15,6 +15,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import contextlib
+import io
 import json
 import sys
 import time
@@ -60,6 +62,11 @@ async def run(args: argparse.Namespace) -> int:
     envelope = load_fixture("valid", "capture_envelope.json")
     envelope["frame_id"] = new_ulid()
     envelope["t_unix_ns"] = time.time_ns()
+    if jpeg:
+        from PIL import Image
+        with Image.open(io.BytesIO(jpeg)) as image:
+            envelope.update(image_w=image.width, image_h=image.height,
+                            sent_w=image.width, sent_h=image.height)
     utterance_id = new_ulid()
     t0 = time.monotonic()
 
@@ -90,8 +97,48 @@ async def run(args: argparse.Namespace) -> int:
             }, utterance_id))
             if args.realtime:
                 await asyncio.sleep(len(chunk) / BYTES_PER_SECOND)
-        await ws.send(wrap("utterance_end", session_id, {"utterance_id": utterance_id, "t_unix_ns": time.time_ns()}, utterance_id))
+        await ws.send(wrap("utterance_end", session_id, {
+            "utterance_id": utterance_id, "t_unix_ns": time.time_ns(),
+            "frame_id": envelope["frame_id"],
+        }, utterance_id))
         log("utterance_end", f"audio={len(pcm)}B ({len(pcm) / BYTES_PER_SECOND:.2f}s)")
+
+        async def stream_frames():
+            while True:
+                await asyncio.sleep(1 / 3)
+                capture = dict(envelope, frame_id=new_ulid(), t_unix_ns=time.time_ns())
+                await ws.send(wrap("frame", session_id, {
+                    "envelope": capture, "jpeg_b64": base64.b64encode(jpeg).decode("ascii"),
+                }))
+
+        if args.tracking:
+            producer = asyncio.create_task(stream_frames())
+            try:
+                count = 0
+                deadline = time.monotonic() + args.timeout
+                while time.monotonic() < deadline:
+                    message = json.loads(await asyncio.wait_for(ws.recv(), deadline - time.monotonic()))
+                    kind, payload = message["type"], message["payload"]
+                    if kind == "tracking_result":
+                        count += 1
+                        log(kind, f"frame={payload['frame_id']} masks={len(payload['objects'])}")
+                        if count >= args.tracking_frames:
+                            return 0
+                    elif kind == "tracking_status":
+                        log(kind, f"{payload['state']}: {payload['text']}")
+                        if payload["state"] == "error":
+                            return 1
+                    elif kind == "speak":
+                        log("error", "coordinator is not in tracking mode; supply --sam2-url")
+                        return 1
+                return 1
+            except asyncio.TimeoutError:
+                log("timeout", "no tracking results")
+                return 1
+            finally:
+                producer.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await producer
 
         mode = "none" if args.no_ack else ("reject" if args.reject else "place")
         deadline = time.monotonic() + args.timeout
@@ -129,7 +176,11 @@ def main() -> int:
     parser.add_argument("--no-ack", action="store_true", help="never ACK (exercises the 1.5 s timeout)")
     parser.add_argument("--realtime", action="store_true", help="pace audio chunks at real time")
     parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--tracking", action="store_true", help="repeat JPEG at 3 fps and wait for SAM 2 masks")
+    parser.add_argument("--tracking-frames", type=int, default=10)
     args = parser.parse_args()
+    if args.tracking and not args.jpeg:
+        parser.error("--tracking requires --jpeg")
     return asyncio.run(run(args))
 
 

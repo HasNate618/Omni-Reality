@@ -6,6 +6,24 @@ Status: post-review contract. GPT-6 Astra (primary) and Muse Spark 1.3 reviewed 
 
 Related: `docs/omni-live-research.md` (sources), `docs/omni-live-pitch.md` (teammate pitch), `provider/README.md` (yibuapi registry).
 
+### Integration amendment: opt-in voice-seeded SAM 2 (2026-09-19)
+
+The next integration adds a single-object tracking mode alongside these spatial
+drawing slices. Quest streams JPEGs (default 3 fps) and A-button push-to-talk
+audio to the coordinator. One immutable selected JPEG + audio goes to Huawei;
+its interior image point initializes the existing SAM 2 click path on that
+exact frame. A bounded JPEG history supplies successor frames, then live
+tracking continues. The SAM 2 worker returns frame-addressed masks to Unity's
+existing-consumer hook; this amendment does not specify a new renderer.
+
+This mode is enabled by the Unity tracking settings asset and coordinator
+`--sam2-url`. It is an explicit exception to the event-driven 2 fps capture
+limit and object-tracking non-goal below. It uses tracking status/results
+instead of pretending a segmentation initialization is a world-placement ACK.
+The original spatial-mark mode retains its contract. Tracking wire rules,
+limits, and verification results live in `docs/omni-sam2-streaming.md`.
+The setup walkthrough lives in `docs/quest-audio-setup.md`.
+
 ## 1. Product
 
 A Quest 3S assistant that sees a selected view, hears speech, talks back, and can put its answer in the room as world-locked geometry.

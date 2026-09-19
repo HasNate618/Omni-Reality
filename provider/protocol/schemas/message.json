@@ -10,7 +10,8 @@
       "enum": [
         "hello", "hello_ok", "audio_chunk", "utterance_end", "frame", "ack",
         "cancel", "clear_session", "ping", "pong", "turn_started", "scene_op",
-        "speak", "stop_speak", "request_frame", "honesty", "session_cleared"
+        "speak", "stop_speak", "request_frame", "honesty", "session_cleared",
+        "tracking_status", "tracking_result"
       ]
     },
     "session_id": { "type": ["string", "null"] },
