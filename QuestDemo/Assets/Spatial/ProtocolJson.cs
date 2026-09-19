@@ -347,9 +347,26 @@ public static class ProtocolJson
         public int StageEpoch;
         public string Kind;
         public string JobId;
+        public string DrawingId;
         public string TargetFrameId;
+        public string FromTargetFrameId;
+        public string ToTargetFrameId;
+        public string Text;
+        public string MotionKind;
+        public string MotionAxis;
+        public float MotionAngleDeg;
+        public float MotionDistanceM;
         public bool HasMotion;
         public float MotionPeriodS;
+    }
+
+    public sealed class SpeakMsg
+    {
+        public bool HasTurnId;
+        public int TurnId;
+        public string Text;
+        public string AudioEncoding;
+        public string AudioDataB64;
     }
 
     /// <summary>
@@ -384,21 +401,13 @@ public static class ProtocolJson
         parsed.Kind = s;
         if (TryGetStringOrNull(payloadJson, "job_id", out s, out found) && found)
             parsed.JobId = s;
-        int targetAt = IndexOfKey(payloadJson, "target", 0);
-        if (targetAt >= 0)
-        {
-            int braceAt = payloadJson.IndexOf('{', targetAt);
-            string targetJson;
-            int endAt;
-            if (braceAt >= 0 && ExtractBraced(payloadJson, braceAt, out targetJson, out endAt))
-            {
-                string frameId;
-                bool frameFound;
-                if (TryGetStringOrNull(targetJson, "frame_id", out frameId, out frameFound)
-                    && frameFound)
-                    parsed.TargetFrameId = frameId;
-            }
-        }
+        if (TryGetStringOrNull(payloadJson, "drawing_id", out s, out found) && found)
+            parsed.DrawingId = s;
+        if (TryGetStringOrNull(payloadJson, "text", out s, out found) && found)
+            parsed.Text = s;
+        TryGetTargetFrameId(payloadJson, "target", out parsed.TargetFrameId);
+        TryGetTargetFrameId(payloadJson, "from", out parsed.FromTargetFrameId);
+        TryGetTargetFrameId(payloadJson, "to", out parsed.ToTargetFrameId);
         int motionAt = IndexOfKey(payloadJson, "motion", 0);
         if (motionAt >= 0)
         {
@@ -415,10 +424,75 @@ public static class ProtocolJson
                         parsed.HasMotion = true;
                         parsed.MotionPeriodS = (float)period;
                     }
+                    string kind;
+                    bool kindFound;
+                    if (TryGetStringOrNull(motionJson, "kind", out kind, out kindFound) && kindFound)
+                        parsed.MotionKind = kind;
+                    if (TryGetStringOrNull(motionJson, "axis", out kind, out kindFound) && kindFound)
+                        parsed.MotionAxis = kind;
+                    double angle;
+                    if (TryGetDouble(motionJson, "angle_deg", out angle))
+                        parsed.MotionAngleDeg = (float)angle;
+                    double dist;
+                    if (TryGetDouble(motionJson, "distance_m", out dist))
+                        parsed.MotionDistanceM = (float)dist;
                 }
             }
         }
         op = parsed;
+        return true;
+    }
+
+    static void TryGetTargetFrameId(string payloadJson, string key, out string frameId)
+    {
+        frameId = null;
+        int keyAt = IndexOfKey(payloadJson, key, 0);
+        if (keyAt < 0)
+            return;
+        int braceAt = payloadJson.IndexOf('{', keyAt);
+        string targetJson;
+        int endAt;
+        if (braceAt < 0 || !ExtractBraced(payloadJson, braceAt, out targetJson, out endAt))
+            return;
+        string parsed;
+        bool found;
+        if (TryGetStringOrNull(targetJson, "frame_id", out parsed, out found) && found)
+            frameId = parsed;
+    }
+
+    /// <summary>Parse speak payload (turn_id, text, optional audio object).</summary>
+    public static bool TryParseSpeak(string payloadJson, out SpeakMsg msg)
+    {
+        msg = null;
+        if (string.IsNullOrEmpty(payloadJson))
+            return false;
+        var parsed = new SpeakMsg();
+        long turnId;
+        if (TryGetLong(payloadJson, "turn_id", out turnId))
+        {
+            parsed.HasTurnId = true;
+            parsed.TurnId = (int)turnId;
+        }
+        string text;
+        bool found;
+        if (TryGetStringOrNull(payloadJson, "text", out text, out found) && found)
+            parsed.Text = text;
+        int audioAt = IndexOfKey(payloadJson, "audio", 0);
+        if (audioAt >= 0)
+        {
+            int valueAt = SkipValueStart(payloadJson, audioAt);
+            if (valueAt >= 0 && valueAt < payloadJson.Length && payloadJson[valueAt] == '{')
+            {
+                string audioJson;
+                int endAt;
+                if (ExtractBraced(payloadJson, valueAt, out audioJson, out endAt))
+                {
+                    TryGetStringOrNull(audioJson, "encoding", out parsed.AudioEncoding, out found);
+                    TryGetStringOrNull(audioJson, "data_b64", out parsed.AudioDataB64, out found);
+                }
+            }
+        }
+        msg = parsed;
         return true;
     }
 

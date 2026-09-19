@@ -1,6 +1,6 @@
 {
   "name": "Omni.Spatial.Editor.Tests",
-  "references": ["Omni.Spatial"],
+  "references": ["Omni.Spatial", "Omni.Voice"],
   "includePlatforms": ["Editor"],
   "optionalUnityReferences": ["TestAssemblies"]
 }

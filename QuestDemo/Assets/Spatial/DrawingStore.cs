@@ -28,9 +28,90 @@ public class DrawingStore : MonoBehaviour
         return PlaceMark(point, normal, drawingId, PulsingRing.DefaultDiameterM);
     }
 
-    public GameObject PlaceMark(Vector3 point, Vector3 normal, string drawingId, float diameterM)
+    public GameObject PlaceLabel(Vector3 point, Vector3 normal, string drawingId, string text)
     {
         Prune();
+        EvictIfNeeded();
+        GameObject root = new GameObject("Drawing_" + drawingId);
+        root.transform.position = point;
+        Vector3 n = normal.sqrMagnitude < 1e-6f ? Vector3.up : normal.normalized;
+        root.transform.rotation = Quaternion.FromToRotation(Vector3.forward, n);
+        root.transform.SetParent(null, true);
+        var textGo = new GameObject("LabelText");
+        textGo.transform.SetParent(root.transform, false);
+        textGo.transform.localPosition = Vector3.zero;
+        var tm = textGo.AddComponent<TextMesh>();
+        tm.text = TruncateLabel(text);
+        tm.characterSize = 0.02f;
+        tm.anchor = TextAnchor.MiddleCenter;
+        tm.color = PulsingRing.RingColor;
+        textGo.AddComponent<SurfaceBillboard>();
+        TryAddAnchor(root);
+        _marks.Add(root);
+        return root;
+    }
+
+    public GameObject PlaceGhost(Vector3 point, Vector3 normal, string drawingId, ProtocolJson.SceneOpMsg op)
+    {
+        Prune();
+        EvictIfNeeded();
+        GameObject root = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        root.name = "Drawing_" + drawingId;
+        Destroy(root.GetComponent<Collider>());
+        root.transform.localScale = Vector3.one * GhostLabelConnect.GhostSizeM;
+        root.transform.position = point;
+        Vector3 n = normal.sqrMagnitude < 1e-6f ? Vector3.up : normal.normalized;
+        root.transform.rotation = Quaternion.FromToRotation(Vector3.up, n);
+        root.transform.SetParent(null, true);
+        var rend = root.GetComponent<Renderer>();
+        if (rend != null)
+        {
+            rend.material = new Material(Shader.Find("Unlit/Color"));
+            Color c = PulsingRing.RingColor;
+            c.a = 0.45f;
+            rend.material.color = c;
+        }
+        var motion = root.AddComponent<GhostMotion>();
+        motion.MotionKind = op.MotionKind;
+        motion.Axis = string.IsNullOrEmpty(op.MotionAxis) ? "y" : op.MotionAxis;
+        motion.AngleDeg = op.MotionAngleDeg > 0f ? op.MotionAngleDeg : 45f;
+        motion.DistanceM = op.MotionDistanceM > 0f ? op.MotionDistanceM : 0.1f;
+        motion.PeriodS = op.HasMotion && op.MotionPeriodS > 0f ? op.MotionPeriodS : 2f;
+        TryAddAnchor(root);
+        _marks.Add(root);
+        return root;
+    }
+
+    public GameObject PlaceConnect(Vector3 from, Vector3 to, string drawingId)
+    {
+        Prune();
+        EvictIfNeeded();
+        GameObject root = new GameObject("Drawing_" + drawingId);
+        root.transform.SetParent(null, true);
+        var lr = root.AddComponent<LineRenderer>();
+        lr.positionCount = 2;
+        lr.SetPosition(0, from);
+        lr.SetPosition(1, to);
+        lr.startWidth = 0.008f;
+        lr.endWidth = 0.008f;
+        lr.material = new Material(Shader.Find("Unlit/Color"));
+        lr.startColor = PulsingRing.RingColor;
+        lr.endColor = PulsingRing.RingColor;
+        lr.useWorldSpace = true;
+        TryAddAnchor(root);
+        _marks.Add(root);
+        return root;
+    }
+
+    static string TruncateLabel(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return "";
+        return text.Length <= 48 ? text : text.Substring(0, 48);
+    }
+
+    void EvictIfNeeded()
+    {
         while (_marks.Count >= MaxDrawings)
         {
             GameObject oldest = _marks[0];
@@ -38,6 +119,12 @@ public class DrawingStore : MonoBehaviour
             if (oldest != null)
                 DestroyMark(oldest);
         }
+    }
+
+    public GameObject PlaceMark(Vector3 point, Vector3 normal, string drawingId, float diameterM)
+    {
+        Prune();
+        EvictIfNeeded();
         GameObject mark = PulsingRing.CreateRing(diameterM);
         mark.name = "Drawing_" + drawingId;
         mark.transform.position = point;
@@ -47,17 +134,22 @@ public class DrawingStore : MonoBehaviour
         mark.transform.rotation = Quaternion.FromToRotation(Vector3.up, n.normalized);
         // World-locked: explicit root, never the camera.
         mark.transform.SetParent(null, true);
+        TryAddAnchor(mark);
+        _marks.Add(mark);
+        return mark;
+    }
+
+    void TryAddAnchor(GameObject root)
+    {
         try
         {
-            if (mark.GetComponent<OVRSpatialAnchor>() == null)
-                mark.AddComponent<OVRSpatialAnchor>();
+            if (root.GetComponent<OVRSpatialAnchor>() == null)
+                root.AddComponent<OVRSpatialAnchor>();
         }
         catch (System.Exception e)
         {
             Debug.LogWarning("DrawingStore: OVRSpatialAnchor unavailable (" + e.GetType().Name + ")");
         }
-        _marks.Add(mark);
-        return mark;
     }
 
     /// <summary>Remove all marks (later clear_session binding).</summary>

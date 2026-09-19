@@ -153,6 +153,7 @@ public class SpatialRuntime : MonoBehaviour
             EnsurePlacementRefs();
             var go = new GameObject("CoordinatorClient");
             _coord = go.AddComponent<CoordinatorClient>();
+            _coord.SpeakPlayer = go.AddComponent<SpeakCloudPlayer>();
             _coord.Cache = _cache;
             _coord.Store = _store;
             _coord.Chip = _chip;

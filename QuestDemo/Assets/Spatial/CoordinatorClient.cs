@@ -117,6 +117,7 @@ public class CoordinatorClient : MonoBehaviour
     internal Func<int> GetStageEpoch = () => 1;
     internal Func<Ray, Vector3?> DelayedHit;
     internal Func<string> NewDrawingId;
+    internal SpeakCloudPlayer SpeakPlayer;
 
     readonly ConcurrentQueue<string> _inbound = new ConcurrentQueue<string>();
     readonly ConcurrentQueue<string> _errors = new ConcurrentQueue<string>();
@@ -401,11 +402,49 @@ public class CoordinatorClient : MonoBehaviour
                 GeneratedMeshPlacer.TryHandle(this, this, op, _ipv4, _artifactPort, Cache);
                 return;
             }
+            if (op.Kind == "label" || op.Kind == "ghost" || op.Kind == "connect")
+            {
+                if (!PrepareSceneOp(op))
+                    return;
+                GhostLabelConnect.TryHandle(this, op);
+                return;
+            }
             HandleMark(op);
             return;
         }
-        // Slice 2 handles nothing else: no audio_chunk (slice 3), no other
-        // scene operations, no speak path.
+        if (type == "speak")
+        {
+            string payload;
+            if (!ProtocolJson.TryGetPayloadObject(text, out payload))
+                return;
+            ProtocolJson.SpeakMsg speak;
+            if (!ProtocolJson.TryParseSpeak(payload, out speak))
+                return;
+            if (SpeakPlayer == null)
+            {
+                Debug.LogWarning("CoordinatorClient: speak received but no SpeakCloudPlayer");
+                return;
+            }
+            byte[] pcm;
+            if (!SpeakCloudPlayer.TryDecodePcmBase64(speak.AudioDataB64, out pcm))
+            {
+                SpeakPlayer.TryPlay(speak.HasTurnId ? speak.TurnId : 0, speak.Text, null);
+                return;
+            }
+            SpeakPlayer.TryPlay(speak.HasTurnId ? speak.TurnId : 0, speak.Text, pcm);
+            return;
+        }
+        if (type == "stop_speak")
+        {
+            if (SpeakPlayer != null)
+                SpeakPlayer.StopPlayback();
+            return;
+        }
+        if (type == "turn_started")
+        {
+            Debug.Log("CoordinatorClient: turn_started " + text);
+            return;
+        }
         Debug.Log("CoordinatorClient: ignoring " + type);
     }
 
@@ -447,34 +486,17 @@ public class CoordinatorClient : MonoBehaviour
             Debug.Log("CoordinatorClient: ignoring non-mark kind=" + op.Kind);
             return;
         }
-        if (string.IsNullOrEmpty(op.TargetFrameId))
-        {
-            EnqueueAck(op, "rejected", null, "invalid", null);
-            Debug.LogWarning("CoordinatorClient: op rejected missing target op=" + op.OpId);
+        PlacementResult result;
+        if (!TryResolveTargetOp(op, out result))
             return;
-        }
-        CaptureGeometryCache.Entry entry = null;
-        bool hasEntry = Cache != null && Cache.TryGet(op.TargetFrameId, out entry) && entry != null;
-        if (!hasEntry || !entry.HasHit)
-        {
-            // No cached surface for this frame: honest miss, never a pin.
-            // (A remote too_close is indistinguishable here and reports the
-            // same no_surface copy rather than floating a pin.)
-            ShowChipText(PlacementResolver.ChipNoSurfaceText);
-            EnqueueAck(op, "rejected", null, "no_surface", null);
-            return;
-        }
-        Vector3? delayed = DelayedHit != null
-            ? DelayedHit(PlacementResolver.CachedRay(entry))
-            : (Vector3?)null;
-        PlacementResult result =
-            PlacementResolver.TryPlaceFromCapture(entry, "placed", delayed, true);
         float period = op.HasMotion && op.MotionPeriodS > 0f
             ? op.MotionPeriodS
             : ProtocolJson.DefaultMarkPeriodS;
         if (result.ShouldPin)
         {
-            string drawingId = NewDrawingId != null ? NewDrawingId() : SpatialRuntime.NewFrameId();
+            string drawingId = !string.IsNullOrEmpty(op.DrawingId)
+                ? op.DrawingId
+                : (NewDrawingId != null ? NewDrawingId() : SpatialRuntime.NewFrameId());
             if (Store != null)
             {
                 GameObject mark = Store.PlaceMark(result.Point, result.Normal, drawingId);
@@ -494,6 +516,35 @@ public class CoordinatorClient : MonoBehaviour
             }
             return;
         }
+        EnqueueAckForResult(op, result);
+    }
+
+    internal bool TryResolveTargetOp(ProtocolJson.SceneOpMsg op, out PlacementResult result)
+    {
+        result = default;
+        if (string.IsNullOrEmpty(op.TargetFrameId))
+        {
+            EnqueueAck(op, "rejected", null, "invalid", null);
+            Debug.LogWarning("CoordinatorClient: op rejected missing target op=" + op.OpId);
+            return false;
+        }
+        CaptureGeometryCache.Entry entry = null;
+        bool hasEntry = Cache != null && Cache.TryGet(op.TargetFrameId, out entry) && entry != null;
+        if (!hasEntry || !entry.HasHit)
+        {
+            ShowChipText(PlacementResolver.ChipNoSurfaceText);
+            EnqueueAck(op, "rejected", null, "no_surface", null);
+            return false;
+        }
+        Vector3? delayed = DelayedHit != null
+            ? DelayedHit(PlacementResolver.CachedRay(entry))
+            : (Vector3?)null;
+        result = PlacementResolver.TryPlaceFromCapture(entry, "placed", delayed, true);
+        return true;
+    }
+
+    internal void EnqueueAckForResult(ProtocolJson.SceneOpMsg op, PlacementResult result)
+    {
         if (result.Outcome == PlacementOutcome.TooClose)
         {
             ShowChipText(PlacementResolver.ChipTooCloseText);
@@ -547,7 +598,7 @@ public class CoordinatorClient : MonoBehaviour
         _outbox.Enqueue(PriorityCancel, ProtocolJson.BuildCancel(_sessionId, turnId, opId));
     }
 
-    void ShowChipText(string text)
+    internal void ShowChipText(string text)
     {
         if (Chip == null)
             return;
