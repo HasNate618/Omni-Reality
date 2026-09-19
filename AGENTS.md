@@ -8,6 +8,7 @@ Quest 3S spatial assistant for the Huawei OMNI Live track. Unity renders on-devi
 - `provider/` — yibuapi gateway client (Python). Setup/usage docs in `provider/README.md`.
 - `docs/` — one doc per topic (see Documentation procedure). Start here: `docs/omni-provider-api.md` (gateway contract), `docs/questdemo-build.md` (Unity→Quest build), `docs/omni-live-pitch.md` (product), `docs/omni-live-research.md` (research). Design specs live in `docs/superpowers/specs/`.
 - `docs/omni-spatial-loop.md`: Quest-laptop drawing loop (slices 0-2).
+- `docs/omni-worker-tools.md`: Omni-track SAM2/generation tool loop.
 - `docs/hackathon-collaboration.md`: fast lane-based collaboration rules (handoff contract).
 - Plans: `docs/superpowers/plans/`.
 

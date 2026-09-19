@@ -26,6 +26,8 @@ ops over LAN; Unity renders and ACKs. No model calls in these slices.
   coordinator never calls a model or reads an API key. Only `--planner yibu`
   (slice 3, below) does, via `provider/` helpers and `YIBU_API_KEY`. Unity has
   no key path and never POSTs anywhere.
+- SAM2/generation tool loop (inspect, async mesh, artifact GET) is documented in
+  `docs/omni-worker-tools.md` and is separate from the default mark-only path.
 
 ## Pointers
 
