@@ -233,6 +233,11 @@ async def _handle_utterance_end(ws: Any, state: CoordinatorState, message: dict)
     if not isinstance(utterance_id, str):
         logger.info("ignoring utterance_end without utterance_id")
         return
+    from voice.bootstrap_diagnostics import utterance_end_accepted
+
+    buf = state.utterances.get(utterance_id)
+    pcm_bytes = len(buf.pcm) if buf is not None else 0
+    utterance_end_accepted(pcm_bytes)
     start_turn(state, _turn_sender(ws, state), utterance_id)
 
 
@@ -342,7 +347,9 @@ async def _handle_clear_session(ws: Any, state: CoordinatorState, message: dict)
 async def handle_connection(ws: Any, state: CoordinatorState) -> None:
     """Serve one connection until it closes or the task is cancelled."""
     from coordinator.jobs import clear_jobs
+    from voice.bootstrap_diagnostics import connection_close, connection_open
 
+    connection_open()
     try:
         if hasattr(ws, "recv"):
             while True:
@@ -362,6 +369,7 @@ async def handle_connection(ws: Any, state: CoordinatorState) -> None:
             except Exception:
                 return
     finally:
+        connection_close()
         clear_jobs(state.jobs, state.artifact_root)
 
 

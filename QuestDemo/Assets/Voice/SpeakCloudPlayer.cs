@@ -13,6 +13,8 @@ public class SpeakCloudPlayer : MonoBehaviour
 
     AudioSource _source;
     string _activeTurnId;
+    int _activeTurnNumeric;
+    bool _wasPlaying;
 
     /// <summary>True while cloud PCM is actively playing (barge-in / mic gate).</summary>
     public bool IsPlaying
@@ -27,10 +29,22 @@ public class SpeakCloudPlayer : MonoBehaviour
         _source.spatialBlend = 0f;
     }
 
+    void Update()
+    {
+        bool playing = IsPlaying;
+        if (_wasPlaying && !playing && _activeTurnNumeric > 0)
+            VoiceBootstrapLog.PlaybackFinished(_activeTurnNumeric);
+        _wasPlaying = playing;
+    }
+
     /// <summary>Stop playback for barge-in / stop_speak.</summary>
     public void StopPlayback()
     {
+        if (_wasPlaying && _activeTurnNumeric > 0)
+            VoiceBootstrapLog.PlaybackFinished(_activeTurnNumeric);
         _activeTurnId = null;
+        _activeTurnNumeric = 0;
+        _wasPlaying = false;
         if (_source != null && _source.isPlaying)
             _source.Stop();
     }
@@ -40,21 +54,26 @@ public class SpeakCloudPlayer : MonoBehaviour
     /// </summary>
     public bool TryPlay(int turnId, string text, byte[] pcmS16Le)
     {
-        string turnKey = turnId.ToString();
+        int pcmBytes = pcmS16Le != null ? pcmS16Le.Length : 0;
         if (pcmS16Le == null || pcmS16Le.Length < 2)
         {
-            Debug.LogWarning("SpeakCloudPlayer: speak without cloud PCM (turn " + turnKey + ")");
+            VoiceBootstrapLog.PlaybackRejected(turnId, pcmBytes, "missing_pcm");
             return false;
         }
         StopPlayback();
-        _activeTurnId = turnKey;
+        _activeTurnId = turnId.ToString();
+        _activeTurnNumeric = turnId;
         AudioClip clip = BuildClip(pcmS16Le);
         if (clip == null)
+        {
+            VoiceBootstrapLog.PlaybackRejected(turnId, pcmBytes, "clip_build_failed");
             return false;
+        }
+        VoiceBootstrapLog.PlaybackAccepted(turnId, pcmBytes);
         _source.clip = clip;
         _source.Play();
-        if (!string.IsNullOrEmpty(text))
-            Debug.Log("Speak caption (turn " + turnKey + "): " + text);
+        _wasPlaying = true;
+        VoiceBootstrapLog.PlaybackStarted(turnId);
         return true;
     }
 

@@ -258,13 +258,14 @@ public class CoordinatorClient : MonoBehaviour
             }
             _socketDown = false;
             _socket = sock;
+            VoiceBootstrapLog.WebsocketConnected(host, port);
             _outbox.Enqueue(PriorityHello, ProtocolJson.BuildHello(null));
             Task.Run(() => SendLoopAsync(sock, token));
             Task.Run(() => ReceiveLoopAsync(sock, token));
         }
         catch (Exception e)
         {
-            _errors.Enqueue("coordinator connect (" + e.GetType().Name + ")");
+            VoiceBootstrapLog.SocketFailure("connect", e.GetType().Name);
             _attemptFailed = true;
         }
         finally
@@ -297,7 +298,7 @@ public class CoordinatorClient : MonoBehaviour
         }
         catch (Exception e)
         {
-            _errors.Enqueue("coordinator send (" + e.GetType().Name + ")");
+            VoiceBootstrapLog.SocketFailure("send", e.GetType().Name);
             _socketDown = true;
         }
     }
@@ -335,16 +336,16 @@ public class CoordinatorClient : MonoBehaviour
         }
         catch (Exception e)
         {
-            _errors.Enqueue("coordinator receive (" + e.GetType().Name + ")");
+            VoiceBootstrapLog.SocketFailure("receive", e.GetType().Name);
             _socketDown = true;
         }
     }
 
     void DrainErrors()
     {
-        string error;
-        while (_errors.TryDequeue(out error))
-            Debug.LogWarning("CoordinatorClient: " + error);
+        while (_errors.TryDequeue(out _))
+        {
+        }
     }
 
     void PumpInbound()
@@ -381,6 +382,7 @@ public class CoordinatorClient : MonoBehaviour
                 if (ProtocolJson.TryGetIntField(payload, "artifact_port", out port) && port > 0)
                     _artifactPort = port;
             }
+            VoiceBootstrapLog.HelloAccepted();
             // New session never clears drawings: no Store call here by design.
             return;
         }
@@ -450,10 +452,7 @@ public class CoordinatorClient : MonoBehaviour
             return;
         }
         if (type == "turn_started")
-        {
-            Debug.Log("CoordinatorClient: turn_started " + text);
             return;
-        }
         Debug.Log("CoordinatorClient: ignoring " + type);
     }
 
@@ -603,8 +602,13 @@ public class CoordinatorClient : MonoBehaviour
 
     public void EnqueueAudioChunk(string utteranceId, string dataB64)
     {
-        if (string.IsNullOrEmpty(utteranceId) || string.IsNullOrEmpty(dataB64) || !IsOpen)
+        if (string.IsNullOrEmpty(utteranceId) || string.IsNullOrEmpty(dataB64))
             return;
+        if (!IsOpen)
+        {
+            VoiceBootstrapLog.AudioDropOffline(VoiceBootstrapLog.PcmBytesFromBase64(dataB64));
+            return;
+        }
         _outbox.Enqueue(PriorityAudioChunk,
             ProtocolJson.BuildAudioChunk(_sessionId, utteranceId, dataB64));
     }
@@ -616,7 +620,10 @@ public class CoordinatorClient : MonoBehaviour
         if (OpenUtteranceId == utteranceId)
             OpenUtteranceId = null;
         if (!IsOpen)
+        {
+            VoiceBootstrapLog.UtteranceEndDropOffline();
             return;
+        }
         _outbox.Enqueue(PriorityUtteranceEnd,
             ProtocolJson.BuildUtteranceEnd(_sessionId, utteranceId));
     }

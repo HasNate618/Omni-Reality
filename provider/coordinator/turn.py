@@ -108,6 +108,21 @@ async def _run_turn(
     utterance_id: str,
     buf: UtteranceBuffer,
 ) -> None:
+    from voice.bootstrap_diagnostics import (
+        planner_complete,
+        planner_failed,
+        planner_mode_label,
+        synth_failed,
+        synth_result,
+        turn_started as log_turn_started,
+    )
+
+    pcm_len = len(buf.pcm)
+    log_turn_started(
+        turn_id=turn_id,
+        mode=planner_mode_label(state.planner),
+        pcm_bytes=pcm_len,
+    )
     await send("turn_started", turn_id, {"utterance_id": utterance_id, "turn_id": turn_id}, utterance_id)
     bind = getattr(state.planner, "bind_tools", None)
     voice_only = getattr(state.planner, "voice_only", False)
@@ -129,13 +144,19 @@ async def _run_turn(
         )
     except asyncio.CancelledError:
         raise
-    except Exception:
-        logger.exception("planner failed for turn %d", turn_id)
+    except Exception as exc:
+        planner_failed(turn_id=turn_id, exception_class=type(exc).__name__)
         if turn_id not in state.cancelled_turns:
             await send("speak", turn_id, {"turn_id": turn_id, "text": SAY_MODEL_ERROR, "audio": None}, utterance_id)
         return
     if turn_id in state.cancelled_turns:
         return
+
+    planner_complete(
+        turn_id=turn_id,
+        latency_ms=plan.latency_ms,
+        ops_count=len(plan.ops),
+    )
 
     stage_epoch = buf.envelope["stage_epoch"] if buf.envelope else state.latest_stage_epoch
     sent: list[dict] = []
@@ -167,7 +188,14 @@ async def _run_turn(
     line = spoken_line(plan, sent, acks)
     # Cloud speech after the ACK barrier (voice spec §2 step 7). The final
     # line is tools-disabled: no tool calls happen past this point.
-    audio_block, voice_gate = await _speak_audio(state, line)
+    audio_block, voice_gate = await _speak_audio(state, line, turn_id)
+    audio_bytes = 0
+    if isinstance(audio_block, dict):
+        try:
+            audio_bytes = len(base64.b64decode(audio_block.get("data_b64") or "", validate=True))
+        except (binascii.Error, ValueError):
+            audio_bytes = 0
+    synth_result(turn_id=turn_id, voice_gate=voice_gate, audio_bytes=audio_bytes)
     await send(
         "speak", turn_id,
         {"turn_id": turn_id, "text": line, "audio": audio_block},
@@ -210,7 +238,7 @@ def ingest_audio_chunk(state: CoordinatorState, utterance_id: str | None, payloa
 
 
 async def _speak_audio(
-    state: CoordinatorState, line: str
+    state: CoordinatorState, line: str, turn_id: int
 ) -> tuple[dict | None, str]:
     """Synthesize the final line. Returns (audio_block_or_None, voice_gate)."""
     import inspect as inspect_module
@@ -224,8 +252,10 @@ async def _speak_audio(
         pcm = synth(line)
         if inspect_module.iscoroutine(pcm):
             pcm = await pcm
-    except Exception:
-        logger.exception("cloud speech failed")
+    except Exception as exc:
+        from voice.bootstrap_diagnostics import synth_failed
+
+        synth_failed(turn_id=turn_id, exception_class=type(exc).__name__)
         return None, "failed"
     if not pcm:
         return None, "failed"

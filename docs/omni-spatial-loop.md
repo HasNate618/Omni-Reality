@@ -78,6 +78,28 @@ ops over LAN; Unity renders and ACKs. No model calls in these slices.
   when present; a JSON-extract fallback stands in until then.
 - Headset-free end-to-end: `python -m tools.fake_quest --say "mark the laptop"
   --jpeg photo.jpg` (`--reject`, `--no-ack` for honesty paths).
+
+## VoiceBootstrap diagnostics (redacted)
+
+Controller-free mic → websocket → coordinator → cloud PCM playback emits
+`VoiceBootstrap` lines with **counts and types only**. They never log API keys,
+PCM/base64, transcripts, captions, prompts, model replies, URLs, or full
+exception text.
+
+- **Quest logcat:** `adb logcat -s Unity | grep VoiceBootstrap` (or
+  `adb logcat | grep VoiceBootstrap` while exercising voice).
+- **Laptop coordinator:** stderr/stdout from `python -m coordinator.server …`
+  with `grep VoiceBootstrap`.
+
+Quest events: `mic_permission`, `mic_started`, `mic_failed`, `vad_opened`,
+`onset_dropped`, `vad_ended`, `websocket_connected`, `hello_accepted`,
+`socket_failure`, `audio_drop_offline`, `utterance_end_drop_offline`,
+`playback_accepted`, `playback_rejected`, `playback_started`,
+`playback_finished`.
+
+Coordinator events: `connection_open`, `connection_close`,
+`utterance_end_accepted`, `turn_started`, `planner_complete`, `synth_result`,
+`planner_failed`, `synth_failed`.
 - Quest renders `mark`, `label` (billboard card), `ghost` (rotate/slide),
   `connect`, `place_procedural` (local composition: arrow/pointer/panel/
   cube/sphere/cylinder, closed palette/sizes/materials), and

@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -26,6 +27,8 @@ public class MicUtterance : MonoBehaviour
     VoiceActivityGate _gate = new VoiceActivityGate();
     bool _manualCapture;
     bool _micAuthRequested;
+    bool _permissionResultLogged;
+    int _utterancePcmBytes;
 
     /// <summary>Chunks streamed this utterance (test seam).</summary>
     public int SentChunks { get { return _sentChunks; } }
@@ -102,6 +105,7 @@ public class MicUtterance : MonoBehaviour
         {
             _micAuthRequested = true;
             Application.RequestUserAuthorization(UserAuthorization.Microphone);
+            StartCoroutine(LogMicPermissionOnce());
         }
         if (!Application.HasUserAuthorization(UserAuthorization.Microphone))
             return;
@@ -120,9 +124,21 @@ public class MicUtterance : MonoBehaviour
         }
         catch (Exception e)
         {
-            Debug.LogWarning("MicUtterance: mic unavailable (" + e.GetType().Name + ")");
+            VoiceBootstrapLog.MicFailed(e.GetType().Name);
             _clip = null;
         }
+        if (_clip != null)
+            VoiceBootstrapLog.MicStarted();
+    }
+
+    IEnumerator LogMicPermissionOnce()
+    {
+        yield return null;
+        if (_permissionResultLogged)
+            yield break;
+        _permissionResultLogged = true;
+        VoiceBootstrapLog.MicPermission(
+            Application.HasUserAuthorization(UserAuthorization.Microphone));
     }
 
     void PumpMicVad()
@@ -183,10 +199,12 @@ public class MicUtterance : MonoBehaviour
             case VoiceActivityState.Started:
                 if (!CanOpenUtterance())
                 {
+                    VoiceBootstrapLog.OnsetDropped(DroppedOnsetReason());
                     _gate = new VoiceActivityGate();
                     break;
                 }
                 OpenUtterance();
+                VoiceBootstrapLog.VadOpened(decision.Chunks != null ? decision.Chunks.Count : 0);
                 SendChunks(decision.Chunks);
                 break;
             case VoiceActivityState.Streaming:
@@ -211,17 +229,31 @@ public class MicUtterance : MonoBehaviour
         return player == null || !player.IsPlaying;
     }
 
+    string DroppedOnsetReason()
+    {
+        if (_client == null || !_client.IsConnected)
+            return "socket_unavailable";
+        SpeakCloudPlayer player = _client.SpeakPlayer;
+        if (player != null && player.IsPlaying)
+            return "playback_active";
+        return "socket_unavailable";
+    }
+
     void OpenUtterance()
     {
         _utteranceId = Guid.NewGuid().ToString("N");
         _client.OpenUtteranceId = _utteranceId;
         _sentChunks = 0;
+        _utterancePcmBytes = 0;
     }
 
     void CloseUtterance()
     {
         string id = _utteranceId;
+        int sent = _sentChunks;
+        int pcmBytes = _utterancePcmBytes;
         _utteranceId = null;
+        VoiceBootstrapLog.VadEnded(sent, pcmBytes);
         if (_client != null && id != null)
             _client.EnqueueUtteranceEnd(id);
     }
@@ -261,6 +293,7 @@ public class MicUtterance : MonoBehaviour
         }
         _client.EnqueueAudioChunk(_utteranceId, Convert.ToBase64String(bytes));
         _sentChunks++;
+        _utterancePcmBytes += bytes.Length;
     }
 
     static float Rms(List<short> chunk)
