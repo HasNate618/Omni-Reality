@@ -7,8 +7,8 @@ the coordinator owns `place_generated` after a job is ready.
 ## Contract
 
 - Model tools (OpenAI function shape): `inspect_objects`, `start_generation`,
-  `emit_scene_ops` (max three ops per call; no `place_generated` / `place_known`
-  from the model).
+  `place_item`, `emit_scene_ops` (max three ops per call; no `place_generated` /
+  `place_known` from the model).
 - `place_item(name, extent_m, target)` is a model tool. `extent_m` is the
   listing's own `[width, depth, height]` in metres and is **required**: the
   model may not place a listing it cannot size. The coordinator validates the
@@ -26,9 +26,10 @@ the coordinator owns `place_generated` after a job is ready.
 - Speech after generation waits for placement ACKs; the first turn must not claim
   the GLB is already placed.
 - Live voice turn (`--planner yibu`): the turn loop binds session tools per turn
-  (`YibuPlanner.bind_tools` with `state.jobs`, frame JPEG, frame_id), runs the
-  bounded tool loop in `plan()`, then makes one tools-disabled closing call
-  for the final line. `speak.audio` carries cloud PCM (Gemini Live leg in
+  (`YibuPlanner.bind_tools` with `state.jobs`, `state.listings`,
+  `state.prebaked`, frame JPEG, frame_id), runs the bounded tool loop in
+  `plan()`, then makes one tools-disabled closing call for the final line.
+  `speak.audio` carries cloud PCM (Gemini Live leg in
   `provider/voice/cloud_speech.py`, 16 kHz mono s16le) when a synthesizer is
   attached; otherwise `audio` is `null` (degraded caption-only). Every turn
   records `voice_gate` (`passed` / `failed` / `degraded`) in session context.

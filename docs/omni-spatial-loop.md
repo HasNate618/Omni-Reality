@@ -126,7 +126,8 @@ Coordinator events: `connection_open`, `connection_close`,
   cube/sphere/cylinder, closed palette/sizes/materials), and
   `revise_procedural` (enlarge/shrink/rotate/nudge/remove by drawing_id),
   plus cloud-PCM `speak` playback with caption (`QuestDemo/Assets/Voice/`,
-  `Spatial/Procedural/`). Full GLB import is still open (placeholder cube).
+  `Spatial/Procedural/`). Generated GLBs import via glTFast into the
+  listed-size box; when import never lands, the box stays at its stated size.
 
 ## How to verify
 
