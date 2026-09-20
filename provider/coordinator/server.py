@@ -33,10 +33,10 @@ from jsonschema import ValidationError
 
 from coordinator.live_config import ensure_live_voice_only_config
 from coordinator.artifacts import ARTIFACT_PORT, start_artifact_server
-from coordinator.jobs import JobStore
+from coordinator.jobs import JobStore, StatusFn, poll_queued_jobs
 from coordinator.prebaked import load_registry
 from coordinator.session import DEFAULT_ARTIFACT_ROOT, CoordinatorState, UtteranceBuffer
-from coordinator.turn import cancel_turn, ingest_audio_chunk, start_turn
+from coordinator.turn import ACK_TIMEOUT_S, cancel_turn, ingest_audio_chunk, start_turn
 from voice.audio import BYTES_PER_SECOND, MIN_UTTERANCE_S
 from yibu_audit import ApiKeyConfigurationError, ensure_env_api_key
 from protocol.ids import new_ulid
@@ -51,6 +51,19 @@ CLOCK_SKEW_THRESHOLD_NS = 2_000_000_000
 # worker. A missing or malformed file degrades to an empty registry, so a
 # fresh checkout behaves exactly as before.
 DEFAULT_PREBAKED_REGISTRY = DEFAULT_ARTIFACT_ROOT.parent / "prebaked.json"
+
+# Job poller (finding I4): a queued live job never reached `ready`, so its
+# artifact was never servable and a planted box kept no mesh. One scan per
+# second is far inside the 15 s artifact-fetch retry spacing; the worker status
+# GET only happens while a job is queued (at most one, §5.3).
+JOB_POLL_INTERVAL_S = 1.0
+GEN_WORKER_URL_ENV = "GEN_WORKER_URL"
+DEFAULT_GEN_WORKER_URL = "http://127.0.0.1:8772"
+
+
+def gen_worker_url() -> str:
+    """Generation worker base URL; same default as the queue path."""
+    return os.environ.get(GEN_WORKER_URL_ENV, DEFAULT_GEN_WORKER_URL)
 
 
 def prebaked_registry_path() -> Path:
@@ -477,6 +490,125 @@ async def _feed_tracking_frame(state: CoordinatorState, message: dict, envelope:
         logger.warning("Tracking frame rejected: %s", exc)
 
 
+async def _worker_job_status(job_id: str) -> str | None:
+    """Ask the generation worker for one job's status.
+
+    None means "could not tell" (worker down, bad response): the job keeps its
+    queued status rather than being settled on a guess. Genuine failure is the
+    worker's own reported `failed` (its 90 s generation timeout, doc §3), which
+    is the only signal that distinguishes "still baking" from "never coming".
+    """
+    from workers.gen_client import get_job
+
+    def call() -> str | None:
+        try:
+            payload = get_job(base_url=gen_worker_url(), job_id=job_id)
+        except Exception as exc:
+            logger.debug(
+                "job status poll failed job=%s exception_class=%s",
+                job_id,
+                type(exc).__name__,
+            )
+            return None
+        status = payload.get("status")
+        return status if isinstance(status, str) else None
+
+    return await asyncio.to_thread(call)
+
+
+def _job_op_sender(ws: Any, state: CoordinatorState):
+    """Send one job-completion `place_generated` and return its ACK.
+
+    Same contract as the turn loop's scene_op send: register the op and its
+    event, send, then wait the ACK barrier. None means no ACK arrived, which
+    `on_job_terminal` already treats as a failed completion.
+    """
+
+    async def send(op: dict) -> dict | None:
+        op_id = op["op_id"]
+        event = asyncio.Event()
+        state.ack_events[op_id] = event
+        state.pending_ops[op_id] = op
+        try:
+            await ws.send(_sendable("scene_op", state.session_id, op["turn_id"], op))
+        except Exception:
+            logger.info("send scene_op failed; connection closed?")
+            state.ack_events.pop(op_id, None)
+            state.pending_ops.pop(op_id, None)
+            return None
+        try:
+            await asyncio.wait_for(event.wait(), ACK_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.info("job op %s: ACK timeout", op_id)
+        state.ack_events.pop(op_id, None)
+        return state.completed_ops.get(op_id)
+
+    return send
+
+
+def _job_terminal(state: CoordinatorState, ws: Any):
+    """Settle one job through the reviewed terminal path, never raising.
+
+    `on_job_terminal` owns the ordering (status gate, stage fence, failed
+    branch, planted guard, ready path); this only supplies its send and final
+    hook. The mesh arriving is not an ACK event (spec §5.4), so nothing is
+    spoken here: the log is the laptop's record of how the job settled.
+    """
+    from coordinator.turn import on_job_terminal
+
+    send = _job_op_sender(ws, state)
+
+    async def complete_final_fn(ack: dict) -> None:
+        logger.info(
+            "job settled status=%s planted=%s",
+            ack.get("status"),
+            bool(ack.get("planted")),
+        )
+
+    async def terminal(job_id: str) -> None:
+        try:
+            await on_job_terminal(state, job_id, send, complete_final_fn)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.info(
+                "job terminal failed job=%s exception_class=%s",
+                job_id,
+                type(exc).__name__,
+            )
+
+    return terminal
+
+
+async def run_job_poller(
+    ws: Any,
+    state: CoordinatorState,
+    *,
+    interval_s: float = JOB_POLL_INTERVAL_S,
+    status_fn: StatusFn | None = None,
+) -> None:
+    """Settle queued jobs whose mesh landed or whose worker failed (finding I4).
+
+    Cancelled by the connection teardown: one poller per connection, none
+    leaked. A scan failure is logged and never kills the loop, and a settled
+    job leaves `queued` so the next scan skips it.
+    """
+    terminal = _job_terminal(state, ws)
+    while True:
+        try:
+            await poll_queued_jobs(
+                state.jobs,
+                state.artifact_root,
+                on_terminal=terminal,
+                status_fn=status_fn or _worker_job_status,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.info("job poll failed exception_class=%s", type(exc).__name__)
+        await asyncio.sleep(interval_s)
+
+
 async def _close_live(state: CoordinatorState) -> None:
     live = getattr(state, "live", None)
     state.live = None
@@ -558,6 +690,10 @@ async def handle_connection(ws: Any, state: CoordinatorState) -> None:
     from voice.bootstrap_diagnostics import connection_close, connection_open
 
     connection_open()
+    # One poller per connection, cancelled in the teardown below: a queued job
+    # that never reaches `ready` is a box with no mesh and a session that
+    # refuses every later placement (finding I4).
+    poller = asyncio.create_task(run_job_poller(ws, state))
     try:
         if hasattr(ws, "recv"):
             while True:
@@ -577,6 +713,8 @@ async def handle_connection(ws: Any, state: CoordinatorState) -> None:
             except Exception:
                 return
     finally:
+        poller.cancel()
+        await asyncio.gather(poller, return_exceptions=True)
         connection_close()
         if state.planner is not None:
             await state.clear_voice()

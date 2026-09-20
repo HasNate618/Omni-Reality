@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -12,7 +15,11 @@ from coordinator.jobs import (
     handle_inspect,
     handle_start_generation,
     mark_ready,
+    poll_queued_jobs,
+    session_generation_busy,
 )
+from coordinator.server import CoordinatorState, handle_text, run_job_poller
+from coordinator.turn import on_job_terminal
 from protocol.ids import new_ulid
 from protocol.validate import load_fixture, validate_instance
 
@@ -159,3 +166,281 @@ class JobStoreTests(unittest.TestCase):
             self.assertFalse(
                 (root / f"{owned_id}.glb").exists(),
                 "a session-owned artifact is still reclaimed")
+
+
+def _artifact_target() -> dict:
+    return load_fixture("valid", "scene_op_mark.json")["target"]
+
+
+class JobPollerScanTests(unittest.TestCase):
+    """The single-scan seam: a queued job settles when its artifact lands.
+
+    Before this scan existed, `mark_ready` and `on_job_terminal` had no
+    production caller, so a live-queued job sat at `queued` forever: Quest
+    retried the artifact fetch six times, gave up, and left a correct listed
+    box with no mesh (plan finding #2).
+    """
+
+    def setUp(self) -> None:
+        self.store = JobStore()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.settled: list[str] = []
+
+    def _queue(self, **fields: object) -> str:
+        job_id = new_ulid()
+        job = {"job_id": job_id, "frame_id": _artifact_target()["frame_id"],
+               "target": _artifact_target(), "status": "queued"}
+        job.update(fields)
+        self.store.jobs[job_id] = job
+        return job_id
+
+    def _scan(self, *, exists=None, status_fn=None, on_terminal=None):
+        async def terminal(job_id: str) -> None:
+            self.settled.append(job_id)
+
+        return asyncio.run(poll_queued_jobs(
+            self.store,
+            self.root,
+            on_terminal=on_terminal or terminal,
+            exists_fn=exists if exists is not None else (lambda path: False),
+            status_fn=status_fn,
+        ))
+
+    def test_artifact_landing_marks_ready_and_runs_the_terminal(self) -> None:
+        job_id = self._queue()
+        seen: list[tuple[str, str]] = []
+
+        async def terminal(found: str) -> None:
+            seen.append((found, self.store.jobs[found]["status"]))
+
+        settled = self._scan(
+            exists=lambda path: path == self.root / f"{job_id}.glb",
+            on_terminal=terminal,
+        )
+        self.assertEqual(settled, [job_id])
+        self.assertEqual(self.store.jobs[job_id]["status"], "ready")
+        self.assertTrue(coordinator_may_place(self.store, job_id),
+                        "a ready job is what the artifact server will serve")
+        self.assertEqual(seen, [(job_id, "ready")],
+                         "the status must be ready before the terminal runs")
+
+    def test_absent_artifact_leaves_the_job_queued(self) -> None:
+        job_id = self._queue()
+        settled = self._scan(status_fn=lambda *, job_id: "running")
+        self.assertEqual(settled, [])
+        self.assertEqual(self.settled, [])
+        self.assertEqual(self.store.jobs[job_id]["status"], "queued")
+
+    def test_worker_failure_marks_failed_and_runs_the_terminal(self) -> None:
+        job_id = self._queue(extent_m=[0.55, 0.40, 0.72], planted=True)
+        settled = self._scan(status_fn=lambda *, job_id: "failed")
+        self.assertEqual(settled, [job_id])
+        self.assertEqual(self.store.jobs[job_id]["status"], "failed")
+        self.assertEqual(self.settled, [job_id])
+
+    def test_unreachable_worker_leaves_the_job_queued(self) -> None:
+        # None is "could not tell": a job is never settled on a guess, so one
+        # unreachable status GET does not fail a healthy generation.
+        job_id = self._queue()
+        settled = self._scan(status_fn=lambda *, job_id: None)
+        self.assertEqual(settled, [])
+        self.assertEqual(self.store.jobs[job_id]["status"], "queued")
+
+    def test_already_settled_jobs_are_not_rescanned(self) -> None:
+        ready_id = self._queue(status="ready")
+        failed_id = self._queue(status="failed")
+        settled = self._scan(exists=lambda path: True)
+        self.assertEqual(settled, [], "only queued jobs are candidates")
+        self.assertEqual(self.settled, [])
+        self.assertEqual(self.store.jobs[ready_id]["status"], "ready")
+        self.assertEqual(self.store.jobs[failed_id]["status"], "failed")
+
+    def test_malformed_job_id_is_never_settled(self) -> None:
+        # Readiness pathing comes from artifacts.artifact_path's ULID guard, so
+        # a job id that is not a ULID can never name an artifact on disk.
+        job_id = self._queue()
+        self.store.jobs["../../etc/passwd"] = {"job_id": "../../etc/passwd", "status": "queued"}
+        settled = self._scan(exists=lambda path: True)
+        self.assertEqual(settled, [job_id])
+        self.assertEqual(self.store.jobs["../../etc/passwd"]["status"], "queued")
+
+    def test_planted_extent_job_takes_the_no_second_op_path(self) -> None:
+        # The scan must not turn a planted job into a second placement: the op
+        # went out at accept and Quest is already fetching the artifact.
+        job_id = self._queue(extent_m=[0.55, 0.40, 0.72], planted=True)
+        sent: list[dict] = []
+        announced: list[dict] = []
+
+        async def send(op: dict) -> dict | None:
+            sent.append(op)
+            return {"status": "placed", "op_id": op["op_id"]}
+
+        async def complete_final_fn(ack: dict) -> None:
+            announced.append(ack)
+
+        state = CoordinatorState(jobs=self.store)
+        state.latest_stage_epoch = 1
+
+        async def run() -> None:
+            await on_job_terminal(state, job_id, send, complete_final_fn)
+
+        settled = self._scan(
+            exists=lambda path: path == self.root / f"{job_id}.glb",
+            on_terminal=lambda found: run(),
+        )
+        self.assertEqual(settled, [job_id])
+        self.assertEqual(sent, [], "already planted; no second op")
+        self.assertEqual(announced, [{"status": "ready", "planted": True}])
+
+    def test_worker_failure_reports_failure_through_the_terminal(self) -> None:
+        job_id = self._queue(extent_m=[0.55, 0.40, 0.72], planted=True)
+        sent: list[dict] = []
+        announced: list[dict] = []
+        state = CoordinatorState(jobs=self.store)
+        state.latest_stage_epoch = 1
+
+        async def send(op: dict) -> dict | None:
+            sent.append(op)
+            return {"status": "placed", "op_id": op["op_id"]}
+
+        async def complete_final_fn(ack: dict) -> None:
+            announced.append(ack)
+
+        async def run(found: str) -> None:
+            await on_job_terminal(state, found, send, complete_final_fn)
+
+        settled = self._scan(status_fn=lambda *, job_id: "failed", on_terminal=run)
+        self.assertEqual(settled, [job_id])
+        self.assertEqual(sent, [], "a failed job emits no op")
+        self.assertEqual(announced, [{"status": "failed"}],
+                         "the box stays; the mesh never arrived")
+
+
+class _PollerWs:
+    """Fake socket: records frames and ACKs one scene_op like Quest would."""
+
+    def __init__(self, state: CoordinatorState, *, ack: bool = True) -> None:
+        self.state = state
+        self.ack = ack
+        self.sent: list[dict] = []
+
+    async def send(self, text: str) -> None:
+        message = json.loads(text)
+        self.sent.append(message)
+        if message["type"] != "scene_op" or not self.ack:
+            return
+        payload = copy.deepcopy(load_fixture("valid", "placement_ack_placed.json"))
+        payload["op_id"] = message["payload"]["op_id"]
+        payload["turn_id"] = message["turn_id"]
+        payload["stage_epoch"] = message["payload"]["stage_epoch"]
+        await handle_text(self, self.state, json.dumps({
+            "v": 1, "type": "ack", "session_id": None,
+            "turn_id": message["turn_id"], "utterance_id": None, "payload": payload,
+        }))
+
+    def ops(self) -> list[dict]:
+        return [m["payload"] for m in self.sent if m["type"] == "scene_op"]
+
+
+class JobPollerLoopTests(unittest.TestCase):
+    """server.run_job_poller wiring: artifact on disk → job settled."""
+
+    def setUp(self) -> None:
+        self.store = JobStore()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.state = CoordinatorState(jobs=self.store)
+        self.state.artifact_root = self.root
+        self.state.latest_stage_epoch = 1
+
+    def _queue(self, job_id: str, **fields: object) -> None:
+        job = {"job_id": job_id, "frame_id": _artifact_target()["frame_id"],
+               "target": _artifact_target(), "status": "queued"}
+        job.update(fields)
+        self.store.jobs[job_id] = job
+
+    def _write_artifact(self, job_id: str) -> None:
+        (self.root / f"{job_id}.glb").write_bytes(b"glTF" + b"\x00" * 8)
+
+    def _run_poller(self, ws: _PollerWs, predicate, *, status_fn=None) -> None:
+        async def scenario() -> bool:
+            task = asyncio.create_task(run_job_poller(
+                ws, self.state, interval_s=0.01, status_fn=status_fn))
+            try:
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline:
+                    if predicate():
+                        return True
+                    await asyncio.sleep(0.01)
+                return False
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        self.assertTrue(asyncio.run(scenario()), "poller never settled the job")
+
+    def test_planted_job_with_artifact_is_ready_and_emits_no_op(self) -> None:
+        job_id = new_ulid()
+        self._queue(job_id, extent_m=[0.55, 0.40, 0.72], planted=True)
+        self._write_artifact(job_id)
+        ws = _PollerWs(self.state)
+
+        with self.assertLogs("coordinator.server", level="INFO") as captured:
+            self._run_poller(
+                ws,
+                lambda: self.store.jobs[job_id]["status"] == "ready"
+                and any("job settled status=ready planted=True" in line for line in captured.output),
+            )
+
+        self.assertEqual(ws.ops(), [], "the box was planted at accept; no second op")
+        self.assertEqual(ws.sent, [], "no frame at all is needed for a planted job")
+
+    def test_ready_artifact_settles_an_extentless_job_once(self) -> None:
+        job_id = new_ulid()
+        self._queue(job_id)
+        self._write_artifact(job_id)
+        ws = _PollerWs(self.state)
+
+        def settled() -> bool:
+            ops = ws.ops()
+            return (self.store.jobs[job_id]["status"] == "ready"
+                    and len(ops) == 1
+                    and ops[0]["op_id"] in self.state.completed_ops)
+
+        self._run_poller(ws, settled)
+
+        (op,) = ws.ops()
+        self.assertEqual(op["kind"], "place_generated")
+        self.assertEqual(op["job_id"], job_id)
+        self.assertNotIn("extent_m", op, "a job with no stated size emits none")
+        self.assertEqual(self.state.completed_ops[op["op_id"]]["status"], "placed")
+        validate_instance("scene_op", op)
+
+        # A later scan must not emit a duplicate: the job left `queued` at ready.
+        async def terminal(job_id: str) -> None:
+            raise AssertionError("a settled job must not be scanned again")
+
+        self.assertEqual(asyncio.run(poll_queued_jobs(
+            self.store, self.root, on_terminal=terminal,
+            exists_fn=lambda path: True)), [])
+
+    def test_worker_failure_settles_the_job_without_sending(self) -> None:
+        job_id = new_ulid()
+        self._queue(job_id, extent_m=[0.55, 0.40, 0.72], planted=True)
+        ws = _PollerWs(self.state)
+
+        self._run_poller(
+            ws,
+            lambda: self.store.jobs[job_id]["status"] == "failed",
+            status_fn=lambda *, job_id: "failed",
+        )
+
+        self.assertEqual(ws.ops(), [])
+        self.assertFalse(coordinator_may_place(self.store, job_id))
+        self.assertFalse(
+            session_generation_busy(self.store),
+            "a failed job must not leave the session refusing every later placement",
+        )

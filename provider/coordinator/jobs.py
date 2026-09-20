@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import inspect as inspect_module
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from protocol.ids import new_ulid
 from workers.gen_client import BusyError
 
 InspectFn = Callable[..., Any]
 QueueFn = Callable[..., Any]
+TerminalFn = Callable[[str], Awaitable[None]]
+ExistsFn = Callable[[Path], bool]
+StatusFn = Callable[..., Any]
+
+# The worker's own job vocabulary (docs/superpowers/specs/2026-09-19-omni-worker-tools-design.md):
+# queued | running | ready | failed. Only the terminal failure string is acted on.
+WORKER_FAILED = "failed"
 
 
 class JobStore:
@@ -190,6 +197,49 @@ def mark_failed(store: JobStore, job_id: str) -> None:
     job = store.jobs.get(job_id)
     if job is not None:
         job["status"] = "failed"
+
+
+def _is_file(path: Path) -> bool:
+    return path.is_file()
+
+
+async def poll_queued_jobs(
+    store: JobStore,
+    artifact_root: Path,
+    *,
+    on_terminal: TerminalFn,
+    exists_fn: ExistsFn = _is_file,
+    status_fn: StatusFn | None = None,
+) -> list[str]:
+    """Settle every queued job whose artifact landed, or whose worker failed.
+
+    One scan, no loop: the caller owns cadence and cancellation. The artifact
+    file is the readiness signal because it is exactly what the artifact server
+    checks before serving a job; the worker's status is consulted only to learn
+    about a terminal failure, so a worker that dies cannot leave a job queued
+    forever and block every later placement (spec §5.3 session_generation_busy).
+
+    Returns the job ids settled in this scan. A job whose worker is unreachable
+    stays queued, exactly as it did before this scan existed.
+    """
+    # Local import: artifacts.py imports this module for JobStore/
+    # coordinator_may_place, so a module-level import would be a cycle.
+    from coordinator.artifacts import artifact_path
+
+    settled: list[str] = []
+    for job_id, job in list(store.jobs.items()):
+        if job.get("status") != "queued":
+            continue
+        path = artifact_path(artifact_root, job_id)
+        if path is not None and exists_fn(path):
+            mark_ready(store, job_id)
+        elif status_fn is not None and (await _call_injected(status_fn, job_id=job_id)) == WORKER_FAILED:
+            mark_failed(store, job_id)
+        else:
+            continue
+        settled.append(job_id)
+        await on_terminal(job_id)
+    return settled
 
 
 def clear_jobs(store: JobStore, artifact_root: Path | None = None) -> None:
