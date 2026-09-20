@@ -198,6 +198,7 @@ Do not use JSON, markdown, drawing instructions, or spatial operations."""
 TRACKING_PROMPT = """You hear a user's recorded request and see one Quest camera image.
 Select the single visible object the user asks to track/find. Reply ONLY with:
 {"heard":"the user's words", "say":"short clarification if needed",
+ "label":"the object you picked, two words",
  "track":{"type":"image_point","u":0.5,"v":0.5}}
 u is left-to-right and v is top-to-bottom, given as FRACTIONS of the image
 between 0 and 1 (e.g. the centre is u=0.5, v=0.5). Never answer in pixels:
@@ -220,6 +221,11 @@ def parse_tracking_reply(
     obj = _extract_json_object(text) or {}
     say = obj.get("say") if isinstance(obj.get("say"), str) else ""
     heard = obj.get("heard") if isinstance(obj.get("heard"), str) else None
+    label = obj.get("label") if isinstance(obj.get("label"), str) else None
+    if label:
+        # Names what the model believes it selected. A mask on the wrong thing
+        # is then either its mistake (wrong label) or SAM 2's (right label).
+        logger.info("model selected %r", label[:40])
     target = obj.get("track")
     if not isinstance(target, dict) or target.get("type") != "image_point":
         return say, heard, None

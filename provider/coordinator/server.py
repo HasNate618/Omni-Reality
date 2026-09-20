@@ -633,7 +633,7 @@ def make_planner(
         from coordinator.perception import PerceptionQaPlanner
         return PerceptionQaPlanner(**({"model": model} if model else {}))
     if tracking:
-        options = {"tracking": True, "purpose": "track-object", "max_tokens": 96}
+        options = {"tracking": True, "purpose": "track-object"}
         if model:
             options["model"] = model
         return YibuPlanner(**options)
