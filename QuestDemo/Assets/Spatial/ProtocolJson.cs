@@ -246,7 +246,7 @@ public static class ProtocolJson
     {
         var sb = new StringBuilder("{\"device\":\"quest\",\"app\":\"QuestDemo\",\"os_version\":");
         AppendNullable(sb, osVersion);
-        sb.Append(",\"capabilities\":{\"pca\":true,\"depth\":false,\"tts\":false}}");
+        sb.Append(",\"capabilities\":{\"pca\":true,\"depth\":false,\"tts\":true}}");
         return WrapMessage("hello", null, 0, sb.ToString());
     }
 

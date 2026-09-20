@@ -195,6 +195,11 @@ async def _handle_frame(ws: Any, state: CoordinatorState, message: dict) -> None
                 raise TrackingError("Missing or oversized camera JPEG.")
             jpeg = base64.b64decode(encoded, validate=True)
             bridge.history.add(envelope, jpeg)
+            logger.debug(
+                "video frame accepted: frame_id=%s jpeg=%d bytes %dx%d epoch=%d",
+                envelope["frame_id"], len(jpeg), envelope["sent_w"], envelope["sent_h"],
+                envelope["stage_epoch"],
+            )
         except (TrackingError, binascii.Error, ValueError) as exc:
             logger.warning("Tracking frame rejected: %s", exc)
         return
@@ -227,10 +232,15 @@ def _attach_frame_to_utterance(state: CoordinatorState, message: dict, envelope:
     buf = state.utterances.setdefault(utterance_id, UtteranceBuffer())
     buf.envelope = envelope
     buf.jpeg = jpeg
+    logger.debug(
+        "frame pinned to utterance %s: frame_id=%s jpeg=%s bytes",
+        utterance_id, envelope["frame_id"], len(jpeg) if jpeg else 0,
+    )
 
 
 def _turn_sender(ws: Any, state: CoordinatorState):
     async def send(msg_type: str, turn_id: int, payload: dict, utterance_id: str | None = None) -> None:
+        logger.debug("-> %s turn=%s", msg_type, turn_id)
         try:
             await ws.send(_sendable(msg_type, state.session_id, turn_id, payload, utterance_id))
         except Exception:  # socket gone: drawings stay on Quest, nothing to retry
@@ -252,6 +262,12 @@ async def _handle_utterance_end(ws: Any, state: CoordinatorState, message: dict)
     if not isinstance(utterance_id, str):
         logger.info("ignoring utterance_end without utterance_id")
         return
+    buf = state.utterances.get(utterance_id)
+    logger.info(
+        "utterance_end %s: audio=%d bytes (%.2f s), selected frame_id=%s",
+        utterance_id, len(buf.pcm) if buf else 0,
+        (len(buf.pcm) if buf else 0) / 32000, message["payload"].get("frame_id"),
+    )
     if state.tracking is not None:
         frame_id = message["payload"].get("frame_id")
         state.utterances.setdefault(utterance_id, UtteranceBuffer()).selected_frame_id = (
@@ -337,6 +353,11 @@ async def handle_text(ws: Any, state: CoordinatorState, raw: object) -> None:
         logger.info("ignoring message from foreign session")
         return
     msg_type = message["type"]
+    logger.debug(
+        "<- %s %d bytes utt=%s payload=%s",
+        msg_type, len(raw_text), message["utterance_id"],
+        ",".join(sorted(message["payload"])) if isinstance(message["payload"], dict) else "?",
+    )
     if msg_type == "hello":
         await _handle_hello(ws, state, message)
     elif msg_type == "ping":
@@ -439,8 +460,19 @@ if __name__ == "__main__":
     )
     parser.add_argument("--model", help="yibu model id (default qwen3.8-omni-flash)")
     parser.add_argument("--sam2-url", help="enable single-object tracking, e.g. ws://127.0.0.1:8766")
+    parser.add_argument(
+        "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING"],
+        help="DEBUG traces every message, frame and model call",
+    )
     args = parser.parse_args()
     if args.sam2_url and args.planner == "mark":
         parser.error("--sam2-url requires --planner stub or --planner yibu")
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    # Third-party debug logs bury ours (httpx prints every HTTP chunk).
+    for noisy in ("websockets", "httpx", "httpcore", "asyncio"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     asyncio.run(run_server(args.host, args.port, args.planner, args.model, args.sam2_url))

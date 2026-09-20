@@ -478,7 +478,17 @@ public class CoordinatorClient : MonoBehaviour
             HandleMark(op);
             return;
         }
-        // Other scene operations and speech playback are not handled here.
+        if (type == "speak")
+        {
+            string payload;
+            if (!ProtocolJson.TryGetPayloadObject(text, out payload))
+                return;
+            var line = JsonUtility.FromJson<SpeakPayload>(payload);
+            if (line != null && !string.IsNullOrEmpty(line.text))
+                QuestSpeech.Speak(line.text);
+            return;
+        }
+        // Other scene operations are not handled here.
         Debug.Log("CoordinatorClient: ignoring " + type);
     }
 

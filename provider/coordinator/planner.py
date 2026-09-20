@@ -260,8 +260,17 @@ class YibuPlanner:
             audio_as=self.audio_as,
         )
         started = time.monotonic()
-        text, record = await asyncio.to_thread(self._call, messages)
+        logger.info(
+            "calling %s: %.2f s audio, %s jpeg bytes, tracking=%s",
+            self.model, len(pcm) / 32000, len(jpeg) if jpeg else 0, self.tracking,
+        )
+        try:
+            text, record = await asyncio.to_thread(self._call, messages)
+        except Exception as exc:
+            logger.warning("%s call failed: %s: %s", self.model, type(exc).__name__, exc)
+            raise
         latency_ms = int((time.monotonic() - started) * 1000)
+        logger.debug("%s raw reply: %s", self.model, text[:400].replace("\n", " "))
         if self.tracking:
             say, heard, target = parse_tracking_reply(text)
             return PlanResult(ops=[], text=say, heard=heard, latency_ms=latency_ms,

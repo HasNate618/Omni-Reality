@@ -19,12 +19,14 @@ public static class BuildAndroid
         const string scenePath = "Assets/Scenes/SampleScene.unity";
         Scene scene = EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Single);
 
-        if (GameObject.Find("DemoCube") == null)
+        // The old smoke-test cube is gone: passthrough plus the tracking
+        // overlay are the scene now. Delete it from scenes that still have it.
+        GameObject leftover = GameObject.Find("DemoCube");
+        if (leftover != null)
         {
-            GameObject cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            cube.name = "DemoCube";
-            cube.transform.position = new Vector3(0f, 1f, 2f);
+            Object.DestroyImmediate(leftover);
             EditorSceneManager.MarkSceneDirty(scene);
+            Debug.Log("BuildAndroid: removed DemoCube from the scene");
         }
         EditorSceneManager.SaveScene(scene);
 

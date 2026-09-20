@@ -33,6 +33,7 @@ SAY_UNCONFIRMED = "I couldn't confirm placement."
 SAY_MODEL_ERROR = "Sorry, I couldn't reach the model. Try again."
 SAY_NO_TARGET = "I couldn't work out where to put that. Point at it or look closer."
 SAY_PLACED_DEFAULT = "There it is."
+SAY_TRACKING_DEFAULT = "Tracking that now."
 
 # PlacementAck reason → spoken honesty copy (spec §9).
 REJECT_COPY = {
@@ -51,7 +52,10 @@ def start_turn(state: CoordinatorState, send: Send, utterance_id: str) -> asynci
     """Close an utterance. Returns the background turn task, or None."""
     buf = state.utterances.pop(utterance_id, None) or UtteranceBuffer()
     if len(buf.pcm) < MIN_UTTERANCE_S * BYTES_PER_SECOND:
-        logger.info("utterance %s too short (%d bytes); no turn", utterance_id, len(buf.pcm))
+        logger.info(
+            "utterance %s too short: %.2f s of audio, need %.2f s; no turn",
+            utterance_id, len(buf.pcm) / BYTES_PER_SECOND, MIN_UTTERANCE_S,
+        )
         return None
     state.turn_id += 1
     turn_id = state.turn_id
@@ -180,9 +184,17 @@ async def _run_tracking_turn(state, turn_id, utterance_id, buf):
     bridge = state.tracking
     generation = await bridge.begin(turn_id, utterance_id)
     try:
+        logger.info(
+            "turn %d: tracking selection, audio %.2f s, snapshot %s",
+            turn_id, len(buf.pcm) / BYTES_PER_SECOND, buf.selected_frame_id,
+        )
         if not buf.selected_frame_id:
             raise TrackingError("No snapshot was selected for this utterance.")
         frame = await bridge.history.wait_for(buf.selected_frame_id)
+        logger.info(
+            "turn %d: snapshot found (%dx%d, %d jpeg bytes); asking the model",
+            turn_id, frame.size[0], frame.size[1], len(frame.jpeg),
+        )
         # The reference pins immutable JPEG bytes while newer frames arrive.
         plan = await asyncio.wait_for(state.planner.plan(
             pcm=bytes(buf.pcm), jpeg=frame.jpeg, envelope=frame.envelope,
@@ -190,14 +202,33 @@ async def _run_tracking_turn(state, turn_id, utterance_id, buf):
         ), bridge.history.seconds)
         if turn_id in state.cancelled_turns or generation != bridge.generation:
             return
+        logger.info(
+            "turn %d: model replied in %d ms; heard=%r target=%s say=%r",
+            turn_id, plan.latency_ms, plan.heard, plan.tracking_target, plan.text,
+        )
         target = plan.tracking_target
         if target is None:
             raise TrackingError("I couldn't identify one target. Look at it and try again.")
         await bridge.seed(frame, target, generation)
+        # The headset speaks this with Android TTS. Said only after seeding,
+        # so we never claim to be tracking something SAM 2 has not accepted.
+        await bridge.send(
+            "speak", turn_id,
+            {"turn_id": turn_id, "text": plan.text or SAY_TRACKING_DEFAULT, "audio": None},
+            utterance_id,
+        )
     except asyncio.CancelledError:
         raise
+    except asyncio.TimeoutError:
+        logger.warning("turn %d: the model did not answer in time", turn_id)
+        if generation == bridge.generation:
+            await bridge.status("error", "The model timed out. Try again.")
+        return
     except Exception as exc:
-        logger.warning("Tracking selection failed: %s", type(exc).__name__)
+        logger.warning(
+            "turn %d: tracking selection failed: %s: %s", turn_id, type(exc).__name__, exc,
+            exc_info=not isinstance(exc, TrackingError),
+        )
         if generation == bridge.generation:
             text = str(exc) if isinstance(exc, TrackingError) else "Object selection failed or timed out. Try again."
             await bridge.status("error", text)

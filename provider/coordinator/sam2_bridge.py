@@ -173,7 +173,9 @@ class Sam2Bridge:
         connect = self.connector or websockets.connect
         try:
             await self.status("initializing", "Initializing SAM 2…", seed_frame_id=seed.id)
+            logger.info("SAM2 connecting to %s", self.url)
             async with connect(self.url, max_size=4 * 1024 * 1024, open_timeout=self.timeout) as ws:
+                logger.info("SAM2 connected; seeding frame %s", seed.id)
                 frame = seed
                 catching_up = True
                 started = time.monotonic()
@@ -217,7 +219,13 @@ class Sam2Bridge:
             "type": "frame", "frame_id": frame.id,
             "jpeg_b64": base64.b64encode(frame.jpeg).decode("ascii"), "clicks": clicks,
         })), self.timeout)
+        started = time.monotonic()
         response = json.loads(await asyncio.wait_for(ws.recv(), self.timeout))
+        logger.debug(
+            "SAM2 frame=%s clicks=%d -> %d objects in %d ms",
+            frame.id, len(clicks), len(response.get("objects") or []),
+            int((time.monotonic() - started) * 1000),
+        )
         if response.get("type") != "result" or not isinstance(response.get("objects"), list):
             raise TrackingError("SAM 2 returned an invalid result.")
         # Older servers have no frame_id. One request in flight still provides

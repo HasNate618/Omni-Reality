@@ -23,6 +23,14 @@ public class TrackingObject
     public string mask_b64;
 }
 
+/// <summary>Assistant reply for the headset to speak (payload of `speak`).</summary>
+[Serializable]
+public class SpeakPayload
+{
+    public int turn_id;
+    public string text;
+}
+
 [Serializable]
 public class TrackingStatus
 {

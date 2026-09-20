@@ -129,8 +129,9 @@ async def run(args: argparse.Namespace) -> int:
                         if payload["state"] == "error":
                             return 1
                     elif kind == "speak":
-                        log("error", "coordinator is not in tracking mode; supply --sam2-url")
-                        return 1
+                        log("speak", json.dumps(payload["text"], ensure_ascii=False))
+                    elif kind == "turn_started":
+                        pass
                 return 1
             except asyncio.TimeoutError:
                 log("timeout", "no tracking results")

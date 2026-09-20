@@ -140,14 +140,6 @@ public static class ARSetup
             Debug.Log("ARSetup: legacy Main Camera disabled");
         }
 
-        // 6. DemoCube gets a spatial anchor.
-        var cube = GameObject.Find("DemoCube");
-        if (cube != null && cube.GetComponent<OVRSpatialAnchor>() == null)
-        {
-            cube.AddComponent<OVRSpatialAnchor>();
-            Debug.Log("ARSetup: OVRSpatialAnchor added to DemoCube");
-        }
-
         // 7. AR director: left PCA camera, depth + raycast, capture runtime.
         //    Slice 1 capture envelope source of truth; see SpatialRuntime.
         var director = GameObject.Find("ARDirector");

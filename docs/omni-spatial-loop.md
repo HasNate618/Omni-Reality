@@ -74,6 +74,32 @@ The existing placement/ACK turn below remains the default without that flag.
 Tracking uses status/result events rather than the placement-ACK speech path.
 Its Unity source does not implement speech playback or a new passthrough renderer.
 
+## Running it (one command)
+
+`./start-demo.sh` from the repo root starts the SAM 2 server (reusing a loaded
+one), replaces any leftover coordinator, loads `provider/.env`, re-creates the
+`adb reverse tcp:8765` tunnel, launches the app, and tails the interesting log
+lines. `--stub` skips the model call (seeds the frame centre); `--no-app`
+leaves the headset app alone. Ctrl+C stops what it started; logs in `logs/`.
+
+Only one coordinator may run at a time: a leftover process keeps the headset's
+socket through the USB tunnel and silently swallows everything it sends, which
+looks exactly like a dead pipeline. The tunnel also disappears whenever adb
+restarts or the cable is unplugged, so re-run the script.
+
+## Seeing the masks in the headset
+
+`QuestDemo/Assets/Spatial/TrackingMaskOverlay.cs` is the renderer that
+`TrackingResult.cs` expects. It creates itself at startup (no scene wiring),
+subscribes to `CoordinatorClient.TrackingResultReceived`, tints each
+`mask_b64` into one RGBA texture, and draws it on a quad built from the
+capture frame's intrinsics and pose, 1.5 m down the capture rays. The quad is
+world-locked to the capture pose, so it holds still while the wearer moves; it
+is a flat projection, exact along the capture ray and approximate off-axis.
+It hides itself on `tracking_status` `stopped`/`error` or after 2 s with no
+result. Without this component the masks arrive and are only logged
+(`QUEST_TRACKING first mask ...`), which is what "nothing renders" looked like.
+
 ## How to verify
 
 - Offline (no credit, no headset): from `provider/`,
