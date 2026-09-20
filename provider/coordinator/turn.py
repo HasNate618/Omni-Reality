@@ -368,7 +368,16 @@ async def on_job_terminal(
     if status == "failed":
         await complete_final_fn({"status": "failed"})
         return
-    if job.get("extent_m") and job.get("planted"):
+    if not job.get("extent_m"):
+        # Spec §6.3: a size claim needs a size, and Quest refuses an extentless
+        # `place_generated` rather than inventing one. This branch is live now
+        # that the job poller settles queued jobs, and the shop-to-life jobs
+        # (handle_start_generation) carry no extents at all, so emitting here
+        # would buy a refusal nobody waits on and nobody hears. Report the
+        # failure and emit nothing.
+        await complete_final_fn({"status": "failed"})
+        return
+    if job.get("planted"):
         # Planted when the item was accepted, so a stated-size box has been in
         # the room since before the mesh existed. Emitting again would place
         # the same object twice. Quest is already fetching the artifact.
@@ -379,11 +388,17 @@ async def on_job_terminal(
     if not isinstance(target, dict):
         await complete_final_fn({"status": "failed"})
         return
+    # An unplanted job that does state its size still places at that size:
+    # same rule, an op Quest would only refuse is not worth sending, and this
+    # one has the metres to plant with. (`handle_place_item` plants at accept,
+    # so this is the record carrying extents without the planted flag, not the
+    # live listing path.)
     op = build_place_generated(
         job_id=job_id,
         turn_id=turn_id,
         stage_epoch=stage_epoch,
         target=target,
+        extent_m=job["extent_m"],
     )
     ack = await send(op)
     if ack is None:

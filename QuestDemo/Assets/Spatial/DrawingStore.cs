@@ -227,6 +227,24 @@ public class DrawingStore : MonoBehaviour
     const float UnfittedBoxAlpha = 0.25f;
 
     /// <summary>
+    /// Honesty copy for a fitted mesh that misses the listing past the 25%
+    /// aspect rule (spec §8.1). The box stays the size claim. Both paths that
+    /// fit a mesh -- an import and a swap -- report this same line.
+    /// </summary>
+    public const string ApproximateMeshText =
+        "That mesh is approximate; the box is the listed size.";
+
+    /// <summary>
+    /// The honesty-chip surface (spec §8.1), installed by the caller that owns
+    /// one: <see cref="GeneratedMeshPlacer"/> hands the client's chip here when
+    /// it handles a placement. A swap re-fits a mesh with no placer running,
+    /// and the re-fit can only be reported through this. Null when nothing
+    /// installed a surface (an EditMode test, a build with no chip), which
+    /// shows nothing rather than crashing.
+    /// </summary>
+    public System.Action<string> ChipSurface;
+
+    /// <summary>
     /// Register one generated placement as a normal drawing so remove, undo,
     /// the clutter cap, and revise all see it. Returns the root.
     /// </summary>
@@ -540,6 +558,22 @@ public class DrawingStore : MonoBehaviour
         other.Fitted = oneMesh;
         Rebox(one, oneSize);
         Rebox(other, otherSize);
+        // §8.1: a swap re-fits, so the honesty verdict is derived again here.
+        // A box holding no mesh has just set its flag false, so this is
+        // exactly "a mesh stands in a box it misses by more than 25%".
+        if (one.Approximate || other.Approximate)
+            ChipApproximateMesh();
+    }
+
+    /// <summary>
+    /// Raise §8.1's honesty chip for an approximate mesh. With no surface
+    /// installed the verdict is still on the object -- the box alpha -- and
+    /// nothing is shown.
+    /// </summary>
+    void ChipApproximateMesh()
+    {
+        if (ChipSurface != null)
+            ChipSurface(ApproximateMeshText);
     }
 
     /// <summary>

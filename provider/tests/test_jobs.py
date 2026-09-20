@@ -398,28 +398,30 @@ class JobPollerLoopTests(unittest.TestCase):
         self.assertEqual(ws.ops(), [], "the box was planted at accept; no second op")
         self.assertEqual(ws.sent, [], "no frame at all is needed for a planted job")
 
-    def test_ready_artifact_settles_an_extentless_job_once(self) -> None:
+    def test_ready_artifact_settles_an_extentless_job_as_a_failure(self) -> None:
+        # The poller settles this job in production now, and a job queued by
+        # `start_generation` states no size. Quest refuses an extentless
+        # `place_generated` rather than inventing one (spec §6.3), so the
+        # coordinator emits nothing and settles the turn as failed. This test
+        # used to assert the pre-refusal contract -- one extentless op ACKed
+        # "placed" -- which is exactly the op I5 made unplantable.
         job_id = new_ulid()
         self._queue(job_id)
         self._write_artifact(job_id)
         ws = _PollerWs(self.state)
 
-        def settled() -> bool:
-            ops = ws.ops()
-            return (self.store.jobs[job_id]["status"] == "ready"
-                    and len(ops) == 1
-                    and ops[0]["op_id"] in self.state.completed_ops)
+        with self.assertLogs("coordinator.server", level="INFO") as captured:
+            self._run_poller(
+                ws,
+                lambda: self.store.jobs[job_id]["status"] == "ready"
+                and any("job settled status=failed" in line for line in captured.output),
+            )
 
-        self._run_poller(ws, settled)
+        self.assertEqual(ws.ops(), [], "an op Quest would refuse is not sent")
+        self.assertEqual(ws.sent, [], "no frame at all: there is nothing to plant")
+        self.assertEqual(self.state.completed_ops, {}, "no ACK can be waited for")
 
-        (op,) = ws.ops()
-        self.assertEqual(op["kind"], "place_generated")
-        self.assertEqual(op["job_id"], job_id)
-        self.assertNotIn("extent_m", op, "a job with no stated size emits none")
-        self.assertEqual(self.state.completed_ops[op["op_id"]]["status"], "placed")
-        validate_instance("scene_op", op)
-
-        # A later scan must not emit a duplicate: the job left `queued` at ready.
+        # A later scan must not settle it again: the job left `queued` at ready.
         async def terminal(job_id: str) -> None:
             raise AssertionError("a settled job must not be scanned again")
 

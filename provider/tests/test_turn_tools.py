@@ -60,7 +60,11 @@ class PlaceGeneratedTests(unittest.TestCase):
         validate_instance("scene_op", op)
         self.assertFalse(coordinator_may_place(self.store, op["job_id"]))
 
-    def test_ready_job_emits_place_generated_then_announce(self) -> None:
+    def test_ready_job_without_extents_emits_nothing_and_reports_failure(self) -> None:
+        # The poller now settles queued jobs in production, so this branch is
+        # live: a `start_generation` job carries no extents, and Quest refuses
+        # an extentless `place_generated` rather than inventing a size. The
+        # coordinator therefore emits no op and settles the turn as failed.
         job_id = new_ulid()
         self.store.jobs[job_id] = {
             "job_id": job_id,
@@ -79,10 +83,8 @@ class PlaceGeneratedTests(unittest.TestCase):
             self.announced.append(ack)
 
         asyncio.run(on_job_terminal(self.state, job_id, send, complete_final_fn))
-        self.assertEqual(len(self.sent), 1)
-        self.assertEqual(self.sent[0]["kind"], "place_generated")
-        self.assertEqual(self.sent[0]["job_id"], job_id)
-        self.assertEqual(self.announced[0]["status"], "placed")
+        self.assertEqual(self.sent, [], "an op Quest would refuse is not sent")
+        self.assertEqual(self.announced, [{"status": "failed"}])
 
     def test_failed_job_does_not_emit_place_generated(self) -> None:
         job_id = new_ulid()
@@ -166,10 +168,10 @@ class PlaceGeneratedTests(unittest.TestCase):
         self.assertEqual(self.sent, [], "already planted; no second op")
         self.assertEqual(self.announced, [{"status": "ready", "planted": True}])
 
-    def test_planted_but_extentless_job_still_emits(self) -> None:
-        # The guard needs BOTH keys. With `or` instead of `and`, a job that was
-        # marked planted but never given extents would silently suppress its
-        # place_generated op.
+    def test_planted_but_extentless_job_reports_failure(self) -> None:
+        # The guard needs BOTH keys: a job marked planted but never given
+        # extents is not a planted placement, so it must not be reported as
+        # one -- and with no size to plant with it emits nothing either.
         job_id = new_ulid()
         self.store.jobs[job_id] = {
             "job_id": job_id,
@@ -188,7 +190,8 @@ class PlaceGeneratedTests(unittest.TestCase):
             self.announced.append(ack)
 
         asyncio.run(on_job_terminal(self.state, job_id, send, complete_final_fn))
-        self.assertEqual(len(self.sent), 1, "no extents, so it must still emit")
+        self.assertEqual(self.sent, [], "no extents, so there is nothing to plant")
+        self.assertEqual(self.announced, [{"status": "failed"}])
 
     def test_failed_planted_job_reports_failure(self) -> None:
         # A planted job whose worker fails must still report failure: the box
@@ -217,7 +220,7 @@ class PlaceGeneratedTests(unittest.TestCase):
         self.assertEqual(self.sent, [], "a failed job emits no op")
         self.assertEqual(self.announced, [{"status": "failed"}])
 
-    def test_unplanted_ready_job_still_emits(self) -> None:
+    def test_unplanted_ready_job_still_emits_with_its_extents(self) -> None:
         job_id = new_ulid()
         self.store.jobs[job_id] = {
             "job_id": job_id,
@@ -225,6 +228,7 @@ class PlaceGeneratedTests(unittest.TestCase):
             "target": self.target,
             "status": "queued",
             "stage_epoch": 1,
+            "extent_m": [0.55, 0.40, 0.72],
         }
         mark_ready(self.store, job_id)
 
@@ -237,4 +241,8 @@ class PlaceGeneratedTests(unittest.TestCase):
 
         asyncio.run(on_job_terminal(self.state, job_id, send, complete_final_fn))
         self.assertEqual(len(self.sent), 1)
-        self.assertNotIn("extent_m", self.sent[0])
+        # The metres the job states travel with the op: an extentless op is the
+        # one shape Quest refuses, so the emit path may not drop them.
+        self.assertEqual(self.sent[0]["extent_m"], [0.55, 0.40, 0.72])
+        validate_instance("scene_op", self.sent[0])
+        self.assertEqual(self.announced[0]["status"], "placed")

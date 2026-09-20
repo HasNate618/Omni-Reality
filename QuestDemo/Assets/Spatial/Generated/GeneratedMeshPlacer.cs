@@ -24,13 +24,6 @@ public static class GeneratedMeshPlacer
     public const float FetchRetrySeconds = 15f;
 
     /// <summary>
-    /// Honesty copy when the fitted mesh misses the listing by more than the
-    /// 25% aspect threshold (spec §8.1). The box stays the size claim.
-    /// </summary>
-    public const string ApproximateMeshText =
-        "That mesh is approximate; the box is the listed size.";
-
-    /// <summary>
     /// Per-attempt timeout in seconds. Without one, an unreachable host can
     /// outlive the whole retry budget on top of the 5 x 15 s waits.
     /// </summary>
@@ -80,6 +73,14 @@ public static class GeneratedMeshPlacer
             return false;
         if (host == null || client == null)
             return false;
+        if (store != null)
+        {
+            // The store owns the fit verdicts and has no client of its own, so
+            // it gets this client's chip surface (spec §8.1) while this
+            // placement is handled. A swap re-fits a mesh later, with no
+            // placer running to report it.
+            store.ChipSurface = client.ShowChipText;
+        }
         host.StartCoroutine(FetchAndPlace(client, op, laptopIpv4, artifactPort, cache, store));
         return true;
     }
@@ -225,7 +226,7 @@ public static class GeneratedMeshPlacer
         {
             // The box stays and the wearer is told the mesh is approximate,
             // carried by the existing honesty chip (spec §8.1).
-            client.ShowChipText(ApproximateMeshText);
+            client.ShowChipText(DrawingStore.ApproximateMeshText);
         }
     }
 

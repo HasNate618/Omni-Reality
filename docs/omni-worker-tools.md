@@ -62,9 +62,10 @@ Hardware shop-to-life walks remain manual (ghost then mesh, worker-down honesty)
 Procedural ops (voice spec §3.1–3.2): `place_procedural` (closed grammar —
 6 element kinds, 6 colors, 3 sizes, 3 materials, ≤6 elements, text on
 panel/pointer only ≤40 chars) and `revise_procedural` (`drawing_id` +
-`enlarge`/`shrink`/`rotate_cw`/`rotate_ccw`/`nudge`+direction/`remove`)
-are valid `model_scene_op` and `scene_op` kinds with fixtures under
-`protocol/fixtures/`. At most one `place_procedural` per turn (extras
+`enlarge`/`shrink`/`rotate_cw`/`rotate_ccw`/`nudge`+direction/`remove`/`swap`,
+where swap exchanges extents and mesh with the drawing named in
+`target.drawing_id`) are valid `model_scene_op` and `scene_op` kinds with
+fixtures under `protocol/fixtures/`. At most one `place_procedural` per turn (extras
 drop in both `accept_model_ops`). Quest builds compositions locally in
 `QuestDemo/Assets/Spatial/Procedural/ProceduralFactory.cs` (1.0 m
 bounding-sphere cap, 0.03–0.40 m extents) with revise steps applied to

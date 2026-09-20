@@ -46,13 +46,18 @@ public class GeneratedRevisionTests
         Assert.AreEqual(z, box.localScale.z, 1e-4f);
     }
 
-    static GameObject NewCubeHolder(float sizeM)
+    static GameObject NewBoxHolder(Vector3 sizeM)
     {
         var holder = new GameObject("Generated_job");
         GameObject cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
         cube.transform.SetParent(holder.transform, false);
-        cube.transform.localScale = Vector3.one * sizeM;
+        cube.transform.localScale = sizeM;
         return holder;
+    }
+
+    static GameObject NewCubeHolder(float sizeM)
+    {
+        return NewBoxHolder(Vector3.one * sizeM);
     }
 
     static Bounds FitBounds(GameObject holder)
@@ -202,12 +207,14 @@ public class GeneratedRevisionTests
         Assert.IsTrue(
             _store.ApplyGeneratedRevision("d-table", "swap", null, "d-lamp", out error), error);
 
-        // Table slot, 0.72 m tall box -> 0.25 m: the centre drops by the
-        // difference in half-heights, so the base stays on the floor at y = 0.
+        // Table slot now lists the lamp's 0.30 x 0.45 x 0.25 box: 0.72 m tall
+        // -> 0.45 m, so the centre drops by the difference in half-heights and
+        // the base stays on the floor at y = 0.
         Assert.AreEqual(1f, table.transform.position.x, 1e-4f);
         Assert.AreEqual(2f, table.transform.position.z, 1e-4f);
-        Assert.AreEqual(0.36f - 0.235f, table.transform.position.y, 1e-3f);
-        // Lamp slot, 0.45 m -> 0.72 m: the centre rises by the same rule.
+        Assert.AreEqual(0.36f - 0.135f, table.transform.position.y, 1e-3f);
+        // Lamp slot now lists the table's 0.55 x 0.72 x 0.40 box: 0.45 m ->
+        // 0.72 m, the centre rises by the same rule.
         Assert.AreEqual(3f, lamp.transform.position.x, 1e-4f);
         Assert.AreEqual(4f, lamp.transform.position.z, 1e-4f);
         Assert.AreEqual(0.225f + 0.135f, lamp.transform.position.y, 1e-3f);
@@ -224,40 +231,103 @@ public class GeneratedRevisionTests
     }
 
     [Test]
-    public void SwapCarriesTheFittedMeshWithoutRescalingItTwice()
+    public void SwapRefitsTheMeshFromItsImportSizeAcrossGenuinelyDifferentBoxes()
     {
-        // §7.3 exchanges meshes as well as extents. Re-fitting must start from
-        // the mesh's import size: re-fitting an already-fitted mesh shrinks it
-        // on every swap, under-filling the box the wearer is being sold.
+        // §7.3 exchanges meshes as well as extents, and §6.3 fits a mesh from
+        // its *import* measurement. The two go together: the mesh carries the
+        // listed extent it was fitted to into the other root, whose box is
+        // then genuinely different from the one it listed before. Re-fitting
+        // an already-fitted mesh instead would shrink it on every swap, and
+        // FitScale never enlarges, so the shortfall could never come back.
         GameObject table = PlaceAt("d-table", TableExtentM, new Vector3(1f, 0f, 2f));
         GameObject lamp = PlaceAt("d-lamp", LampExtentM, new Vector3(3f, 0f, 4f));
         GameObject holder = NewCubeHolder(0.6f);
         bool approximate;
         Assert.IsTrue(_store.FitMeshIntoBox("d-table", holder, out approximate));
-        // A 0.6 m cube in a 0.55 x 0.72 x 0.40 box: one factor of 0.40 / 0.60,
-        // so it stays a cube, and it misses the 25% aspect rule on x and z.
+        // A 0.60 m import in the table's 0.55 x 0.72 x 0.40 box: the binding
+        // axis is z at 0.40, so one uniform factor of 0.40 / 0.60 and the cube
+        // lands at 0.40 a side. It misses the 25% aspect rule on x and z.
         Assert.IsTrue(approximate);
         Assert.AreEqual(0.40f, FitBounds(holder).size.x, 1e-3f);
-        Assert.AreEqual(0.40f, FitBounds(holder).size.y, 1e-3f);
-        Assert.AreEqual(0.40f, FitBounds(holder).size.z, 1e-3f);
 
         string error;
         Assert.IsTrue(
             _store.ApplyGeneratedRevision("d-table", "swap", null, "d-lamp", out error), error);
+        // The mesh is now under the lamp root, which lists the table's extent:
+        // 0.55 x 0.72 x 0.40, not the 0.30 x 0.45 x 0.25 it listed before.
+        // Re-fitted from the 0.60 m import into that box, one factor of
+        // 0.40 / 0.60 again -- 0.25 a side would mean the mesh had been fitted
+        // into the box this root used to list, and a scale compounded onto the
+        // previous fit would have left it smaller still.
         Assert.AreEqual(lamp.transform, holder.transform.parent);
-        // Now in a 0.30 x 0.45 x 0.25 box: one factor of 0.25 / 0.60, still a
-        // cube, and still centred on the box it was fitted into.
-        Assert.AreEqual(0.25f, FitBounds(holder).size.x, 1e-3f);
-        Assert.AreEqual(0.25f, FitBounds(holder).size.y, 1e-3f);
-        Assert.AreEqual(0.25f, FitBounds(holder).size.z, 1e-3f);
+        AssertBox(Box(lamp), 0.55f, 0.72f, 0.40f);
+        Assert.AreEqual(0.40f / 0.60f, holder.transform.localScale.x, 1e-3f);
+        Assert.AreEqual(0.40f, FitBounds(holder).size.x, 1e-3f);
+        Assert.AreEqual(0.40f, FitBounds(holder).size.y, 1e-3f);
+        Assert.AreEqual(0.40f, FitBounds(holder).size.z, 1e-3f);
         Assert.AreEqual(0f, Vector3.Distance(lamp.transform.position, FitBounds(holder).center), 1e-3f);
 
+        // Swapping back re-derives the same fit from the same import size. A
+        // ratchet would leave the mesh at 0.40 x 0.40 / 0.60 = 0.267 here.
         Assert.IsTrue(
             _store.ApplyGeneratedRevision("d-lamp", "swap", null, "d-table", out error), error);
         Assert.AreEqual(table.transform, holder.transform.parent);
-        // The round trip lands on the original fit; a ratchet would leave 0.25.
+        AssertBox(Box(table), 0.55f, 0.72f, 0.40f);
+        Assert.AreEqual(0.40f / 0.60f, holder.transform.localScale.x, 1e-3f);
         Assert.AreEqual(0.40f, FitBounds(holder).size.x, 1e-3f);
         Assert.AreEqual(0f, Vector3.Distance(table.transform.position, FitBounds(holder).center), 1e-3f);
+        Object.DestroyImmediate(holder);
+        Object.DestroyImmediate(table);
+        Object.DestroyImmediate(lamp);
+    }
+
+    [Test]
+    public void ASwapThatLeavesTheMeshApproximateChipsIt()
+    {
+        // §8.1: a mesh that is approximate is spoken for, and the box stays
+        // the size claim. The import path chips through the client; a swap
+        // re-fits with no placer running, so the store reports its recomputed
+        // verdict through the surface the client installed on it.
+        GameObject table = PlaceAt("d-table", TableExtentM, new Vector3(1f, 0f, 2f));
+        GameObject lamp = PlaceAt("d-lamp", LampExtentM, new Vector3(3f, 0f, 4f));
+        string chipped = null;
+        _store.ChipSurface = text => chipped = text;
+        GameObject holder = NewCubeHolder(0.6f);
+        bool approximate;
+        Assert.IsTrue(_store.FitMeshIntoBox("d-table", holder, out approximate));
+        Assert.IsTrue(approximate);
+        Assert.IsNull(chipped, "the import path reports its own fit");
+
+        string error;
+        Assert.IsTrue(
+            _store.ApplyGeneratedRevision("d-table", "swap", null, "d-lamp", out error), error);
+        Assert.AreEqual(DrawingStore.ApproximateMeshText, chipped);
+        Object.DestroyImmediate(holder);
+        Object.DestroyImmediate(table);
+        Object.DestroyImmediate(lamp);
+    }
+
+    [Test]
+    public void ASwapOfAMatchingMeshStaysSilent()
+    {
+        // §8.1 asks for the honesty only when the mesh misses the listing: the
+        // 0.60 m cube in the sibling test is approximate for this box, this
+        // import is the box exactly, so the swap stays silent. Unity order is
+        // (w, h, d).
+        GameObject table = PlaceAt("d-table", TableExtentM, new Vector3(1f, 0f, 2f));
+        GameObject lamp = PlaceAt("d-lamp", LampExtentM, new Vector3(3f, 0f, 4f));
+        string chipped = null;
+        _store.ChipSurface = text => chipped = text;
+        GameObject holder = NewBoxHolder(new Vector3(0.55f, 0.72f, 0.40f));
+        bool approximate;
+        Assert.IsTrue(_store.FitMeshIntoBox("d-table", holder, out approximate));
+        Assert.IsFalse(approximate);
+        Assert.AreEqual(0.55f, FitBounds(holder).size.x, 1e-3f);
+
+        string error;
+        Assert.IsTrue(
+            _store.ApplyGeneratedRevision("d-table", "swap", null, "d-lamp", out error), error);
+        Assert.IsNull(chipped);
         Object.DestroyImmediate(holder);
         Object.DestroyImmediate(table);
         Object.DestroyImmediate(lamp);
