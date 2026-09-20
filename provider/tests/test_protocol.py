@@ -142,8 +142,6 @@ class SchemaTests(unittest.TestCase):
         for data in (
             {"kind": "label", "target": targets[0], "text": "Surface"},
             {"kind": "connect", "from": targets[0], "to": targets[1], "motion": {"kind": "travel", "period_s": 2}},
-            {"kind": "place_known", "target": targets[0], "asset_id": "demo", "scale": 1},
-            {"kind": "place_generated", "target": targets[0]},
             {"kind": "remove", "target": targets[3]},
             {"kind": "undo"},
         ):
@@ -282,6 +280,75 @@ class SchemaTests(unittest.TestCase):
             for value in (valid[field].upper(), "01k...", "z" * 26, "i" * 26):
                 with self.subTest(schema=schema, value=value), self.assertRaises(ValidationError):
                     validate_instance(schema, {**valid, field: value})
+
+    def test_inspect_objects_valid_and_rejects_mask(self) -> None:
+        data = load_fixture("valid", "inspect_objects.json")
+        validate_instance("inspect_objects", data)
+        with self.assertRaises(ValidationError):
+            validate_instance("inspect_objects", {**data, "mask_png_b64": "xxxx"})
+
+    def test_inspect_result_has_boxes_not_masks(self) -> None:
+        data = load_fixture("valid", "inspect_objects_result.json")
+        validate_instance("inspect_objects_result", data)
+        self.assertNotIn("mask", data)
+        self.assertNotIn("mask_png_b64", data["objects"][0])
+
+    def test_start_generation_valid(self) -> None:
+        validate_instance("start_generation", load_fixture("valid", "start_generation.json"))
+        validate_instance(
+            "start_generation_result",
+            load_fixture("valid", "start_generation_result.json"),
+        )
+
+    def test_model_must_not_emit_place_generated_or_place_known(self) -> None:
+        target = load_fixture("valid", "scene_op_mark.json")["target"]
+        for kind in ("place_generated", "place_known"):
+            with self.subTest(kind=kind), self.assertRaises(ValidationError):
+                validate_instance("model_scene_op", {"kind": kind, "target": target})
+
+    def test_procedural_place_valid(self) -> None:
+        data = load_fixture("valid", "scene_op_procedural.json")
+        validate_instance("model_scene_op", data)
+        scene = {
+            "op_id": load_fixture("valid", "scene_op_mark.json")["op_id"],
+            "turn_id": 3,
+            "stage_epoch": 1,
+            **data,
+        }
+        validate_instance("scene_op", scene)
+
+    def test_procedural_rejects_grammar_violations(self) -> None:
+        for name in (
+            "procedural_seven_elements.json",
+            "procedural_bad_color.json",
+            "procedural_text_on_cube.json",
+        ):
+            with self.subTest(fixture=name):
+                data = load_fixture("invalid", name)
+                with self.assertRaises(ValidationError):
+                    validate_instance("model_scene_op", data)
+                with self.assertRaises(ValidationError):
+                    validate_instance("scene_op", {
+                        "op_id": load_fixture("valid", "scene_op_mark.json")["op_id"],
+                        "turn_id": 3,
+                        "stage_epoch": 1,
+                        **data,
+                    })
+
+    def test_procedural_revise_valid(self) -> None:
+        data = load_fixture("valid", "scene_op_procedural_revise.json")
+        validate_instance("model_scene_op", data)
+        with self.assertRaises(ValidationError):
+            validate_instance(
+                "model_scene_op", load_fixture("invalid", "revise_missing_action.json")
+            )
+
+    def test_procedural_place_requires_target_and_elements(self) -> None:
+        base = load_fixture("valid", "scene_op_procedural.json")
+        for key in ("target", "elements"):
+            bad = {k: v for k, v in base.items() if k != key}
+            with self.subTest(missing=key), self.assertRaises(ValidationError):
+                validate_instance("model_scene_op", bad)
 
 
 class StaleTests(unittest.TestCase):

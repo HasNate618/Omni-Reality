@@ -12,7 +12,11 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+from coordinator.artifacts import ARTIFACT_PORT
+from coordinator.jobs import JobStore
 
 
 @dataclass
@@ -23,6 +27,7 @@ class UtteranceBuffer:
     jpeg: bytes | None = None
     envelope: dict | None = None
     selected_frame_id: str | None = None
+    frame_received: bool = False
 
 
 class CoordinatorState:
@@ -36,6 +41,7 @@ class CoordinatorState:
     def __init__(self, planner: Any = None) -> None:
         self.planner = planner
         self.utterances: dict[str, UtteranceBuffer] = {}
+        self.closed_utterances: set[str] = set()
         self.max_utterance_bytes: int = 30 * 16000 * 2  # 30 s cap
         self.turn_tasks: dict[int, asyncio.Task] = {}
         self.cancelled_turns: set[int] = set()
@@ -52,6 +58,43 @@ class CoordinatorState:
         self.mark_sent: bool = False
         self.tracking = None  # optional Sam2Bridge; existing mark/voice paths stay default
         self.last_clock_skew_ns: int | None = None
+        self.jobs = JobStore()
+        # Cloud speech synth for speak.audio (None = caption-only degraded).
+        # Server sets a live synth for yibu turns; tests inject fakes.
+        self.synthesizer: Any | None = None
+        # Persistent Live session for the realtime voice loop (None until
+        # hello warms it). _live_turn is the in-flight turn, if any.
+        self.live: Any | None = None
+        self._live_turn: Any | None = None
+        self._live_last_totals: dict[str, int] = {}
+        # Last audio actually played on Quest (16 kHz mono s16le) + send time.
+        # Feeds the echo gate: the mic re-hearing our own reply is dropped.
+        self.last_speak_pcm: bytes | None = None
+        self.last_speak_at: float = 0.0
+        self.artifact_port: int = ARTIFACT_PORT
+        self.artifact_root: Path = Path(__file__).resolve().parent.parent / "artifacts" / "generated"
+        self.clear_generation: int = 1
+
+    def accepts_utterance(self, utterance_id: str) -> bool:
+        # Bound open media and tombstones; after a very long session reconnect
+        # rather than forgetting IDs and allowing old audio to become paid turns.
+        return (utterance_id not in self.closed_utterances
+                and len(self.closed_utterances) < 4096
+                and (utterance_id in self.utterances or len(self.utterances) < 4))
+
+    async def clear_voice(self) -> None:
+        tasks = list(self.turn_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.turn_tasks.clear()
+        self.closed_utterances.update(self.utterances)
+        self.utterances.clear()
+        self.context.clear()
+        self.last_envelope = None
+        self.ack_events.clear()
+        self.pending_ops.clear()
 
     def is_session_allowed(self, incoming: str | None) -> bool:
         """True unless an established session is contradicted."""

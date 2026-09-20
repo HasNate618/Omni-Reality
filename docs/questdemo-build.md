@@ -64,4 +64,7 @@ Meta XR SDK 205 (`core` + `mrutilitykit`) comes from the scoped registry `https:
 - Deploy/launch: `adb install -r QuestDemo/Builds/QuestDemo.apk`, then `adb shell monkey -p com.omni.questdemo -c android.intent.category.LAUNCHER 1`.
 - On-device: real room visible (passthrough), cube world-locked, no skybox.
 - Logs: `adb logcat -d | grep -i unity | grep -iE "OVR|passthrough|error"` — expect `XR_FB_passthrough` from "Meta XR Feature", no `Failed to initialize Insight Passthrough`. Compositor `app 0` in `Passthrough usage state` lines means no layer submitted (check the manifest tag + `isInsightPassthroughEnabled`).
+- Perception Q&A adds no scene edits: `SpatialRuntime` wires one `PerceptionCapture`
+  (single AsyncGPUReadback frame, never a video loop) to `MicUtterance` at
+  coordinator startup, plus a head-relative `VoiceCaption` for speech/recovery text.
 - Do not "fix" vendored files or SDK package-cache sources to satisfy linters.

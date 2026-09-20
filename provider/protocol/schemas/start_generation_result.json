@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id", "status", "frame_id"],
+      "properties": {
+        "job_id": { "$ref": "#/$defs/ulid" },
+        "status": { "const": "queued" },
+        "frame_id": { "$ref": "#/$defs/ulid" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["error"],
+      "properties": {
+        "error": { "enum": ["invalid", "busy", "unknown_object", "missing_image"] }
+      }
+    }
+  ],
+  "$defs": {
+    "ulid": { "type": "string", "pattern": "^[0-7][0-9a-hjkmnp-tv-z]{25}$", "minLength": 26, "maxLength": 26 }
+  }
+}

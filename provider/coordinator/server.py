@@ -33,8 +33,11 @@ from typing import Any
 
 from jsonschema import ValidationError
 
+from coordinator.live_config import ensure_live_voice_only_config
 from coordinator.session import CoordinatorState, UtteranceBuffer
 from coordinator.turn import cancel_turn, ingest_audio_chunk, start_turn
+from voice.audio import BYTES_PER_SECOND, MIN_UTTERANCE_S
+from yibu_audit import ApiKeyConfigurationError, ensure_env_api_key
 from protocol.ids import new_ulid
 from protocol.validate import validate_instance
 
@@ -128,8 +131,8 @@ def _extract_envelope(payload: object) -> dict | None:
         return None
     try:
         validate_instance("capture_envelope", candidate)
-    except ValidationError as exc:
-        logger.info("ignoring frame with invalid envelope: %s", exc.message)
+    except ValidationError:
+        logger.info("VoiceBootstrap component=coordinator event=jpeg_rejected reason=invalid_envelope")
         return None
     return candidate
 
@@ -146,9 +149,16 @@ async def _handle_hello(ws: Any, state: CoordinatorState, message: dict) -> None
             "hello_ok",
             session_id,
             0,
-            {"session_id": session_id, "laptop_t_unix_ns": _laptop_now_ns()},
+            {
+                "session_id": session_id,
+                "laptop_t_unix_ns": _laptop_now_ns(),
+                "artifact_port": state.artifact_port,
+                "perception_qa": bool(getattr(state.planner, "perception_qa", False)),
+            },
         )
     )
+    if _live_mode(state):
+        asyncio.create_task(_warm_live_session(state))
     # NOTE: no mark here by design. The production Quest sequence is hello
     # first, real frame later; emitting a mark on hello would carry a random
     # frame_id no client can resolve and would consume the single mark
@@ -223,13 +233,30 @@ def _attach_frame_to_utterance(state: CoordinatorState, message: dict, envelope:
     if not isinstance(utterance_id, str):
         logger.info("frame without utterance_id; envelope kept, no utterance")
         return
-    jpeg = None
-    if isinstance(payload.get("jpeg_b64"), str):
-        try:
-            jpeg = base64.b64decode(payload["jpeg_b64"], validate=True)
-        except (binascii.Error, ValueError):
-            logger.info("ignoring bad jpeg_b64 on frame")
+    if not state.accepts_utterance(utterance_id):
+        return
     buf = state.utterances.setdefault(utterance_id, UtteranceBuffer())
+    perception = getattr(state.planner, "perception_qa", False)
+    if perception and buf.frame_received:
+        return
+    buf.frame_received = True
+    jpeg = None
+    encoded = payload.get("jpeg_b64")
+    from voice.perception_image import MAX_JPEG_BASE64, validate_jpeg
+    from voice.bootstrap_diagnostics import perception_frame
+
+    if isinstance(encoded, str) and (not perception or len(encoded) <= MAX_JPEG_BASE64):
+        try:
+            jpeg = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            pass
+    if perception:
+        reason = "image_over_cap" if isinstance(encoded, str) and len(encoded) > MAX_JPEG_BASE64 else validate_jpeg(jpeg, envelope)
+        if reason:
+            perception_frame("jpeg_rejected", reason=reason)
+            jpeg = None
+        else:
+            perception_frame("frame_accepted", jpeg_bytes=len(jpeg))
     buf.envelope = envelope
     buf.jpeg = jpeg
     logger.debug(
@@ -249,9 +276,22 @@ def _turn_sender(ws: Any, state: CoordinatorState):
     return send
 
 
+async def _warm_live_session(state: CoordinatorState) -> None:
+    from coordinator import live_turn as live_mod
+    await live_mod.ensure_live_session(state)
+
+
+def _live_mode(state: CoordinatorState) -> bool:
+    from coordinator.planner import VoiceStubPlanner
+    return bool(getattr(state.planner, "perception_qa", False)) and not isinstance(
+        state.planner, VoiceStubPlanner)
+
+
 async def _handle_audio_chunk(ws: Any, state: CoordinatorState, message: dict) -> None:
     if state.planner is None:
         return
+    # Buffered only: mic audio travels inside the explicit image turn.
+    # (Streaming it live wedges the session behind an implicit VAD turn.)
     ingest_audio_chunk(state, message["utterance_id"], message["payload"])
 
 
@@ -262,18 +302,82 @@ async def _handle_utterance_end(ws: Any, state: CoordinatorState, message: dict)
     if not isinstance(utterance_id, str):
         logger.info("ignoring utterance_end without utterance_id")
         return
+    # A-mode (push-to-talk) and B-mode (live conversation) share one session,
+    # so the route is chosen per utterance, not by a startup flag. Older
+    # headset builds omit `mode`; they mean push-to-talk.
+    mode = message["payload"].get("mode")
+    if mode not in ("ptt", "live"):
+        mode = "ptt"
+
+    from voice.bootstrap_diagnostics import utterance_end_accepted
+
     buf = state.utterances.get(utterance_id)
+    pcm_bytes = len(buf.pcm) if buf is not None else 0
+    utterance_end_accepted(pcm_bytes)
     logger.info(
-        "utterance_end %s: audio=%d bytes (%.2f s), selected frame_id=%s",
-        utterance_id, len(buf.pcm) if buf else 0,
-        (len(buf.pcm) if buf else 0) / 32000, message["payload"].get("frame_id"),
+        "utterance_end %s: mode=%s audio=%d bytes (%.2f s), selected frame_id=%s",
+        utterance_id, mode, pcm_bytes, pcm_bytes / 32000,
+        message["payload"].get("frame_id"),
     )
+    if buf is not None and pcm_bytes:
+        from voice.echo_gate import peak_rms, voiced_windows
+        import struct as _struct
+        _pcm = bytes(buf.pcm)
+        _n = len(_pcm) // 2
+        _vals = _struct.unpack("<%dh" % _n, _pcm) if _n else ()
+        _zero = sum(1 for _v in _vals if _v == 0)
+        _zc = sum(1 for _a, _b in zip(_vals, _vals[1:])
+                  if (_a < 0) != (_b < 0) and _a != 0 and _b != 0)
+        logger.info("VoiceBootstrap component=coordinator event=utterance_levels "
+                    "voiced=%d peak_rms=%.4f zero_frac=%.3f zcr=%.4f n=%d",
+                    voiced_windows(_pcm), peak_rms(_pcm),
+                    _zero / _n if _n else 1.0, _zc / _n if _n else 0.0, _n)
+    if buf is not None and len(buf.pcm) < MIN_UTTERANCE_S * BYTES_PER_SECOND:
+        logger.info("utterance %s too short (%d bytes); no turn", utterance_id, len(buf.pcm))
+        return
+    if buf is not None and _drop_phantom(state, _turn_sender(ws, state), utterance_id, buf):
+        return
+    if mode == "live" or _live_mode(state):
+        _start_live_utterance(state, _turn_sender(ws, state), utterance_id)
+        return
     if state.tracking is not None:
         frame_id = message["payload"].get("frame_id")
         state.utterances.setdefault(utterance_id, UtteranceBuffer()).selected_frame_id = (
             frame_id if isinstance(frame_id, str) else None
         )
     start_turn(state, _turn_sender(ws, state), utterance_id)
+
+
+def _start_live_utterance(state: CoordinatorState, send: Any, utterance_id: str) -> None:
+    """Session path: pop the buffer and run the live turn in background."""
+    from coordinator import live_turn as live_mod
+    from coordinator.turn import _turn_task_done
+    if utterance_id in state.closed_utterances:
+        return
+    buf = state.utterances.pop(utterance_id, None) or UtteranceBuffer()
+    state.closed_utterances.add(utterance_id)
+    if len(buf.pcm) < MIN_UTTERANCE_S * BYTES_PER_SECOND:
+        logger.info("utterance %s too short (%d bytes); no turn", utterance_id, len(buf.pcm))
+        return
+    live = getattr(state, "live", None)
+    if live is None or not live.is_open:
+        task = asyncio.create_task(_live_down(state, send, utterance_id))
+    else:
+        task = asyncio.create_task(live_mod.start_live_turn(state, send, utterance_id, buf))
+    task.add_done_callback(_log_live_task_done)
+
+
+async def _live_down(state: CoordinatorState, send: Any, utterance_id: str) -> None:
+    from coordinator import live_turn as live_mod
+    await live_mod.speak_down(state, send, utterance_id)
+
+
+def _log_live_task_done(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.info("live turn background task failed exception_class=%s", type(exc).__name__)
 
 
 async def _handle_ack(ws: Any, state: CoordinatorState, message: dict) -> None:
@@ -326,6 +430,40 @@ async def _handle_cancel(ws: Any, state: CoordinatorState, message: dict) -> Non
     logger.info("cancel op=%s", op_id)
 
 
+def _drop_phantom(state: CoordinatorState, send: Any, utterance_id: str, buf: Any) -> bool:
+    """Blips and speaker echo never become turns (no model call, no chatter)."""
+    from voice.echo_gate import should_drop
+    drop, reason, score = should_drop(
+        utterance_pcm=bytes(buf.pcm), last_speak_pcm=state.last_speak_pcm,
+        speak_sent_at=state.last_speak_at or None, utterance_end_at=time.monotonic())
+    if not drop:
+        return False
+    logger.info("VoiceBootstrap component=coordinator event=utterance_dropped "
+                "reason=%s echo_score=%.2f", reason, score)
+    state.utterances.pop(utterance_id, None)
+    state.closed_utterances.add(utterance_id)
+    # stop_speak releases the Quest mic gate silently: no caption, no tone.
+    asyncio.create_task(_silent_drop(state, send, utterance_id))
+    return True
+
+
+async def _silent_drop(state: CoordinatorState, send: Any, utterance_id: str) -> None:
+    try:
+        await send("stop_speak", state.turn_id, {"turn_id": state.turn_id}, utterance_id)
+    except Exception:
+        pass
+
+
+async def _close_live(state: CoordinatorState) -> None:
+    live = getattr(state, "live", None)
+    state.live = None
+    if live is not None:
+        try:
+            await live.close()
+        except Exception:
+            pass
+
+
 async def handle_text(ws: Any, state: CoordinatorState, raw: object) -> None:
     """Parse, validate, and dispatch one inbound frame; never raises."""
     if isinstance(raw, (bytes, bytearray)):
@@ -346,8 +484,8 @@ async def handle_text(ws: Any, state: CoordinatorState, raw: object) -> None:
         return
     try:
         validate_instance("message", message)
-    except ValidationError as exc:
-        logger.info("ignoring schema-invalid message: %s", exc.message)
+    except ValidationError:
+        logger.info("VoiceBootstrap component=coordinator event=message_rejected reason=invalid_schema")
         return
     if not state.is_session_allowed(message["session_id"]):
         logger.info("ignoring message from foreign session")
@@ -372,36 +510,79 @@ async def handle_text(ws: Any, state: CoordinatorState, raw: object) -> None:
         await _handle_audio_chunk(ws, state, message)
     elif msg_type == "utterance_end":
         await _handle_utterance_end(ws, state, message)
+    elif msg_type == "clear_session":
+        await _handle_clear_session(ws, state, message)
     else:
         logger.debug("ignoring unhandled message type: %s", msg_type)
 
 
+async def _handle_clear_session(ws: Any, state: CoordinatorState, message: dict) -> None:
+    from coordinator.jobs import clear_jobs
+
+    clear_jobs(state.jobs, state.artifact_root)
+    await state.clear_voice()
+    await _close_live(state)
+    payload = {"session_id": state.session_id, "generation": state.clear_generation}
+    state.clear_generation += 1
+    await ws.send(_sendable("session_cleared", state.session_id, 0, payload))
+
+
 async def handle_connection(ws: Any, state: CoordinatorState) -> None:
     """Serve one connection until it closes or the task is cancelled."""
-    if hasattr(ws, "recv"):
-        while True:
+    from coordinator.jobs import clear_jobs
+    from voice.bootstrap_diagnostics import connection_close, connection_open
+
+    connection_open()
+    try:
+        if hasattr(ws, "recv"):
+            while True:
+                try:
+                    raw = await ws.recv()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    return
+                await handle_text(ws, state, raw)
+        else:  # async-iterable socket (e.g. websockets server connection)
             try:
-                raw = await ws.recv()
+                async for raw in ws:
+                    await handle_text(ws, state, raw)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 return
-            await handle_text(ws, state, raw)
-    else:  # async-iterable socket (e.g. websockets server connection)
-        try:
-            async for raw in ws:
-                await handle_text(ws, state, raw)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            return
+    finally:
+        connection_close()
+        if state.planner is not None:
+            await state.clear_voice()
+        await _close_live(state)
+        clear_jobs(state.jobs, state.artifact_root)
 
 
-def make_planner(kind: str, model: str | None = None, tracking: bool = False):
-    """None (slice-2 hardcoded mark), a StubPlanner, or a live YibuPlanner."""
+def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if getattr(args, "voice_only", False) and args.planner != "yibu":
+        parser.error("--voice-only requires --planner yibu")
+    if getattr(args, "perception_qa", False):
+        if getattr(args, "voice_only", False):
+            parser.error("--perception-qa and --voice-only are mutually exclusive")
+        if args.planner not in ("yibu", "voice-stub"):
+            parser.error("--perception-qa requires --planner yibu or voice-stub")
+
+
+def make_planner(
+    kind: str,
+    model: str | None = None,
+    *,
+    tracking: bool = False,
+    voice_only: bool = False,
+    perception_qa: bool = False,
+):
+    """None (slice-2 hardcoded mark), offline planners, or live Yibu."""
+    _validate_cli_args(argparse.ArgumentParser(), argparse.Namespace(
+        planner=kind, voice_only=voice_only, perception_qa=perception_qa))
     if kind == "mark":
         return None
-    from coordinator.planner import StubPlanner, YibuPlanner
+    from coordinator.planner import StubPlanner, VoiceStubPlanner, YibuPlanner
 
     if kind == "stub":
         if tracking:
@@ -412,10 +593,20 @@ def make_planner(kind: str, model: str | None = None, tracking: bool = False):
                     return PlanResult(ops=[], text="", tracking_target={"type": "image_point", "u": 0.5, "v": 0.5})
             return TrackingStub()
         return StubPlanner()
-    options = {"tracking": tracking, "purpose": "track-object" if tracking else "voice-turn"}
+    if kind == "voice-stub":
+        return VoiceStubPlanner(perception_qa=perception_qa)
+    if perception_qa:
+        from coordinator.perception import PerceptionQaPlanner
+        return PerceptionQaPlanner(**({"model": model} if model else {}))
+    if tracking:
+        options = {"tracking": True, "purpose": "track-object"}
+        if model:
+            options["model"] = model
+        return YibuPlanner(**options)
+    purpose = "voice-only-turn" if voice_only else "voice-turn"
     if model:
-        options["model"] = model
-    return YibuPlanner(**options)
+        return YibuPlanner(model=model, voice_only=voice_only, purpose=purpose)
+    return YibuPlanner(voice_only=voice_only, purpose=purpose)
 
 
 async def run_server(
@@ -424,15 +615,42 @@ async def run_server(
     planner_kind: str = "mark",
     model: str | None = None,
     sam2_url: str | None = None,
+    voice_only: bool = False,
+    perception_qa: bool = False,
 ) -> None:
     """Bind the coordinator WebSocket server (CLI: python -m coordinator.server)."""
+    _validate_cli_args(argparse.ArgumentParser(), argparse.Namespace(
+        planner=planner_kind, voice_only=voice_only, perception_qa=perception_qa))
+    ensure_live_voice_only_config(planner_kind, voice_only)
+    if planner_kind == "yibu" and perception_qa:
+        ensure_env_api_key("YIBU_API_KEY")
     import websockets
 
     async def _serve_one(ws) -> None:
-        state = CoordinatorState(planner=make_planner(planner_kind, model, bool(sam2_url)))
+        state = CoordinatorState(planner=make_planner(
+            planner_kind, model, tracking=bool(sam2_url),
+            voice_only=voice_only, perception_qa=perception_qa))
         if sam2_url:
             from coordinator.sam2_bridge import Sam2Bridge
             state.tracking = Sam2Bridge(sam2_url, _turn_sender(ws, state))
+        if planner_kind == "voice-stub":
+            from voice.test_tone import make_test_tone
+
+            async def _tone_synth(_text: str) -> bytes:
+                return make_test_tone()
+
+            state.synthesizer = _tone_synth
+        elif planner_kind == "yibu":
+            # Live cloud speech for speak.audio (spends credit per turn).
+            # A-mode replies carry audio: null and are spoken by Android TTS.
+            from voice.cloud_speech import synthesize_line
+
+            speak_purpose = "perception-qa-speak" if perception_qa else ("voice-only-speak" if voice_only else "voice-speak")
+
+            async def _live_synth(text: str) -> bytes | None:
+                return await synthesize_line(text=text, purpose=speak_purpose)
+
+            state.synthesizer = _live_synth
         try:
             await handle_connection(ws, state)
         finally:
@@ -454,9 +672,12 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
         "--planner",
-        choices=["mark", "stub", "yibu"],
+        choices=["mark", "stub", "yibu", "voice-stub"],
         default="mark",
-        help="mark: slice-2 hardcoded mark (default); stub: offline voice turns; yibu: live model (spends credit)",
+        help=(
+            "mark: slice-2 hardcoded mark (default); stub: offline voice turns; "
+            "voice-stub: offline transport tone; yibu: live model (spends credit)"
+        ),
     )
     parser.add_argument("--model", help="yibu model id (default qwen3.8-omni-flash)")
     parser.add_argument("--sam2-url", help="enable single-object tracking, e.g. ws://127.0.0.1:8766")
@@ -464,9 +685,28 @@ if __name__ == "__main__":
         "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING"],
         help="DEBUG traces every message, frame and model call",
     )
+    parser.add_argument(
+        "--voice-only",
+        action="store_true",
+        help="audio-only yibu turns (no image/tools); requires --planner yibu",
+    )
+    parser.add_argument(
+        "--perception-qa", action="store_true",
+        help="one camera image per spoken question, no tools; yibu or offline voice-stub",
+    )
     args = parser.parse_args()
+    _validate_cli_args(parser, args)
     if args.sam2_url and args.planner == "mark":
         parser.error("--sam2-url requires --planner stub or --planner yibu")
+    try:
+        ensure_live_voice_only_config(args.planner, args.voice_only)
+        if args.planner == "yibu" and args.perception_qa:
+            ensure_env_api_key("YIBU_API_KEY")
+    except ApiKeyConfigurationError as exc:
+        parser.error(
+            f"Live coordinator requires environment variable {exc.name} "
+            "(set on the laptop only; no API call is made when it is missing)."
+        )
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
@@ -475,4 +715,14 @@ if __name__ == "__main__":
     # Third-party debug logs bury ours (httpx prints every HTTP chunk).
     for noisy in ("websockets", "httpx", "httpcore", "asyncio"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
-    asyncio.run(run_server(args.host, args.port, args.planner, args.model, args.sam2_url))
+    asyncio.run(
+        run_server(
+            args.host,
+            args.port,
+            args.planner,
+            args.model,
+            sam2_url=args.sam2_url,
+            voice_only=args.voice_only,
+            perception_qa=args.perception_qa,
+        )
+    )

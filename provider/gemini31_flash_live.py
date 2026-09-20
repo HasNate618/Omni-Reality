@@ -9,6 +9,7 @@ import argparse
 import base64
 import json
 import time
+from email.message import Message
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -31,6 +32,7 @@ def gemini_live_call(
     audit_log: Path | None,
     audio_out: Path | None,
     timeout: float = 60.0,
+    expected_audio_sample_rate: int | None = None,
 ) -> tuple[str, dict[str, Any]]:
     started = time.monotonic()
     usage: dict[str, Any] = {}
@@ -54,6 +56,10 @@ def gemini_live_call(
                         # This Live model's supported output route is AUDIO.
                         "responseModalities": ["AUDIO"],
                         "temperature": 0.2,
+                        # One fixed voice: without this the gateway may cast
+                        # a different speaker per call.
+                        "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {
+                            "voiceName": "Kore"}}},
                     },
                     # Readable text arrives through this transcription channel.
                     "outputAudioTranscription": {},
@@ -102,6 +108,14 @@ def gemini_live_call(
                             fallback_text.append(str(part["text"]))
                         inline = part.get("inlineData") or part.get("inline_data")
                         if isinstance(inline, Mapping) and inline.get("data"):
+                            if expected_audio_sample_rate is not None:
+                                mime = inline.get("mimeType") or inline.get("mime_type")
+                                header = Message()
+                                header["content-type"] = mime if isinstance(mime, str) else ""
+                                if (header.get_content_type() != "audio/pcm"
+                                        or header.get_param("rate") != str(expected_audio_sample_rate)
+                                        or header.get_param("channels", "1") != "1"):
+                                    raise ValueError("unsupported speech audio format")
                             audio_chunks.append(base64.b64decode(str(inline["data"])))
                 turn_complete = bool(server.get("turnComplete"))
 

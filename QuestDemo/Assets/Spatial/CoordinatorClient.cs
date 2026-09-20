@@ -45,8 +45,10 @@ public class CoordinatorClient : MonoBehaviour
 
     /// <summary>Send priorities (spec order): cancel ahead of ack ahead of frames.</summary>
     public const int PriorityCancel = 0;
+    public const int PriorityUtteranceEnd = 9;
     public const int PriorityAck = 2;
     public const int PriorityPing = 8;
+    public const int PriorityAudioChunk = 9;
     public const int PriorityFrame = 9;
 
     /// <summary>Hello shares the top lane (sent once, queue empty at connect).</summary>
@@ -117,6 +119,11 @@ public class CoordinatorClient : MonoBehaviour
             return false;
         }
 
+        public void Clear()
+        {
+            lock (_gate) _queues.Clear();
+        }
+
         public int Count
         {
             get
@@ -140,6 +147,8 @@ public class CoordinatorClient : MonoBehaviour
     internal Func<int> GetStageEpoch = () => 1;
     internal Func<Ray, Vector3?> DelayedHit;
     internal Func<string> NewDrawingId;
+    internal SpeakCloudPlayer SpeakPlayer;
+    internal VoiceCaption Caption;
 
     readonly ConcurrentQueue<string> _inbound = new ConcurrentQueue<string>();
     readonly ConcurrentQueue<string> _errors = new ConcurrentQueue<string>();
@@ -153,6 +162,7 @@ public class CoordinatorClient : MonoBehaviour
     volatile bool _connecting;
     CancellationTokenSource _cts;
     string _sessionId;
+    int _artifactPort = 8766;
     float _lastPingAt;
     float _lastConnectAttemptAt = -1000f;
     bool _wasOpen;
@@ -163,11 +173,18 @@ public class CoordinatorClient : MonoBehaviour
     string _activeUtterance;
     string _stoppedUtterance;
     string _helloJson;
+    string _pendingReplyId;
+    float _replyStartedAt;
     public bool IsReady { get { return IsOpen && _sessionId != null; } }
+    public bool PerceptionEnabled { get; private set; }
     public string SessionId { get { return _sessionId; } }
+    public bool AwaitingReply { get { return _pendingReplyId != null; } }
     public TrackingResult LatestTrackingResult { get; private set; }
     public event Action<TrackingResult> TrackingResultReceived;
     public event Action<TrackingStatus> TrackingStatusReceived;
+
+    [Serializable]
+    class HelloOptions { public bool perception_qa; }
 
     /// <summary>Queue a hello + start supervision. No socket work happens here.</summary>
     internal void Begin(string ipv4)
@@ -188,7 +205,7 @@ public class CoordinatorClient : MonoBehaviour
     /// <summary>True while the socket is open (main thread).</summary>
     internal bool IsConnected
     {
-        get { return IsOpen; }
+        get { return IsOpen && _sessionId != null; }
     }
 
     /// <summary>Outbound depth for diagnostics (main or background).</summary>
@@ -217,6 +234,15 @@ public class CoordinatorClient : MonoBehaviour
         if (!_beginRequested || string.IsNullOrEmpty(_ipv4))
             return;
         float now = Time.realtimeSinceStartup;
+        if (AwaitingReply && now - _replyStartedAt >= 45f)
+        {
+            VoiceBootstrapLog.Log(VoiceBootstrapLog.ComponentCoordinator, "reply_timeout");
+            CleanupSocket();
+            ShowVoiceFeedback("Reply timed out. Reconnecting; please ask again.");
+            _wasOpen = false;
+            _lastConnectAttemptAt = now;
+            return;
+        }
         if (IsOpen)
         {
             if (!_wasOpen)
@@ -233,7 +259,7 @@ public class CoordinatorClient : MonoBehaviour
             }
             return;
         }
-        if (_wasOpen)
+        if (_wasOpen || (_socket != null && !_connecting))
         {
             _wasOpen = false;
             CleanupSocket();
@@ -294,6 +320,7 @@ public class CoordinatorClient : MonoBehaviour
             }
             _socketDown = false;
             _socket = sock;
+            VoiceBootstrapLog.WebsocketConnected(host, port);
             _outbox.Enqueue(PriorityHello, _helloJson);
             Task.Run(() => SendLoopAsync(sock, token));
             Task.Run(() => ReceiveLoopAsync(sock, token));
@@ -302,6 +329,7 @@ public class CoordinatorClient : MonoBehaviour
         {
             try { connectingSocket?.Dispose(); } catch (Exception) { }
             _errors.Enqueue("coordinator connect (" + e.GetType().Name + ")");
+            VoiceBootstrapLog.SocketFailure("connect", e.GetType().Name);
             _attemptFailed = true;
         }
         finally
@@ -334,8 +362,8 @@ public class CoordinatorClient : MonoBehaviour
         }
         catch (Exception e)
         {
-            _errors.Enqueue("coordinator send (" + e.GetType().Name + ")");
-            _socketDown = true;
+            VoiceBootstrapLog.SocketFailure("send", e.GetType().Name);
+            if (ReferenceEquals(_socket, sock)) _socketDown = true;
         }
     }
 
@@ -351,7 +379,7 @@ public class CoordinatorClient : MonoBehaviour
                     new ArraySegment<byte>(buffer), token);
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
-                    _socketDown = true;
+                    if (ReferenceEquals(_socket, sock)) _socketDown = true;
                     return;
                 }
                 if (result.MessageType == WebSocketMessageType.Binary)
@@ -374,16 +402,16 @@ public class CoordinatorClient : MonoBehaviour
         }
         catch (Exception e)
         {
-            _errors.Enqueue("coordinator receive (" + e.GetType().Name + ")");
-            _socketDown = true;
+            VoiceBootstrapLog.SocketFailure("receive", e.GetType().Name);
+            if (ReferenceEquals(_socket, sock)) _socketDown = true;
         }
     }
 
     void DrainErrors()
     {
-        string error;
-        while (_errors.TryDequeue(out error))
-            Debug.LogWarning("CoordinatorClient: " + error);
+        while (_errors.TryDequeue(out _))
+        {
+        }
     }
 
     void PumpInbound()
@@ -412,11 +440,16 @@ public class CoordinatorClient : MonoBehaviour
             string payload;
             if (ProtocolJson.TryGetPayloadObject(text, out payload))
             {
+                PerceptionEnabled = JsonUtility.FromJson<HelloOptions>(payload).perception_qa;
                 // session_id lookup works on any object substring, payload included.
                 string session;
                 if (ProtocolJson.TryGetSessionId(payload, out session) && session != null)
                     _sessionId = session;
+                int port;
+                if (ProtocolJson.TryGetIntField(payload, "artifact_port", out port) && port > 0)
+                    _artifactPort = port;
             }
+            VoiceBootstrapLog.HelloAccepted();
             // New session never clears drawings: no Store call here by design.
             return;
         }
@@ -466,6 +499,11 @@ public class CoordinatorClient : MonoBehaviour
         }
         if (type == "scene_op")
         {
+            if (PerceptionEnabled)
+            {
+                VoiceBootstrapLog.Log(VoiceBootstrapLog.ComponentCoordinator, "scene_op_blocked");
+                return;
+            }
             string payload;
             if (!ProtocolJson.TryGetPayloadObject(text, out payload))
                 return;
@@ -475,20 +513,101 @@ public class CoordinatorClient : MonoBehaviour
                 Debug.LogWarning("CoordinatorClient: malformed scene_op ignored");
                 return;
             }
+            if (op.Kind == "place_generated")
+            {
+                if (!PrepareSceneOp(op))
+                    return;
+                GeneratedMeshPlacer.TryHandle(this, this, op, _ipv4, _artifactPort, Cache);
+                return;
+            }
+            if (op.Kind == "label" || op.Kind == "ghost" || op.Kind == "connect")
+            {
+                if (!PrepareSceneOp(op))
+                    return;
+                GhostLabelConnect.TryHandle(this, op);
+                return;
+            }
+            if (op.Kind == "place_procedural" || op.Kind == "revise_procedural")
+            {
+                if (!PrepareSceneOp(op))
+                    return;
+                ProceduralFactory.TryHandle(this, op);
+                return;
+            }
             HandleMark(op);
             return;
         }
         if (type == "speak")
         {
+            string replyId;
+            ProtocolJson.TryGetUtteranceId(text, out replyId);
+            if (PerceptionEnabled && (_pendingReplyId == null || replyId != _pendingReplyId))
+                return;
             string payload;
             if (!ProtocolJson.TryGetPayloadObject(text, out payload))
                 return;
-            var line = JsonUtility.FromJson<SpeakPayload>(payload);
-            if (line != null && !string.IsNullOrEmpty(line.text))
-                QuestSpeech.Speak(line.text);
+            ProtocolJson.SpeakMsg speak;
+            if (!ProtocolJson.TryParseSpeak(payload, out speak))
+                return;
+            _pendingReplyId = null;
+            ShowVoiceFeedback(speak.Text);
+            // B-mode (live conversation) replies carry cloud PCM. A-mode
+            // push-to-talk sends audio:null, and the headset speaks it with
+            // Android TTS -- no credit, and it still works once the key dies.
+            byte[] pcm;
+            if (SpeakPlayer != null && SpeakCloudPlayer.TryDecodePcmBase64(speak.AudioDataB64, out pcm))
+            {
+                ShowVoiceFeedback(speak.Text, Mathf.Max(8f, pcm.Length / 32000f + 2f));
+                SpeakPlayer.TryPlay(speak.HasTurnId ? speak.TurnId : 0, speak.Text, pcm);
+                return;
+            }
+            if (!string.IsNullOrEmpty(speak.Text))
+                QuestSpeech.Speak(speak.Text);
             return;
         }
-        // Other scene operations are not handled here.
+        if (type == "stop_speak")
+        {
+            _pendingReplyId = null;
+            if (SpeakPlayer != null)
+                SpeakPlayer.StopPlayback();
+            return;
+        }
+        if (type == "speak_chunk")
+        {
+            string payload;
+            if (!ProtocolJson.TryGetPayloadObject(text, out payload))
+                return;
+            ProtocolJson.SpeakChunkMsg chunk;
+            if (!ProtocolJson.TryParseSpeakChunk(payload, out chunk))
+                return;
+            if (SpeakPlayer == null)
+                return;
+            byte[] pcm;
+            if (!SpeakCloudPlayer.TryDecodePcmBase64(chunk.AudioDataB64, out pcm))
+                return;
+            SpeakPlayer.AppendChunk(chunk.TurnId, pcm);
+            return;
+        }
+        if (type == "speak_final")
+        {
+            string payload;
+            if (!ProtocolJson.TryGetPayloadObject(text, out payload))
+                return;
+            ProtocolJson.SpeakFinalMsg final;
+            if (!ProtocolJson.TryParseSpeakFinal(payload, out final))
+                return;
+            string replyId;
+            ProtocolJson.TryGetUtteranceId(text, out replyId);
+            if (PerceptionEnabled && (_pendingReplyId == null || replyId != _pendingReplyId))
+                return;
+            _pendingReplyId = null;
+            ShowVoiceFeedback(final.Text);
+            if (SpeakPlayer != null)
+                SpeakPlayer.FinishTurn(final.TurnId);
+            return;
+        }
+        if (type == "turn_started")
+            return;        // Other scene operations are not handled here.
         Debug.Log("CoordinatorClient: ignoring " + type);
     }
 
@@ -496,61 +615,51 @@ public class CoordinatorClient : MonoBehaviour
     /// Laptop mark path: dedupe, fence, resolve from the capture cache, pin,
     /// and ACK synchronously (same frame as render-or-reject).
     /// </summary>
-    internal void HandleMark(ProtocolJson.SceneOpMsg op)
+    bool PrepareSceneOp(ProtocolJson.SceneOpMsg op)
     {
         if (op == null || string.IsNullOrEmpty(op.OpId))
-            return;
+            return false;
         if (!_seenOpIds.Add(op.OpId))
         {
             Debug.Log("CoordinatorClient: duplicate op ignored op=" + op.OpId);
-            return;
+            return false;
         }
         if (!op.HasTurnId || op.TurnId == 0)
         {
             EnqueueAck(op, "rejected", null, "invalid", null);
             Debug.LogWarning("CoordinatorClient: op rejected invalid turn op=" + op.OpId);
-            return;
+            return false;
         }
         int epoch = GetStageEpoch != null ? GetStageEpoch() : 1;
         if (!op.HasStageEpoch || op.StageEpoch != epoch)
         {
             EnqueueAck(op, "stale", null, "superseded", null);
             Debug.Log("CoordinatorClient: op fenced superseded op=" + op.OpId);
-            return;
+            return false;
         }
+        return true;
+    }
+
+    internal void HandleMark(ProtocolJson.SceneOpMsg op)
+    {
+        if (!PrepareSceneOp(op))
+            return;
         if (op.Kind != "mark")
         {
             Debug.Log("CoordinatorClient: ignoring non-mark kind=" + op.Kind);
             return;
         }
-        if (string.IsNullOrEmpty(op.TargetFrameId))
-        {
-            EnqueueAck(op, "rejected", null, "invalid", null);
-            Debug.LogWarning("CoordinatorClient: op rejected missing target op=" + op.OpId);
+        PlacementResult result;
+        if (!TryResolveTargetOp(op, out result))
             return;
-        }
-        CaptureGeometryCache.Entry entry = null;
-        bool hasEntry = Cache != null && Cache.TryGet(op.TargetFrameId, out entry) && entry != null;
-        if (!hasEntry || !entry.HasHit)
-        {
-            // No cached surface for this frame: honest miss, never a pin.
-            // (A remote too_close is indistinguishable here and reports the
-            // same no_surface copy rather than floating a pin.)
-            ShowChipText(PlacementResolver.ChipNoSurfaceText);
-            EnqueueAck(op, "rejected", null, "no_surface", null);
-            return;
-        }
-        Vector3? delayed = DelayedHit != null
-            ? DelayedHit(PlacementResolver.CachedRay(entry))
-            : (Vector3?)null;
-        PlacementResult result =
-            PlacementResolver.TryPlaceFromCapture(entry, "placed", delayed, true);
         float period = op.HasMotion && op.MotionPeriodS > 0f
             ? op.MotionPeriodS
             : ProtocolJson.DefaultMarkPeriodS;
         if (result.ShouldPin)
         {
-            string drawingId = NewDrawingId != null ? NewDrawingId() : SpatialRuntime.NewFrameId();
+            string drawingId = !string.IsNullOrEmpty(op.DrawingId)
+                ? op.DrawingId
+                : (NewDrawingId != null ? NewDrawingId() : SpatialRuntime.NewFrameId());
             if (Store != null)
             {
                 GameObject mark = Store.PlaceMark(result.Point, result.Normal, drawingId);
@@ -570,6 +679,35 @@ public class CoordinatorClient : MonoBehaviour
             }
             return;
         }
+        EnqueueAckForResult(op, result);
+    }
+
+    internal bool TryResolveTargetOp(ProtocolJson.SceneOpMsg op, out PlacementResult result)
+    {
+        result = default;
+        if (string.IsNullOrEmpty(op.TargetFrameId))
+        {
+            EnqueueAck(op, "rejected", null, "invalid", null);
+            Debug.LogWarning("CoordinatorClient: op rejected missing target op=" + op.OpId);
+            return false;
+        }
+        CaptureGeometryCache.Entry entry = null;
+        bool hasEntry = Cache != null && Cache.TryGet(op.TargetFrameId, out entry) && entry != null;
+        if (!hasEntry || !entry.HasHit)
+        {
+            ShowChipText(PlacementResolver.ChipNoSurfaceText);
+            EnqueueAck(op, "rejected", null, "no_surface", null);
+            return false;
+        }
+        Vector3? delayed = DelayedHit != null
+            ? DelayedHit(PlacementResolver.CachedRay(entry))
+            : (Vector3?)null;
+        result = PlacementResolver.TryPlaceFromCapture(entry, "placed", delayed, true);
+        return true;
+    }
+
+    internal void EnqueueAckForResult(ProtocolJson.SceneOpMsg op, PlacementResult result)
+    {
         if (result.Outcome == PlacementOutcome.TooClose)
         {
             ShowChipText(PlacementResolver.ChipTooCloseText);
@@ -611,7 +749,60 @@ public class CoordinatorClient : MonoBehaviour
     {
         if (env == null || !IsOpen)
             return;
-        _outbox.Enqueue(PriorityFrame, ProtocolJson.BuildFrame(_sessionId, env));
+        _outbox.Enqueue(PriorityFrame, ProtocolJson.BuildFrame(_sessionId, env, OpenUtteranceId));
+    }
+
+    /// <summary>Queue the final JPEG in the SAME FIFO lane as audio and end.</summary>
+    public bool EnqueuePerceptionFrame(string utteranceId, CaptureEnvelope env, byte[] jpeg)
+    {
+        if (!IsConnected || !PerceptionEnabled || OpenUtteranceId != utteranceId
+            || env == null || jpeg == null || jpeg.Length == 0 || jpeg.Length > 65536)
+            return false;
+        _outbox.Enqueue(PriorityFrame,
+            ProtocolJson.BuildFrame(_sessionId, env, utteranceId, Convert.ToBase64String(jpeg)));
+        return true;
+    }
+
+    /// <summary>Abandon the pending reply (voice barge-in moved on).</summary>
+    public void AbandonReply()
+    {
+        _pendingReplyId = null;
+    }
+
+    /// <summary>Open voice utterance (set by the mic uplink, cleared on end).</summary>
+    public string OpenUtteranceId;
+
+    public void EnqueueAudioChunk(string utteranceId, string dataB64)
+    {
+        if (string.IsNullOrEmpty(utteranceId) || string.IsNullOrEmpty(dataB64))
+            return;
+        if (!IsConnected)
+        {
+            VoiceBootstrapLog.AudioDropOffline(VoiceBootstrapLog.PcmBytesFromBase64(dataB64));
+            return;
+        }
+        _outbox.Enqueue(PriorityAudioChunk,
+            ProtocolJson.BuildAudioChunk(_sessionId, utteranceId, dataB64));
+    }
+
+    public void EnqueueUtteranceEnd(string utteranceId, bool expectReply = true)
+    {
+        if (string.IsNullOrEmpty(utteranceId))
+            return;
+        if (OpenUtteranceId == utteranceId)
+            OpenUtteranceId = null;
+        if (!IsConnected)
+        {
+            VoiceBootstrapLog.UtteranceEndDropOffline();
+            return;
+        }
+        if (expectReply)
+        {
+            _pendingReplyId = utteranceId;
+            _replyStartedAt = Time.realtimeSinceStartup;
+        }
+        _outbox.Enqueue(PriorityUtteranceEnd,
+            ProtocolJson.BuildUtteranceEnd(_sessionId, utteranceId));
     }
 
     [Serializable]
@@ -662,7 +853,13 @@ public class CoordinatorClient : MonoBehaviour
         _outbox.Enqueue(PriorityCancel, ProtocolJson.BuildCancel(_sessionId, turnId, opId));
     }
 
-    void ShowChipText(string text)
+    internal void ShowVoiceFeedback(string text, float seconds = 8f)
+    {
+        if (Caption != null) Caption.Show(text, CenterEye, seconds);
+        else ShowChipText(text);
+    }
+
+    internal void ShowChipText(string text)
     {
         if (Chip == null)
             return;
@@ -679,7 +876,7 @@ public class CoordinatorClient : MonoBehaviour
     void ShowOffline()
     {
         // Offline honesty: exact copy, rings preserved (never Store.Clear).
-        ShowChipText(OfflineChipText);
+        ShowVoiceFeedback(OfflineChipText);
         Debug.Log("CoordinatorClient: offline, drawings kept");
     }
 
@@ -720,6 +917,11 @@ public class CoordinatorClient : MonoBehaviour
         {
         }
         _cts = null;
+        // _sessionId / tracking generation are already reset at the top of
+        // CleanupSocket; these are the live-conversation fields.
+        PerceptionEnabled = false;
+        _pendingReplyId = null;
+        OpenUtteranceId = null;
         _outbox.Clear();
         while (_inbound.TryDequeue(out _)) { }
     }
@@ -727,28 +929,6 @@ public class CoordinatorClient : MonoBehaviour
     void Shutdown()
     {
         _beginRequested = false;
-        try
-        {
-            if (_cts != null)
-                _cts.Cancel();
-        }
-        catch (Exception)
-        {
-        }
-        var sock = _socket;
-        _socket = null;
-        if (sock != null)
-        {
-            try { sock.Dispose(); } catch (Exception) { }
-        }
-        try
-        {
-            if (_cts != null)
-                _cts.Dispose();
-        }
-        catch (Exception)
-        {
-        }
-        _cts = null;
+        CleanupSocket();
     }
 }

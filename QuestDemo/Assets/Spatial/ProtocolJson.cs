@@ -263,11 +263,31 @@ public static class ProtocolJson
     /// </summary>
     public static string BuildFrame(string sessionId, CaptureEnvelope env)
     {
+        return BuildFrame(sessionId, env, null);
+    }
+
+    /// <summary>Frame wrapper tagged with an open utterance_id (voice turn).</summary>
+    public static string BuildFrame(string sessionId, CaptureEnvelope env, string utteranceId)
+    {
+        return BuildFrame(sessionId, env, utteranceId, null);
+    }
+
+    /// <summary>One per-question JPEG with the matching capture-time envelope.</summary>
+    public static string BuildFrame(string sessionId, CaptureEnvelope env, string utteranceId, string jpegBase64)
+    {
         var sb = new StringBuilder(640);
         sb.Append("{\"envelope\":");
         sb.Append(ToSpecJson(env));
+        if (!string.IsNullOrEmpty(jpegBase64))
+        {
+            sb.Append(",\"jpeg_b64\":\"");
+            AppendEscaped(sb, jpegBase64);
+            sb.Append('"');
+        }
         sb.Append('}');
-        return WrapMessage("frame", sessionId, 0, sb.ToString());
+        if (string.IsNullOrEmpty(utteranceId))
+            return WrapMessage("frame", sessionId, 0, sb.ToString());
+        return WrapUtteranceMessage("frame", sessionId, utteranceId, sb.ToString());
     }
 
     public static string BuildVideoFrame(string sessionId, CaptureEnvelope env, byte[] jpeg)
@@ -324,6 +344,45 @@ public static class ProtocolJson
         return WrapMessage("ack", sessionId, turnId, sb.ToString());
     }
 
+    /// <summary>Wrap a voice message carrying a top-level utterance_id.</summary>
+    public static string WrapUtteranceMessage(string type, string sessionId, string utteranceId, string payloadJson)
+    {
+        var sb = new StringBuilder(128);
+        sb.Append("{\"v\":1,\"type\":\"");
+        AppendEscaped(sb, type);
+        sb.Append("\",\"session_id\":");
+        AppendSessionId(sb, sessionId);
+        sb.Append(",\"turn_id\":0,\"utterance_id\":\"");
+        AppendEscaped(sb, utteranceId);
+        sb.Append("\",\"payload\":");
+        sb.Append(payloadJson);
+        sb.Append('}');
+        return sb.ToString();
+    }
+
+    /// <summary>~100 ms PCM chunk (16 kHz mono s16le base64).</summary>
+    public static string BuildAudioChunk(string sessionId, string utteranceId, string dataB64)
+    {
+        var sb = new StringBuilder(64);
+        sb.Append("{\"utterance_id\":\"");
+        AppendEscaped(sb, utteranceId);
+        sb.Append(
+            "\",\"audio\":{\"encoding\":\"pcm_s16le\",\"sample_rate\":16000,\"channels\":1,\"data_b64\":\"");
+        AppendEscaped(sb, dataB64);
+        sb.Append("\"}}");
+        return WrapUtteranceMessage("audio_chunk", sessionId, utteranceId, sb.ToString());
+    }
+
+    /// <summary>Close an utterance; the coordinator then runs the turn.</summary>
+    public static string BuildUtteranceEnd(string sessionId, string utteranceId)
+    {
+        var sb = new StringBuilder(64);
+        sb.Append("{\"utterance_id\":\"");
+        AppendEscaped(sb, utteranceId);
+        sb.Append("\"}");
+        return WrapUtteranceMessage("utterance_end", sessionId, utteranceId, sb.ToString());
+    }
+
     /// <summary>Quest cancel wrapper (payload carries the cancelled op_id).</summary>
     public static string BuildCancel(string sessionId, int turnId, string opId)
     {
@@ -355,6 +414,12 @@ public static class ProtocolJson
         return TryGetStringOrNull(json, "session_id", out sessionId, out found);
     }
 
+    public static bool TryGetUtteranceId(string json, out string utteranceId)
+    {
+        bool found;
+        return TryGetStringOrNull(json, "utterance_id", out utteranceId, out found);
+    }
+
     /// <summary>Brace-matched payload object substring, if present.</summary>
     public static bool TryGetPayloadObject(string json, out string payloadJson)
     {
@@ -382,9 +447,40 @@ public static class ProtocolJson
         public bool HasStageEpoch;
         public int StageEpoch;
         public string Kind;
+        public string JobId;
+        public string DrawingId;
         public string TargetFrameId;
+        public string FromTargetFrameId;
+        public string ToTargetFrameId;
+        public string Text;
+        public string ElementsJson;
+        public string Action;
+        public string Direction;
+        public string MotionKind;
+        public string MotionAxis;
+        public float MotionAngleDeg;
+        public float MotionDistanceM;
         public bool HasMotion;
         public float MotionPeriodS;
+    }
+
+    /// <summary>One closed-grammar procedural element (voice spec §3.1).</summary>
+    public sealed class ProceduralElement
+    {
+        public string Element;
+        public string Color;
+        public string Size;
+        public string Material;
+        public string Text;
+    }
+
+    public sealed class SpeakMsg
+    {
+        public bool HasTurnId;
+        public int TurnId;
+        public string Text;
+        public string AudioEncoding;
+        public string AudioDataB64;
     }
 
     /// <summary>
@@ -417,21 +513,28 @@ public static class ProtocolJson
         if (!TryGetStringOrNull(payloadJson, "kind", out s, out found) || !found || s == null)
             return false;
         parsed.Kind = s;
-        int targetAt = IndexOfKey(payloadJson, "target", 0);
-        if (targetAt >= 0)
+        if (TryGetStringOrNull(payloadJson, "job_id", out s, out found) && found)
+            parsed.JobId = s;
+        if (TryGetStringOrNull(payloadJson, "drawing_id", out s, out found) && found)
+            parsed.DrawingId = s;
+        if (TryGetStringOrNull(payloadJson, "text", out s, out found) && found)
+            parsed.Text = s;
+        if (TryGetStringOrNull(payloadJson, "action", out s, out found) && found)
+            parsed.Action = s;
+        if (TryGetStringOrNull(payloadJson, "direction", out s, out found) && found)
+            parsed.Direction = s;
+        int elementsAt = IndexOfKey(payloadJson, "elements", 0);
+        if (elementsAt >= 0)
         {
-            int braceAt = payloadJson.IndexOf('{', targetAt);
-            string targetJson;
+            int bracketAt = payloadJson.IndexOf('[', elementsAt);
+            string arr;
             int endAt;
-            if (braceAt >= 0 && ExtractBraced(payloadJson, braceAt, out targetJson, out endAt))
-            {
-                string frameId;
-                bool frameFound;
-                if (TryGetStringOrNull(targetJson, "frame_id", out frameId, out frameFound)
-                    && frameFound)
-                    parsed.TargetFrameId = frameId;
-            }
+            if (bracketAt >= 0 && ExtractBracketed(payloadJson, bracketAt, out arr, out endAt))
+                parsed.ElementsJson = arr;
         }
+        TryGetTargetFrameId(payloadJson, "target", out parsed.TargetFrameId);
+        TryGetTargetFrameId(payloadJson, "from", out parsed.FromTargetFrameId);
+        TryGetTargetFrameId(payloadJson, "to", out parsed.ToTargetFrameId);
         int motionAt = IndexOfKey(payloadJson, "motion", 0);
         if (motionAt >= 0)
         {
@@ -448,10 +551,141 @@ public static class ProtocolJson
                         parsed.HasMotion = true;
                         parsed.MotionPeriodS = (float)period;
                     }
+                    string kind;
+                    bool kindFound;
+                    if (TryGetStringOrNull(motionJson, "kind", out kind, out kindFound) && kindFound)
+                        parsed.MotionKind = kind;
+                    if (TryGetStringOrNull(motionJson, "axis", out kind, out kindFound) && kindFound)
+                        parsed.MotionAxis = kind;
+                    double angle;
+                    if (TryGetDouble(motionJson, "angle_deg", out angle))
+                        parsed.MotionAngleDeg = (float)angle;
+                    double dist;
+                    if (TryGetDouble(motionJson, "distance_m", out dist))
+                        parsed.MotionDistanceM = (float)dist;
                 }
             }
         }
         op = parsed;
+        return true;
+    }
+
+    static void TryGetTargetFrameId(string payloadJson, string key, out string frameId)
+    {
+        frameId = null;
+        int keyAt = IndexOfKey(payloadJson, key, 0);
+        if (keyAt < 0)
+            return;
+        int braceAt = payloadJson.IndexOf('{', keyAt);
+        string targetJson;
+        int endAt;
+        if (braceAt < 0 || !ExtractBraced(payloadJson, braceAt, out targetJson, out endAt))
+            return;
+        string parsed;
+        bool found;
+        if (TryGetStringOrNull(targetJson, "frame_id", out parsed, out found) && found)
+            frameId = parsed;
+    }
+
+    /// <summary>One streamed speech chunk (turn_id, seq, audio object).</summary>
+    public sealed class SpeakChunkMsg
+    {
+        public int TurnId;
+        public int Seq;
+        public string AudioDataB64;
+    }
+
+    /// <summary>End of streamed speech (turn_id, text, voice_gate).</summary>
+    public sealed class SpeakFinalMsg
+    {
+        public int TurnId;
+        public string Text;
+        public string VoiceGate;
+    }
+
+    /// <summary>Parse a speak_chunk payload. False when turn/seq/audio missing.</summary>
+    public static bool TryParseSpeakChunk(string payloadJson, out SpeakChunkMsg msg)
+    {
+        msg = null;
+        if (string.IsNullOrEmpty(payloadJson))
+            return false;
+        long turnId;
+        long seq;
+        if (!TryGetLong(payloadJson, "turn_id", out turnId))
+            return false;
+        if (!TryGetLong(payloadJson, "seq", out seq))
+            return false;
+        string audioData = null;
+        int audioAt = IndexOfKey(payloadJson, "audio", 0);
+        if (audioAt >= 0)
+        {
+            int valueAt = SkipValueStart(payloadJson, audioAt);
+            if (valueAt >= 0 && valueAt < payloadJson.Length && payloadJson[valueAt] == '{')
+            {
+                string audioJson;
+                int endAt;
+                bool found;
+                if (ExtractBraced(payloadJson, valueAt, out audioJson, out endAt))
+                    TryGetStringOrNull(audioJson, "data_b64", out audioData, out found);
+            }
+        }
+        if (string.IsNullOrEmpty(audioData))
+            return false;
+        msg = new SpeakChunkMsg { TurnId = (int)turnId, Seq = (int)seq, AudioDataB64 = audioData };
+        return true;
+    }
+
+    /// <summary>Parse a speak_final payload. False when turn_id missing.</summary>
+    public static bool TryParseSpeakFinal(string payloadJson, out SpeakFinalMsg msg)
+    {
+        msg = null;
+        if (string.IsNullOrEmpty(payloadJson))
+            return false;
+        long turnId;
+        if (!TryGetLong(payloadJson, "turn_id", out turnId))
+            return false;
+        string text;
+        bool found;
+        TryGetStringOrNull(payloadJson, "text", out text, out found);
+        string gate;
+        TryGetStringOrNull(payloadJson, "voice_gate", out gate, out found);
+        msg = new SpeakFinalMsg { TurnId = (int)turnId, Text = text, VoiceGate = gate };
+        return true;
+    }
+
+    /// <summary>Parse speak payload (turn_id, text, optional audio object).</summary>
+    public static bool TryParseSpeak(string payloadJson, out SpeakMsg msg)
+    {
+        msg = null;
+        if (string.IsNullOrEmpty(payloadJson))
+            return false;
+        var parsed = new SpeakMsg();
+        long turnId;
+        if (TryGetLong(payloadJson, "turn_id", out turnId))
+        {
+            parsed.HasTurnId = true;
+            parsed.TurnId = (int)turnId;
+        }
+        string text;
+        bool found;
+        if (TryGetStringOrNull(payloadJson, "text", out text, out found) && found)
+            parsed.Text = text;
+        int audioAt = IndexOfKey(payloadJson, "audio", 0);
+        if (audioAt >= 0)
+        {
+            int valueAt = SkipValueStart(payloadJson, audioAt);
+            if (valueAt >= 0 && valueAt < payloadJson.Length && payloadJson[valueAt] == '{')
+            {
+                string audioJson;
+                int endAt;
+                if (ExtractBraced(payloadJson, valueAt, out audioJson, out endAt))
+                {
+                    TryGetStringOrNull(audioJson, "encoding", out parsed.AudioEncoding, out found);
+                    TryGetStringOrNull(audioJson, "data_b64", out parsed.AudioDataB64, out found);
+                }
+            }
+        }
+        msg = parsed;
         return true;
     }
 
@@ -502,6 +736,19 @@ public static class ProtocolJson
         if (!TryReadString(json, i, out parsed, out endAt))
             return false;
         value = parsed;
+        return true;
+    }
+
+    /// <summary>Integer field read (hello_ok artifact_port, etc.).</summary>
+    public static bool TryGetIntField(string json, string key, out int value)
+    {
+        long l;
+        if (!TryGetLong(json, key, out l))
+        {
+            value = 0;
+            return false;
+        }
+        value = (int)l;
         return true;
     }
 
@@ -583,6 +830,81 @@ public static class ProtocolJson
             }
             sb.Append(c);
             i++;
+        }
+        return false;
+    }
+
+    /// <summary>Parse a procedural elements array into element records.</summary>
+    public static bool TryParseProceduralElements(string arrayJson, out System.Collections.Generic.List<ProceduralElement> elements)
+    {
+        elements = null;
+        if (string.IsNullOrEmpty(arrayJson))
+            return false;
+        var list = new System.Collections.Generic.List<ProceduralElement>();
+        int i = 0;
+        while (i < arrayJson.Length)
+        {
+            int braceAt = arrayJson.IndexOf('{', i);
+            if (braceAt < 0)
+                break;
+            string obj;
+            int endAt;
+            if (!ExtractBraced(arrayJson, braceAt, out obj, out endAt))
+                return false;
+            var el = new ProceduralElement();
+            string v;
+            bool f;
+            if (TryGetStringOrNull(obj, "element", out v, out f) && f)
+                el.Element = v;
+            if (TryGetStringOrNull(obj, "color", out v, out f) && f)
+                el.Color = v;
+            if (TryGetStringOrNull(obj, "size", out v, out f) && f)
+                el.Size = v;
+            if (TryGetStringOrNull(obj, "material", out v, out f) && f)
+                el.Material = v;
+            if (TryGetStringOrNull(obj, "text", out v, out f) && f)
+                el.Text = v;
+            list.Add(el);
+            i = endAt + 1;
+        }
+        elements = list;
+        return true;
+    }
+
+    static bool ExtractBracketed(string json, int bracketAt, out string arr, out int endAt)
+    {
+        arr = null;
+        endAt = -1;
+        int depth = 0;
+        bool inString = false;
+        bool escape = false;
+        for (int i = bracketAt; i < json.Length; i++)
+        {
+            char c = json[i];
+            if (inString)
+            {
+                if (escape)
+                    escape = false;
+                else if (c == '\\')
+                    escape = true;
+                else if (c == '"')
+                    inString = false;
+                continue;
+            }
+            if (c == '"')
+                inString = true;
+            else if (c == '[')
+                depth++;
+            else if (c == ']')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    arr = json.Substring(bracketAt, i - bracketAt + 1);
+                    endAt = i;
+                    return true;
+                }
+            }
         }
         return false;
     }

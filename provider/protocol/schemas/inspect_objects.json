@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["frame_id", "target"],
+  "properties": {
+    "frame_id": { "$ref": "#/$defs/ulid" },
+    "target": { "$ref": "#/$defs/target" },
+    "phrase": { "type": "string", "maxLength": 40 }
+  },
+  "$defs": {
+    "ulid": { "type": "string", "pattern": "^[0-7][0-9a-hjkmnp-tv-z]{25}$", "minLength": 26, "maxLength": 26 },
+    "unit_pixel": { "type": "number", "minimum": 0, "maximum": 1 },
+    "target": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "frame_id", "u", "v"],
+          "properties": {
+            "type": { "const": "image_point" },
+            "frame_id": { "$ref": "#/$defs/ulid" },
+            "u": { "$ref": "#/$defs/unit_pixel" }, "v": { "$ref": "#/$defs/unit_pixel" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "frame_id", "u0", "v0", "u1", "v1"],
+          "properties": {
+            "type": { "const": "image_box" },
+            "frame_id": { "$ref": "#/$defs/ulid" },
+            "u0": { "$ref": "#/$defs/unit_pixel" }, "v0": { "$ref": "#/$defs/unit_pixel" },
+            "u1": { "$ref": "#/$defs/unit_pixel" }, "v1": { "$ref": "#/$defs/unit_pixel" }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,529 @@
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.XR;
+
+/// <summary>
+/// Quest mic uplink: controller A is push-to-talk. Holding A opens a bounded
+/// websocket utterance; releasing A captures the camera frame and closes with
+/// utterance_end. Nothing transmits while A is up — no VAD auto-open, and
+/// barge-in only fires while held. Streams ~100 ms 16 kHz mono s16le PCM
+/// chunks tagged with <see cref="CoordinatorClient.OpenUtteranceId"/>;
+/// keyword hooks remain debug fallbacks.
+/// </summary>
+public class MicUtterance : MonoBehaviour
+{
+    public const int SampleRate = 16000;
+    public const int ChunkSamples = 1600; // ~100 ms
+    public const float SilenceRms = VoiceActivityGate.SilenceRms;
+    public const int SilenceEndMs = VoiceActivityGate.SilenceChunksToEnd * 100;
+    public const int MaxUtteranceMs = VoiceActivityGate.MaxUtteranceChunks * 100;
+    /// <summary>Voice barge-in floor during playback (5x the VAD floor).</summary>
+    public const float BargeInRms = 0.05f;
+
+    CoordinatorClient _client;
+    AudioClip _clip;
+    string _utteranceId;
+    int _lastPos;
+    readonly List<short> _pending = new List<short>(ChunkSamples * 2);
+    int _sentChunks;
+    VoiceActivityGate _gate = new VoiceActivityGate();
+    bool _manualCapture;
+    bool _micAuthRequested;
+    bool? _lastLoggedMicGrant;
+    int _utterancePcmBytes;
+    string _utteranceSessionId;
+    bool _closing;
+    internal PerceptionCapture Perception;
+
+    /// <summary>Chunks streamed this utterance (test seam).</summary>
+    public int SentChunks { get { return _sentChunks; } }
+    public string UtteranceId { get { return _utteranceId; } }
+
+    void Awake()
+    {
+        _client = GetComponent<CoordinatorClient>();
+        if (_client == null)
+            _client = FindObjectOfType<CoordinatorClient>();
+    }
+
+    /// <summary>PTT press (or keyword): open the utterance and start the mic.</summary>
+    public bool BeginUtterance()
+    {
+        if (!CanOpenUtterance())
+            return false;
+        _manualCapture = true;
+        OpenUtterance();
+        _pending.Clear();
+        EnsureMicClip();
+        return _clip != null;
+    }
+
+    /// <summary>PTT release: flush, close, and let the coordinator run the turn.</summary>
+    public void EndUtterance()
+    {
+        if (_utteranceId == null)
+            return;
+        try
+        {
+            if (_clip != null)
+                PumpMicManual();
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning("MicUtterance: mic pump failed (" + e.GetType().Name + ")");
+        }
+        FlushPartialManual();
+        CloseUtterance();
+        _manualCapture = false;
+    }
+
+    /// <summary>Keyword stand-in until on-device spotting lands.</summary>
+    public void SimulateKeyword()
+    {
+        BeginUtterance();
+    }
+
+    /// <summary>Maximum hold before the utterance auto-asks (15 s of s16le).</summary>
+    public const int PttMaxPcmBytes = SampleRate * 2 * 15;
+
+    /// <summary>Controller A press: arm the button and open if possible.
+    /// Held through playback, a loud onset barges in instead.</summary>
+    bool _pttWasHeld;
+
+    internal void PressPtt()
+    {
+        _manualCapture = true;
+        VoiceBootstrapLog.Log(VoiceBootstrapLog.ComponentMic, "ptt_press");
+        bool opened = _utteranceId != null || BeginUtterance();
+        if (_client != null)
+            _client.ShowVoiceFeedback(opened
+                ? "Listening\u2026 release A to ask."
+                : "Not ready \u2014 try again in a moment.");
+    }
+
+    /// <summary>Controller A release: flush, capture, close, ask.</summary>
+    internal void ReleasePtt()
+    {
+        _manualCapture = false;
+        VoiceBootstrapLog.Log(VoiceBootstrapLog.ComponentMic, "ptt_release");
+        EndUtterance();
+    }
+
+    /// <summary>Primary button held on either controller. OVRInput first,
+    /// OpenXR input devices as fallback (dead under some loaders).</summary>
+    internal static bool PttHeld()
+    {
+        try
+        {
+            if (OVRInput.Get(OVRInput.Button.One))
+                return true;
+        }
+        catch (Exception)
+        {
+        }
+        try
+        {
+            var dev = InputDevices.GetDeviceAtXRNode(XRNode.RightHand);
+            if (dev.TryGetFeatureValue(CommonUsages.primaryButton, out bool p) && p)
+                return true;
+            var left = InputDevices.GetDeviceAtXRNode(XRNode.LeftHand);
+            return left.TryGetFeatureValue(CommonUsages.primaryButton, out bool q) && q;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    void PollPttButton()
+    {
+        bool held = PttHeld();
+        if (held && !_pttWasHeld)
+            PressPtt();
+        else if (!held && _pttWasHeld)
+            ReleasePtt();
+        _pttWasHeld = held;
+    }
+
+    void Update()
+    {
+        TryEnsureAutoCapture();
+        PollPttButton();
+        if (_client == null || !_client.IsConnected
+            || (_utteranceId != null && _utteranceSessionId != _client.SessionId))
+        {
+            DropLocalTurn();
+            return;
+        }
+        if (_closing || _client.AwaitingReply)
+        {
+            DiscardMicWindow();
+            return;
+        }
+        if (_client.SpeakPlayer != null && _client.SpeakPlayer.IsPlaying)
+        {
+            if (_manualCapture)
+                PumpMicBargeIn();
+            else
+                DiscardMicWindow();
+            return;
+        }
+        if (_utteranceId != null && !_manualCapture)
+        {
+            // Release edge missed: heal by closing, never strand.
+            EndUtterance();
+            return;
+        }
+        if (!_manualCapture || _utteranceId == null || _clip == null)
+        {
+            if (!_manualCapture)
+                DiscardMicWindow();
+            return;
+        }
+        if (_utterancePcmBytes >= PttMaxPcmBytes)
+        {
+            _manualCapture = false;
+            CloseUtterance();
+            return;
+        }
+        PumpMicManual();
+    }
+
+    void DiscardMicWindow()
+    {
+        _pending.Clear();
+        _gate = new VoiceActivityGate();
+        if (_clip != null) _lastPos = Mathf.Max(0, Microphone.GetPosition(null));
+    }
+
+    void DropLocalTurn()
+    {
+        if (_closing && Perception != null) Perception.Cancel();
+        _closing = false;
+        _utteranceId = null;
+        _utteranceSessionId = null;
+        _manualCapture = false;
+        if (_client != null) _client.OpenUtteranceId = null;
+        DiscardMicWindow();
+    }
+
+    void OnDisable()
+    {
+        DropLocalTurn();
+        if (_clip != null)
+        {
+            Microphone.End(null);
+            Destroy(_clip);
+            _clip = null;
+        }
+    }
+
+    void TryEnsureAutoCapture()
+    {
+        if (_clip != null)
+            return;
+#if UNITY_EDITOR
+        EnsureMicClip();
+        return;
+#endif
+        MicRecordPermission.RequestOnce(ref _micAuthRequested);
+        bool granted = MicRecordPermission.IsGranted();
+        MaybeLogMicPermission(granted);
+        if (!granted)
+            return;
+        EnsureMicClip();
+    }
+
+    void EnsureMicClip()
+    {
+        if (_clip != null)
+            return;
+#if UNITY_ANDROID && !UNITY_EDITOR
+        if (!MicRecordPermission.IsGranted())
+            return;
+#endif
+        try
+        {
+            _clip = Microphone.Start(null, true, 10, SampleRate);
+            _lastPos = 0;
+        }
+        catch (Exception e)
+        {
+            VoiceBootstrapLog.MicFailed(e.GetType().Name);
+            _clip = null;
+        }
+        if (_clip != null)
+            VoiceBootstrapLog.MicStarted();
+    }
+
+    void MaybeLogMicPermission(bool granted)
+    {
+        if (!MicRecordPermission.ShouldLogGrantTransition(
+                _micAuthRequested, _lastLoggedMicGrant, granted))
+            return;
+        _lastLoggedMicGrant = granted;
+        VoiceBootstrapLog.MicPermission(granted);
+    }
+
+    /// <summary>Held-A loud onset during playback interrupts.</summary>
+    void PumpMicBargeIn()
+    {
+        if (_clip == null || _utteranceId != null || !_manualCapture)
+            return;
+        AppendMicSamples();
+        while (_pending.Count >= ChunkSamples)
+        {
+            var chunk = TakeChunk();
+            VoiceActivityDecision decision = _gate.Observe(chunk);
+            if (decision.State == VoiceActivityState.Started)
+            {
+                if (!IsBargeInLoud(decision.Chunks))
+                {
+                    _gate = new VoiceActivityGate();
+                    continue;
+                }
+                SpeakCloudPlayer player = _client.SpeakPlayer;
+                if (player != null)
+                    player.StopPlayback();
+                _client.AbandonReply();
+                OpenUtterance();
+                VoiceBootstrapLog.VadOpened(decision.Chunks != null ? decision.Chunks.Count : 0);
+                SendChunks(decision.Chunks);
+            }
+            else if (decision.State == VoiceActivityState.Ended)
+            {
+                _gate = new VoiceActivityGate();
+            }
+        }
+    }
+
+    /// <summary>Loud-enough pre-roll to count as a voice interruption.</summary>
+    public static bool IsBargeInLoud(List<List<short>> chunks)
+    {
+        if (chunks == null || chunks.Count == 0)
+            return false;
+        double sum = 0;
+        long count = 0;
+        foreach (List<short> chunk in chunks)
+        {
+            if (chunk == null)
+                continue;
+            foreach (short s in chunk)
+            {
+                double v = s / 32768.0;
+                sum += v * v;
+                count++;
+            }
+        }
+        if (count == 0)
+            return false;
+        return (float)System.Math.Sqrt(sum / count) >= BargeInRms;
+    }
+
+    void PumpMicVad()
+    {
+        AppendMicSamples();
+        while (_pending.Count >= ChunkSamples)
+        {
+            var chunk = TakeChunk();
+            VoiceActivityDecision decision = _gate.Observe(chunk);
+            ApplyVadDecision(decision);
+        }
+    }
+
+    void PumpMicManual()
+    {
+        AppendMicSamples();
+        while (_pending.Count >= ChunkSamples)
+        {
+            var chunk = TakeChunk();
+            if (Rms(chunk) >= SilenceRms)
+                SendChunk(chunk);
+        }
+    }
+
+    void AppendMicSamples()
+    {
+        int pos = Microphone.GetPosition(null);
+        if (pos < 0)
+            return;
+        int available = pos >= _lastPos
+            ? pos - _lastPos
+            : (_clip.samples - _lastPos) + pos;
+        if (available <= 0)
+            return;
+        var buf = new float[available];
+        _clip.GetData(buf, _lastPos);
+        _lastPos = pos;
+        foreach (float f in buf)
+        {
+            float clamped = Mathf.Clamp(f, -1f, 1f);
+            _pending.Add((short)(clamped * 32767f));
+        }
+    }
+
+    List<short> TakeChunk()
+    {
+        var chunk = _pending.GetRange(0, ChunkSamples);
+        _pending.RemoveRange(0, ChunkSamples);
+        return chunk;
+    }
+
+    void ApplyVadDecision(VoiceActivityDecision decision)
+    {
+        switch (decision.State)
+        {
+            case VoiceActivityState.Idle:
+                break;
+            case VoiceActivityState.Started:
+                if (!CanOpenUtterance())
+                {
+                    VoiceBootstrapLog.OnsetDropped(DroppedOnsetReason());
+                    _gate = new VoiceActivityGate();
+                    break;
+                }
+                OpenUtterance();
+                VoiceBootstrapLog.VadOpened(decision.Chunks != null ? decision.Chunks.Count : 0);
+                SendChunks(decision.Chunks);
+                break;
+            case VoiceActivityState.Streaming:
+                if (_utteranceId != null)
+                    SendChunks(decision.Chunks);
+                break;
+            case VoiceActivityState.Ended:
+                if (_utteranceId != null)
+                {
+                    SendChunks(decision.Chunks);
+                    CloseUtterance();
+                }
+                break;
+        }
+    }
+
+    bool CanOpenUtterance()
+    {
+        if (_client == null || !_client.IsConnected || _client.AwaitingReply || _utteranceId != null)
+            return false;
+        SpeakCloudPlayer player = _client.SpeakPlayer;
+        return player == null || !player.IsPlaying;
+    }
+
+    string DroppedOnsetReason()
+    {
+        if (_client == null || !_client.IsConnected)
+            return "socket_unavailable";
+        SpeakCloudPlayer player = _client.SpeakPlayer;
+        if (player != null && player.IsPlaying)
+            return "playback_active";
+        return "socket_unavailable";
+    }
+
+    void OpenUtterance()
+    {
+        _utteranceId = Guid.NewGuid().ToString("N");
+        _client.OpenUtteranceId = _utteranceId;
+        _utteranceSessionId = _client.SessionId;
+        _sentChunks = 0;
+        _utterancePcmBytes = 0;
+    }
+
+    void CloseUtterance()
+    {
+        if (_closing || _utteranceId == null) return;
+        string id = _utteranceId;
+        VoiceBootstrapLog.VadEnded(_sentChunks, _utterancePcmBytes);
+        if (_client == null || !_client.IsConnected || _client.SessionId != _utteranceSessionId)
+        {
+            DropLocalTurn();
+            return;
+        }
+        _closing = true;
+        bool longEnough = _utterancePcmBytes >= SampleRate; // 0.5 seconds s16le.
+        if (!longEnough)
+        {
+            _client.ShowVoiceFeedback("That was too short. Please ask again.");
+            FinishUtterance(id, null, null, null, false);
+        }
+        else if (_client.PerceptionEnabled && Perception != null)
+        {
+            Perception.Capture((env, jpeg, reason) => FinishUtterance(id, env, jpeg, reason, true));
+        }
+        else
+        {
+            FinishUtterance(id, null, null, _client.PerceptionEnabled ? "camera_down" : null, true);
+        }
+    }
+
+    void FinishUtterance(string id, CaptureEnvelope env, byte[] jpeg, string reason, bool expectReply)
+    {
+        if (_utteranceId != id || _client == null || !_client.IsConnected
+            || _client.SessionId != _utteranceSessionId)
+        {
+            DropLocalTurn();
+            return;
+        }
+        if (jpeg != null && !_client.EnqueuePerceptionFrame(id, env, jpeg))
+        {
+            DropLocalTurn();
+            return;
+        }
+        if (reason != null)
+            _client.ShowVoiceFeedback(reason == "dark_image"
+                ? "Camera view is dark. Uncover the camera or try more light."
+                : "Camera image unavailable. Check camera access and try again.");
+        _client.EnqueueUtteranceEnd(id, expectReply);
+        _utteranceId = null;
+        _utteranceSessionId = null;
+        _closing = false;
+    }
+
+    void FlushPartialManual()
+    {
+        if (_pending.Count >= ChunkSamples / 2 && _client != null && _utteranceId != null)
+        {
+            var chunk = new List<short>(_pending);
+            _pending.Clear();
+            if (Rms(chunk) >= SilenceRms)
+                SendChunk(chunk);
+        }
+        else
+        {
+            _pending.Clear();
+        }
+    }
+
+    void SendChunks(List<List<short>> chunks)
+    {
+        if (chunks == null)
+            return;
+        foreach (List<short> chunk in chunks)
+            SendChunk(chunk);
+    }
+
+    void SendChunk(List<short> chunk)
+    {
+        if (_utteranceId == null || _client == null || chunk == null || chunk.Count == 0)
+            return;
+        var bytes = new byte[chunk.Count * 2];
+        for (int i = 0; i < chunk.Count; i++)
+        {
+            bytes[i * 2] = (byte)(chunk[i] & 0xFF);
+            bytes[i * 2 + 1] = (byte)((chunk[i] >> 8) & 0xFF);
+        }
+        _client.EnqueueAudioChunk(_utteranceId, Convert.ToBase64String(bytes));
+        _sentChunks++;
+        _utterancePcmBytes += bytes.Length;
+    }
+
+    static float Rms(List<short> chunk)
+    {
+        double sum = 0;
+        foreach (short s in chunk)
+        {
+            double v = s / 32768.0;
+            sum += v * v;
+        }
+        return (float)Math.Sqrt(sum / Math.Max(1, chunk.Count));
+    }
+}

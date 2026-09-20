@@ -97,6 +97,22 @@ frame. This path emits tracking status/masks, not placement ACKs or success
 speech. Defaults remain `qwen3.8-omni-flash`, 256 requested output tokens, and
 the same env-only key/audit handling. See [Quest camera + push-to-talk setup](quest-audio-setup.md).
 
+## LAN coordinator voice planners (`coordinator/server.py`)
+
+The offline LAN WebSocket coordinator can run voice turns with `--planner stub|yibu|voice-stub` (plus the legacy `--planner mark` hardcoded mark path). These modes sit beside the grounded voice path above: `--planner yibu` without `--voice-only` still sends JPEG when Quest provides a frame, binds Omni worker tools, and may emit up to three scene ops after ACKs. The bootstrap modes below prove mic transport or live audio-only conversation without spatial ops.
+
+| CLI | Credit | Model / speech | Scene ops | Audit `purpose` labels |
+| --- | --- | --- | --- | --- |
+| `--planner voice-stub` | none | Fixed caption plus a deterministic **non-speech** 16 kHz mono PCM test tone (`voice/test_tone.py`) — transport check only, not Omni speech | none | none (no yibu calls) |
+| `--planner yibu --voice-only` | yes (plan + TTS) | Buffered mic PCM → WAV → `qwen3.8-omni-flash` HTTP omni **without** JPEG or tools; reply text → Gemini Live cloud PCM for playback | none | `voice-only-turn` (omni), `voice-only-speak` (TTS) |
+| `--planner yibu` (default voice) | yes | PCM + optional JPEG, tool loop, spatial prompts | up to 3 after ACK | `voice-turn`, `voice-speak` |
+
+`--voice-only` is rejected unless `--planner yibu`. Direct `YibuPlanner(voice_only=True)` defaults `purpose` to `voice-only-turn`; grounded turns keep `voice-turn`. Live backends load lazily inside `plan()` / synthesizer — offline unit tests inject fakes and spend no credit.
+
+**Live start prerequisite (`--planner yibu --voice-only`):** export a non-empty ASCII `YIBU_API_KEY` on the laptop **before** starting `python -m coordinator.server`. Startup validates the env var and exits with a configuration error if it is missing or blank — **no WebSocket bind and no yibuapi call**. Error text names `YIBU_API_KEY` only; the key value never appears in logs or stderr.
+
+**Turn-time planner failures:** If a live planner path still raises `SystemExit` inside a background turn (should not happen after startup validation), the coordinator logs redacted `VoiceBootstrap` `planner_failed` with `exception_class=SystemExit` only, speaks the existing safe fallback line (`Sorry, I couldn't reach the model. Try again.`), and keeps the connection/event loop alive. Uncaught exceptions in turn background tasks also emit a coordinator log line with `turn_id` and exception class only (no message or PCM).
+
 ## Known gap: multi-turn + interruption
 
 The WS scripts record single-turn usage only and have no barge-in handling. Planned conversation work needs: session reuse across turns, per-event usage classification (per-response vs cumulative — verify, never double-count), missing-usage retention, retry dedupe, TTS cancellation on interruption, and stale-frame pose discipline (late replies use capture-time pose). Extend `yibu_audit.py`; see AGENTS.md doc procedure before adding new scripts.

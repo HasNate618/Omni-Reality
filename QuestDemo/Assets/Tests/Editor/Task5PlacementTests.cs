@@ -47,6 +47,7 @@ public class Task5PlacementTests
         {
             Assert.That(PulsingRing.PulseScaleFactor(phase),
                 Is.InRange(0.85f, 1.15f), "phase " + phase);
+            // Float subtraction at the trough is 0.549999952, not exactly 0.55.
             Assert.That(PulsingRing.PulseAlpha(phase),
                 Is.InRange(0.55f - 1e-6f, 1.0f + 1e-6f), "phase " + phase);
         }

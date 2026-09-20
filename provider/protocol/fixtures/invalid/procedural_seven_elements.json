@@ -1,0 +1,14 @@
+{
+  "kind": "place_procedural",
+  "drawing_id": null,
+  "target": { "type": "capture_hint", "frame_id": "01k5j8g0008q3m7b2d6h9n4r5v" },
+  "elements": [
+    { "element": "cube", "color": "cyan", "size": "small", "material": "solid" },
+    { "element": "cube", "color": "cyan", "size": "small", "material": "solid" },
+    { "element": "cube", "color": "cyan", "size": "small", "material": "solid" },
+    { "element": "cube", "color": "cyan", "size": "small", "material": "solid" },
+    { "element": "cube", "color": "cyan", "size": "small", "material": "solid" },
+    { "element": "cube", "color": "cyan", "size": "small", "material": "solid" },
+    { "element": "cube", "color": "cyan", "size": "small", "material": "solid" }
+  ]
+}

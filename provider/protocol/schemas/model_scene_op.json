@@ -4,7 +4,7 @@
   "additionalProperties": false,
   "required": ["kind"],
   "properties": {
-    "kind": { "enum": ["mark", "label", "connect", "ghost", "place_known", "place_generated", "remove", "undo"] },
+    "kind": { "enum": ["mark", "label", "connect", "ghost", "remove", "undo", "place_procedural", "revise_procedural"] },
     "drawing_id": { "anyOf": [{ "$ref": "#/$defs/ulid" }, { "type": "null" }] },
     "target": { "$ref": "#/$defs/target" },
     "from": { "$ref": "#/$defs/target" },
@@ -19,14 +19,34 @@
     },
     "motion": { "anyOf": [{ "$ref": "#/$defs/motion" }, { "type": "null" }] },
     "shape": { "enum": ["ring", "dot"] },
+    "elements": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 6,
+      "items": { "$ref": "#/$defs/procedural_element" }
+    },
+    "action": { "enum": ["enlarge", "shrink", "rotate_cw", "rotate_ccw", "nudge", "remove"] },
+    "direction": { "enum": ["left", "right", "up", "down", "forward", "back"] },
     "text": { "type": "string", "maxLength": 48 },
     "asset_id": { "type": "string" },
     "scale": { "type": "number", "minimum": 0.1, "maximum": 2 }
   },
   "allOf": [
     {
-      "if": { "properties": { "kind": { "enum": ["mark", "label", "ghost", "place_known", "place_generated", "remove"] } }, "required": ["kind"] },
+      "if": { "properties": { "kind": { "enum": ["mark", "label", "ghost", "remove", "place_procedural"] } }, "required": ["kind"] },
       "then": { "required": ["target"] }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "place_procedural" } }, "required": ["kind"] },
+      "then": { "required": ["target", "elements"] }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "revise_procedural" } }, "required": ["kind"] },
+      "then": { "required": ["drawing_id", "action"] }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "revise_procedural" }, "action": { "const": "nudge" } }, "required": ["kind"] },
+      "then": { "required": ["direction"] }
     },
     {
       "if": { "properties": { "kind": { "const": "label" } }, "required": ["kind"] },
@@ -44,16 +64,40 @@
       }
     },
     {
-      "if": { "properties": { "kind": { "const": "place_known" } }, "required": ["kind"] },
-      "then": { "required": ["asset_id", "scale"] }
-    },
-    {
       "if": { "properties": { "kind": { "const": "remove" } }, "required": ["kind"] },
       "then": { "properties": { "target": { "properties": { "type": { "const": "drawing" } } } } }
     }
   ],
   "$defs": {
     "ulid": { "type": "string", "pattern": "^[0-7][0-9a-hjkmnp-tv-z]{25}$", "minLength": 26, "maxLength": 26 },
+    "procedural_color": { "enum": ["cyan", "amber", "green", "magenta", "white", "slate"] },
+    "procedural_element": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["element", "color", "size", "material"],
+          "properties": {
+            "element": { "enum": ["panel", "pointer"] },
+            "color": { "$ref": "#/$defs/procedural_color" },
+            "size": { "enum": ["small", "medium", "large"] },
+            "material": { "enum": ["solid", "translucent", "glow"] },
+            "text": { "type": "string", "maxLength": 40 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["element", "color", "size", "material"],
+          "properties": {
+            "element": { "enum": ["arrow", "cube", "sphere", "cylinder"] },
+            "color": { "$ref": "#/$defs/procedural_color" },
+            "size": { "enum": ["small", "medium", "large"] },
+            "material": { "enum": ["solid", "translucent", "glow"] }
+          }
+        }
+      ]
+    },
     "unit_pixel": { "type": "number", "minimum": 0, "maximum": 1 },
     "target": {
       "oneOf": [

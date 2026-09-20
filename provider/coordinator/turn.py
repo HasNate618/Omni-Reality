@@ -20,6 +20,7 @@ from jsonschema import ValidationError
 
 from coordinator.planner import MAX_OPS_PER_TURN, PlanResult
 from coordinator.session import CoordinatorState, UtteranceBuffer
+from omni.tools import accept_model_ops
 from protocol.ids import new_ulid
 from protocol.validate import validate_instance
 from voice.audio import BYTES_PER_SECOND, MIN_UTTERANCE_S
@@ -48,9 +49,29 @@ REJECT_DEFAULT = "I couldn't place that."
 Send = Callable[..., Awaitable[None]]
 
 
+def _turn_task_done(state: CoordinatorState, turn_id: int, task: asyncio.Task) -> None:
+    """Pop turn registry; log unhandled failures (class + turn id only)."""
+    state.turn_tasks.pop(turn_id, None)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.info(
+            "turn background task failed turn_id=%d exception_class=%s",
+            turn_id,
+            type(exc).__name__,
+        )
+
+
 def start_turn(state: CoordinatorState, send: Send, utterance_id: str) -> asyncio.Task | None:
     """Close an utterance. Returns the background turn task, or None."""
+    if utterance_id in state.closed_utterances:
+        return None
     buf = state.utterances.pop(utterance_id, None) or UtteranceBuffer()
+    state.closed_utterances.add(utterance_id)
+    if getattr(state.planner, "perception_qa", False) and state.turn_tasks:
+        logger.info("VoiceBootstrap component=coordinator event=utterance_dropped reason=turn_busy")
+        return None
     if len(buf.pcm) < MIN_UTTERANCE_S * BYTES_PER_SECOND:
         logger.info(
             "utterance %s too short: %.2f s of audio, need %.2f s; no turn",
@@ -65,7 +86,7 @@ def start_turn(state: CoordinatorState, send: Send, utterance_id: str) -> asynci
             cancel_turn(state, old_id)
     task = asyncio.create_task(_run_turn(state, send, turn_id, utterance_id, buf))
     state.turn_tasks[turn_id] = task
-    task.add_done_callback(lambda _t: state.turn_tasks.pop(turn_id, None))
+    task.add_done_callback(lambda t: _turn_task_done(state, turn_id, t))
     return task
 
 
@@ -115,10 +136,36 @@ async def _run_turn(
     utterance_id: str,
     buf: UtteranceBuffer,
 ) -> None:
+    from voice.bootstrap_diagnostics import (
+        planner_complete,
+        planner_failed,
+        planner_mode_label,
+        synth_failed,
+        synth_result,
+        turn_started as log_turn_started,
+    )
+
+    pcm_len = len(buf.pcm)
+    log_turn_started(
+        turn_id=turn_id,
+        mode=planner_mode_label(state.planner),
+        pcm_bytes=pcm_len,
+    )
     await send("turn_started", turn_id, {"utterance_id": utterance_id, "turn_id": turn_id}, utterance_id)
     if state.tracking is not None:
         await _run_tracking_turn(state, turn_id, utterance_id, buf)
         return
+    bind = getattr(state.planner, "bind_tools", None)
+    voice_only = getattr(state.planner, "voice_only", False)
+    if bind is not None and not voice_only and not getattr(state.planner, "perception_qa", False):
+        try:
+            bind(
+                jobs=state.jobs,
+                jpeg_b64=base64.b64encode(buf.jpeg).decode() if buf.jpeg else None,
+                frame_id=(buf.envelope or {}).get("frame_id"),
+            )
+        except Exception:
+            logger.exception("tool bind failed for turn %d", turn_id)
     try:
         plan = await state.planner.plan(
             pcm=bytes(buf.pcm),
@@ -128,13 +175,24 @@ async def _run_turn(
         )
     except asyncio.CancelledError:
         raise
-    except Exception:
-        logger.exception("planner failed for turn %d", turn_id)
+    except SystemExit:
+        planner_failed(turn_id=turn_id, exception_class="SystemExit")
+        if turn_id not in state.cancelled_turns:
+            await send("speak", turn_id, {"turn_id": turn_id, "text": SAY_MODEL_ERROR, "audio": None}, utterance_id)
+        return
+    except Exception as exc:
+        planner_failed(turn_id=turn_id, exception_class=type(exc).__name__)
         if turn_id not in state.cancelled_turns:
             await send("speak", turn_id, {"turn_id": turn_id, "text": SAY_MODEL_ERROR, "audio": None}, utterance_id)
         return
     if turn_id in state.cancelled_turns:
         return
+
+    planner_complete(
+        turn_id=turn_id,
+        latency_ms=plan.latency_ms,
+        ops_count=len(plan.ops),
+    )
 
     stage_epoch = buf.envelope["stage_epoch"] if buf.envelope else state.latest_stage_epoch
     sent: list[dict] = []
@@ -164,7 +222,26 @@ async def _run_turn(
 
     acks = {op["op_id"]: state.completed_ops.get(op["op_id"]) for op in sent}
     line = spoken_line(plan, sent, acks)
-    await send("speak", turn_id, {"turn_id": turn_id, "text": line, "audio": None}, utterance_id)
+    # Cloud speech after the ACK barrier (voice spec §2 step 7). The final
+    # line is tools-disabled: no tool calls happen past this point.
+    audio_block, voice_gate = await _speak_audio(state, line, turn_id)
+    audio_bytes = 0
+    if isinstance(audio_block, dict):
+        try:
+            pcm_out = base64.b64decode(audio_block.get("data_b64") or "", validate=True)
+            audio_bytes = len(pcm_out)
+        except (binascii.Error, ValueError):
+            pcm_out = b""
+        if pcm_out:
+            import time as _time
+            state.last_speak_pcm = bytes(pcm_out)
+            state.last_speak_at = _time.monotonic()
+    synth_result(turn_id=turn_id, voice_gate=voice_gate, audio_bytes=audio_bytes)
+    await send(
+        "speak", turn_id,
+        {"turn_id": turn_id, "text": line, "audio": audio_block},
+        utterance_id,
+    )
     state.context.append(
         {
             "turn_id": turn_id,
@@ -173,6 +250,7 @@ async def _run_turn(
             "drawing_ids": [a["drawing_id"] for a in acks.values() if a and a.get("drawing_id")],
             "latency_ms": plan.latency_ms,
             "audit_id": plan.audit_id,
+            "voice_gate": voice_gate,
         }
     )
     del state.context[:-CONTEXT_TURNS]
@@ -249,8 +327,116 @@ def ingest_audio_chunk(state: CoordinatorState, utterance_id: str | None, payloa
     except (binascii.Error, ValueError):
         logger.info("ignoring audio_chunk with bad base64")
         return
+    if not state.accepts_utterance(utterance_id) or len(pcm) % 2:
+        return
     buf = state.utterances.setdefault(utterance_id, UtteranceBuffer())
     if len(buf.pcm) + len(pcm) > state.max_utterance_bytes:
         logger.info("utterance %s over cap; dropping chunk", utterance_id)
         return
     buf.pcm.extend(pcm)
+
+
+async def _speak_audio(
+    state: CoordinatorState, line: str, turn_id: int
+) -> tuple[dict | None, str]:
+    """Synthesize the final line. Returns (audio_block_or_None, voice_gate)."""
+    import inspect as inspect_module
+
+    from voice.cloud_speech import audio_block
+
+    synth = getattr(state, "synthesizer", None)
+    if synth is None:
+        return None, "degraded"
+    try:
+        pcm = synth(line)
+        if inspect_module.iscoroutine(pcm):
+            pcm = await pcm
+    except Exception as exc:
+        from voice.bootstrap_diagnostics import synth_failed
+
+        synth_failed(turn_id=turn_id, exception_class=type(exc).__name__)
+        return None, "failed"
+    if not pcm:
+        return None, "failed"
+    return audio_block(bytes(pcm)), "passed"
+
+
+PlaceSend = Callable[[dict], Awaitable[dict | None]]
+FinalFn = Callable[[dict], Awaitable[None]]
+
+
+def may_speak(acks: list[dict] | None, timed_out: bool) -> bool:
+    if timed_out:
+        return False
+    if acks is None:
+        return False
+    if not acks:
+        return True
+    for ack in acks:
+        status = ack.get("status")
+        if status not in ("placed", "applied"):
+            return False
+    return True
+
+
+async def freeze_and_ack(
+    *,
+    send_ops: Callable[[dict], Awaitable[None]],
+    wait_acks: Callable[[list[dict], float], Awaitable[list[dict] | None]],
+    ops: list[dict],
+    timeout_s: float = ACK_TIMEOUT_S,
+) -> list[dict]:
+    frozen = list(ops)
+    for op in frozen:
+        await send_ops(op)
+    return await wait_acks(frozen, timeout_s) or []
+
+
+def build_place_generated(*, job_id: str, turn_id: int, stage_epoch: int, target: dict) -> dict:
+    op = {
+        "op_id": new_ulid(),
+        "turn_id": turn_id,
+        "stage_epoch": stage_epoch,
+        "kind": "place_generated",
+        "drawing_id": None,
+        "job_id": job_id,
+        "target": target,
+    }
+    validate_instance("scene_op", op)
+    return op
+
+
+async def on_job_terminal(
+    state: CoordinatorState,
+    job_id: str,
+    send: PlaceSend,
+    complete_final_fn: FinalFn,
+) -> None:
+    job = state.jobs.jobs.get(job_id)
+    if job is None:
+        return
+    status = job.get("status")
+    if status not in ("ready", "failed"):
+        return
+    stage_epoch = int(job.get("stage_epoch") or state.latest_stage_epoch)
+    if stage_epoch < state.latest_stage_epoch:
+        return
+    if status == "failed":
+        await complete_final_fn({"status": "failed"})
+        return
+    turn_id = max(state.turn_id, 1)
+    target = job.get("target")
+    if not isinstance(target, dict):
+        await complete_final_fn({"status": "failed"})
+        return
+    op = build_place_generated(
+        job_id=job_id,
+        turn_id=turn_id,
+        stage_epoch=stage_epoch,
+        target=target,
+    )
+    ack = await send(op)
+    if ack is None:
+        await complete_final_fn({"status": "failed"})
+        return
+    await complete_final_fn(ack)

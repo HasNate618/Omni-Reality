@@ -52,6 +52,7 @@ public class SpatialRuntime : MonoBehaviour
     Material _aimMaterial;
     readonly CaptureGeometryCache _cache = new CaptureGeometryCache();
     int _stageEpoch = 1;
+    public int StageEpoch { get { return _stageEpoch; } }
     CoordinatorClient _coord;
     string _laptopIpv4 = "";
     DrawingStore _store;
@@ -100,6 +101,12 @@ public class SpatialRuntime : MonoBehaviour
         TickCoordinator();
         if (_trackingSettings != null && _trackingSettings.enableTracking)
             return; // QuestStreamInput owns capture/buttons in tracking mode.
+        // Perception is Q&A only, including when developer controllers are held.
+        if (_coord != null && _coord.PerceptionEnabled)
+        {
+            if (_aimLine != null) _aimLine.enabled = false;
+            return;
+        }
         if (_pca == null || !_pca.IsPlaying)
             return;
         UpdateAimLine();
@@ -147,19 +154,24 @@ public class SpatialRuntime : MonoBehaviour
     /// <summary>
     /// Task 7 coordinator supervision: slice-1 only while PlayerPrefs
     /// laptop_ipv4 is empty (no connect); otherwise create the client once
-    /// and tick it after PCA starts playing.
+    /// and tick it every frame while the IP is configured.
     /// </summary>
     void TickCoordinator()
     {
         if (string.IsNullOrEmpty(_laptopIpv4))
-            return;
-        if (_pca == null || !_pca.IsPlaying)
             return;
         if (_coord == null)
         {
             EnsurePlacementRefs();
             var go = new GameObject("CoordinatorClient");
             _coord = go.AddComponent<CoordinatorClient>();
+            _coord.SpeakPlayer = go.AddComponent<SpeakCloudPlayer>();
+            _coord.Caption = go.AddComponent<VoiceCaption>();
+            var capture = go.AddComponent<PerceptionCapture>();
+            capture.CameraSource = _pca;
+            capture.Runtime = this;
+            var mic = go.AddComponent<MicUtterance>();
+            mic.Perception = capture;
             _coord.Cache = _cache;
             _coord.Store = _store;
             _coord.Chip = _chip;
@@ -287,12 +299,13 @@ public class SpatialRuntime : MonoBehaviour
     /// <c>world_hint</c>, and the capture-time <paramref name="cameraPose"/>
     /// and <paramref name="ray"/> used. The capture is always cached.
     /// </summary>
-    public bool TryCapture(out CaptureEnvelope env, out Pose cameraPose, out Ray ray, bool captureGeometry = true)
+    public bool TryCapture(out CaptureEnvelope env, out Pose cameraPose, out Ray ray,
+        bool requireDepth = true, bool includePointing = true)
     {
         env = null;
         cameraPose = default(Pose);
         ray = default(Ray);
-        if (_pca == null || !_pca.IsPlaying || (captureGeometry && _raycast == null))
+        if (_pca == null || !_pca.IsPlaying || (requireDepth && _raycast == null))
             return false;
 
         // Capture-time state only: pose and timestamp belong to this frame.
@@ -313,7 +326,7 @@ public class SpatialRuntime : MonoBehaviour
         Vector3 direction;
         CapturePointing pointing = null;
         string hintSource;
-        if (triggerHeld && _rightAim != null)
+        if (includePointing && triggerHeld && _rightAim != null)
         {
             // Exactly the sampled controller ray, stamped with its actual
             // sample time — never the PCA image time.
@@ -364,8 +377,7 @@ public class SpatialRuntime : MonoBehaviour
         Vector3 hitPoint = default(Vector3);
         Vector3 hitNormal = default(Vector3);
         EnvironmentRaycastHit hit;
-        if (captureGeometry && _raycast != null && _raycast.Raycast(ray, out hit, MaxCaptureDistanceM)
-            && hit.status == EnvironmentRaycastHitStatus.Hit)
+        if (TryDepthHit(ray, out hit))
         {
             float distance = Vector3.Distance(origin, hit.point);
             if (distance < MinCaptureDistanceM)
@@ -399,7 +411,7 @@ public class SpatialRuntime : MonoBehaviour
 
         // Every valid capture is cached, including misses and too-close
         // frames; availability is cache existence, not hit success.
-        if (captureGeometry) _cache.Store(frameId, new CaptureGeometryCache.Entry
+        if (requireDepth) _cache.Store(frameId, new CaptureGeometryCache.Entry
         {
             CameraPose = cameraPose,
             FocalLength = new Vector2(fx, fy),
@@ -451,6 +463,29 @@ public class SpatialRuntime : MonoBehaviour
         return true;
     }
 
+    bool TryDepthHit(Ray ray, out EnvironmentRaycastHit hit)
+    {
+        hit = default;
+        if (_raycast == null) return false;
+        try
+        {
+            return _raycast.Raycast(ray, out hit, MaxCaptureDistanceM)
+                && hit.status == EnvironmentRaycastHitStatus.Hit;
+        }
+        catch (Exception) { return false; }
+    }
+
+    internal void UpdateSentGeometry(CaptureEnvelope env)
+    {
+        if (_cache.TryGet(env.FrameId, out var entry))
+        {
+            entry.CropSx = env.CropSx;
+            entry.CropSy = env.CropSy;
+            entry.CropTx = env.CropTx;
+            entry.CropTy = env.CropTy;
+        }
+    }
+
     void SetupAimLine()
     {
         _aimLine = gameObject.AddComponent<LineRenderer>();
@@ -473,8 +508,23 @@ public class SpatialRuntime : MonoBehaviour
 
     void UpdateAimLine()
     {
-        if (_aimLine == null || !_aimLine.enabled)
+        if (_aimLine == null)
             return;
+        bool rightTouchConnected = false;
+        try
+        {
+            rightTouchConnected = OVRInput.IsControllerConnected(OVRInput.Controller.RTouch);
+        }
+        catch (Exception)
+        {
+            rightTouchConnected = false;
+        }
+        if (!ShouldEnableAimLineForController(rightTouchConnected))
+        {
+            _aimLine.enabled = false;
+            return;
+        }
+        _aimLine.enabled = true;
         bool triggerHeld = false;
         try
         {
@@ -508,6 +558,10 @@ public class SpatialRuntime : MonoBehaviour
         if (_aimMaterial != null)
             _aimMaterial.color = color;
     }
+
+    /// <summary>Test seam: no connected right Touch controller means no aim line.</summary>
+    public static bool ShouldEnableAimLineForController(bool rightTouchConnected) =>
+        rightTouchConnected;
 
     internal static long ToUnixNanoseconds(DateTime timestamp)
     {
