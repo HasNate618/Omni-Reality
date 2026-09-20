@@ -25,8 +25,11 @@ LIVE_TURN_TIMEOUT_S = 12.0
 NO_IMAGE_RECOVERY = ("I couldn't get a camera image. "
                      "Check camera access or lighting, then ask again.")
 SESSION_DOWN_RECOVERY = "Sorry, I couldn't reach the model. Try again."
-IMAGE_TURN_PROMPT = ("Answer what I just asked about this image "
-                     "in at most twenty-five words.")
+IMAGE_TURN_PROMPT = ("You are the wearer's assistant standing here with them. "
+                     "Answer what I just asked directly in one or two short sentences. "
+                     "Never ask me what I want to know, and never mention images, "
+                     "photos, or length limits. Describe only what is visible; "
+                     "never invent details.")
 
 
 class _Turn:

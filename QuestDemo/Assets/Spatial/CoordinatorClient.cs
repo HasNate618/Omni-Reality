@@ -474,7 +474,7 @@ public class CoordinatorClient : MonoBehaviour
             byte[] pcm;
             if (!SpeakCloudPlayer.TryDecodePcmBase64(speak.AudioDataB64, out pcm))
             {
-                ShowVoiceFeedback("Speech audio unavailable. " + speak.Text, 12f);
+                ShowVoiceFeedback(speak.Text, 12f);
                 SpeakPlayer.TryPlay(speak.HasTurnId ? speak.TurnId : 0, speak.Text, null);
                 return;
             }
