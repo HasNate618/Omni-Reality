@@ -126,6 +126,9 @@ public class CoordinatorClient : MonoBehaviour
     internal Func<string> NewDrawingId;
     internal SpeakCloudPlayer SpeakPlayer;
     internal VoiceCaption Caption;
+    internal TrackingMaskOverlay TrackingOverlay;
+    internal PerceptionCapture TrackCapture;
+    internal bool TrackStreaming { get { return _trackStreaming; } }
 
     readonly ConcurrentQueue<string> _inbound = new ConcurrentQueue<string>();
     readonly ConcurrentQueue<string> _errors = new ConcurrentQueue<string>();
@@ -147,6 +150,10 @@ public class CoordinatorClient : MonoBehaviour
     bool _attemptFailed;
     string _pendingReplyId;
     float _replyStartedAt;
+    bool _trackStreaming;
+    int _trackingGeneration = -1;
+    float _lastTrackFrameAt = -1000f;
+    internal const float TrackFrameIntervalS = 0.2f;
     public bool PerceptionEnabled { get; private set; }
     public string SessionId { get { return _sessionId; } }
     public bool AwaitingReply { get { return _pendingReplyId != null; } }
@@ -216,6 +223,7 @@ public class CoordinatorClient : MonoBehaviour
                 _lastPingAt = now;
             }
             PumpInbound();
+            PumpTrackingStream(now);
             if (now - _lastPingAt >= PingIntervalS)
             {
                 _lastPingAt = now;
@@ -523,6 +531,66 @@ public class CoordinatorClient : MonoBehaviour
                 SpeakPlayer.FinishTurn(final.TurnId);
             return;
         }
+        if (type == "tracking_status")
+        {
+            string payload;
+            if (!ProtocolJson.TryGetPayloadObject(text, out payload))
+                return;
+            ProtocolJson.TrackingStatusMsg status;
+            if (!ProtocolJson.TryParseTrackingStatus(payload, out status))
+                return;
+            VoiceBootstrapLog.Log(VoiceBootstrapLog.ComponentCoordinator,
+                "tracking_status", ("track_state", status.State), ("generation", status.Generation));
+            if (status.State == "selecting" || status.State == "initializing"
+                || status.State == "tracking")
+            {
+                _trackingGeneration = Math.Max(_trackingGeneration, status.Generation);
+                _trackStreaming = true;
+            }
+            else
+            {
+                _trackStreaming = false;
+                if (TrackingOverlay != null)
+                    TrackingOverlay.Hide();
+            }
+            if (!string.IsNullOrEmpty(status.Text))
+                ShowVoiceFeedback(status.Text);
+            return;
+        }
+        if (type == "tracking_result")
+        {
+            string payload;
+            if (!ProtocolJson.TryGetPayloadObject(text, out payload))
+                return;
+            ProtocolJson.TrackingResultMsg result;
+            if (!ProtocolJson.TryParseTrackingResult(payload, out result))
+                return;
+            if (result.Generation < _trackingGeneration || TrackingOverlay == null)
+            {
+                VoiceBootstrapLog.Log(VoiceBootstrapLog.ComponentCoordinator,
+                    "tracking_result_stale", ("generation", result.Generation));
+                return;
+            }
+            if (result.HasStageEpoch && GetStageEpoch != null
+                && result.StageEpoch != GetStageEpoch())
+            {
+                VoiceBootstrapLog.Log(VoiceBootstrapLog.ComponentCoordinator,
+                    "tracking_stage_mismatch", ("generation", result.Generation));
+                _trackStreaming = false;
+                if (TrackingOverlay != null)
+                    TrackingOverlay.Hide();
+                return;
+            }
+            _trackingGeneration = result.Generation;
+            byte[] mask = null;
+            if (!string.IsNullOrEmpty(result.MaskB64))
+            {
+                try { mask = Convert.FromBase64String(result.MaskB64); }
+                catch (Exception) { mask = null; }
+            }
+            TrackingOverlay.Show(mask, result.Width, result.Height);
+            return;
+        }
         if (type == "turn_started")
             return;
         Debug.Log("CoordinatorClient: ignoring " + type);
@@ -669,6 +737,42 @@ public class CoordinatorClient : MonoBehaviour
         _outbox.Enqueue(PriorityFrame, ProtocolJson.BuildFrame(_sessionId, env, OpenUtteranceId));
     }
 
+    /// <summary>SAM2 stream frame while a highlight is live (5 fps, small JPEG).</summary>
+    internal void PumpTrackingStream(float now)
+    {
+        if (!_trackStreaming || !IsConnected || TrackCapture == null)
+            return;
+        // An open utterance is about to need the gate for its question frame.
+        if (OpenUtteranceId != null)
+            return;
+        if (now - _lastTrackFrameAt < TrackFrameIntervalS)
+            return;
+        _lastTrackFrameAt = now;
+        TrackCapture.Capture((env, jpeg, reason) =>
+        {
+            if (reason != null || env == null || jpeg == null)
+                return;
+            EnqueueTrackingFrame(env, jpeg);
+        });
+    }
+
+    /// <summary>Drop any in-flight tracking capture so a question frame wins the gate.</summary>
+    internal void CancelTrackCapture()
+    {
+        if (TrackCapture != null)
+            TrackCapture.Cancel();
+    }
+
+    internal bool EnqueueTrackingFrame(CaptureEnvelope env, byte[] jpeg)
+    {
+        if (!IsConnected || env == null || jpeg == null || jpeg.Length == 0
+            || jpeg.Length > 65536)
+            return false;
+        _outbox.Enqueue(PriorityFrame,
+            ProtocolJson.BuildTrackingFrame(_sessionId, env, Convert.ToBase64String(jpeg)));
+        return true;
+    }
+
     /// <summary>Queue the final JPEG in the SAME FIFO lane as audio and end.</summary>
     public bool EnqueuePerceptionFrame(string utteranceId, CaptureEnvelope env, byte[] jpeg)
     {
@@ -788,6 +892,10 @@ public class CoordinatorClient : MonoBehaviour
         PerceptionEnabled = false;
         _pendingReplyId = null;
         OpenUtteranceId = null;
+        _trackStreaming = false;
+        _trackingGeneration = -1;
+        if (TrackingOverlay != null)
+            TrackingOverlay.Hide();
         _outbox.Clear();
         while (_inbound.TryDequeue(out _)) { }
     }

@@ -69,6 +69,13 @@ class CoordinatorState:
         # Feeds the echo gate: the mic re-hearing our own reply is dropped.
         self.last_speak_pcm: bytes | None = None
         self.last_speak_at: float = 0.0
+        # SAM2 video tracking for the highlight tool (None = disabled).
+        # The bridge owns its frame history; the live turn seeds it from the
+        # model's highlight_object call. Question frame of the in-flight
+        # live turn, kept so the tool call can seed without another capture.
+        self.tracking: Any | None = None
+        self.sam2_url: str | None = None
+        self._live_frame: tuple | None = None
         self.artifact_port: int = ARTIFACT_PORT
         self.artifact_root: Path = Path(__file__).resolve().parent.parent / "artifacts" / "generated"
         self.clear_generation: int = 1

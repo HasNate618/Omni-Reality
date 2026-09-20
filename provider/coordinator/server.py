@@ -185,6 +185,14 @@ async def _handle_frame(ws: Any, state: CoordinatorState, message: dict) -> None
         )
         return
     state.accept_envelope(envelope)
+    if state.tracking is not None:
+        await _note_tracking_epoch(state, envelope)
+        payload = message["payload"]
+        if (payload.get("tracking") is True
+                and not payload.get("utterance_id")
+                and not message.get("utterance_id")):
+            await _feed_tracking_frame(state, message, envelope)
+            return
     _check_clock_skew(state, envelope.get("t_unix_ns"))
     if state.planner is not None:
         _attach_frame_to_utterance(state, message, envelope)
@@ -401,12 +409,46 @@ async def _silent_drop(state: CoordinatorState, send: Any, utterance_id: str) ->
         pass
 
 
+async def _note_tracking_epoch(state: CoordinatorState, envelope: dict) -> None:
+    """Pin the bridge origin to the latest stage; a stage change resets any
+    live track (its world moved) so masks never paint stale geometry."""
+    bridge = state.tracking
+    if bridge.epoch != envelope["stage_epoch"]:
+        if bridge.epoch is not None:
+            await bridge.reset()
+            await bridge.status("stopped", "Tracking origin changed; select the object again.")
+        bridge.epoch = envelope["stage_epoch"]
+
+
+async def _feed_tracking_frame(state: CoordinatorState, message: dict, envelope: dict) -> None:
+    """Feed one Quest stream frame into the SAM2 bridge history.
+
+    Bad frames log and drop, never fail a turn."""
+    from coordinator.sam2_bridge import TrackingError
+    bridge = state.tracking
+    try:
+        encoded = message["payload"].get("jpeg_b64")
+        if not isinstance(encoded, str) or len(encoded) > 470_000:
+            raise TrackingError("Missing or oversized camera JPEG.")
+        jpeg = base64.b64decode(encoded, validate=True)
+        bridge.history.add(envelope, jpeg)
+    except (TrackingError, binascii.Error, ValueError) as exc:
+        logger.warning("Tracking frame rejected: %s", exc)
+
+
 async def _close_live(state: CoordinatorState) -> None:
     live = getattr(state, "live", None)
     state.live = None
     if live is not None:
         try:
             await live.close()
+        except Exception:
+            pass
+    tracking = getattr(state, "tracking", None)
+    state.tracking = None
+    if tracking is not None:
+        try:
+            await tracking.stop()
         except Exception:
             pass
 
@@ -545,6 +587,7 @@ async def run_server(
     model: str | None = None,
     voice_only: bool = False,
     perception_qa: bool = False,
+    sam2_url: str | None = None,
 ) -> None:
     """Bind the coordinator WebSocket server (CLI: python -m coordinator.server)."""
     _validate_cli_args(argparse.ArgumentParser(), argparse.Namespace(
@@ -558,6 +601,10 @@ async def run_server(
         state = CoordinatorState(
             planner=make_planner(planner_kind, model, voice_only=voice_only, perception_qa=perception_qa)
         )
+        if sam2_url:
+            from coordinator.sam2_bridge import Sam2Bridge
+            state.sam2_url = sam2_url
+            state.tracking = Sam2Bridge(sam2_url, _turn_sender(ws, state))
         if planner_kind == "voice-stub":
             from voice.test_tone import make_test_tone
 
@@ -605,6 +652,11 @@ if __name__ == "__main__":
         "--perception-qa", action="store_true",
         help="one camera image per spoken question, no tools; yibu or offline voice-stub",
     )
+    parser.add_argument(
+        "--sam2-url", default=None,
+        help="SAM2 video-server ws:// URL: enables the highlight_object tool; "
+        "Quest streams frames while tracking (10 s TTL). No GPU server, no tracking.",
+    )
     args = parser.parse_args()
     _validate_cli_args(parser, args)
     try:
@@ -625,5 +677,6 @@ if __name__ == "__main__":
             args.model,
             voice_only=args.voice_only,
             perception_qa=args.perception_qa,
+            sam2_url=args.sam2_url,
         )
     )

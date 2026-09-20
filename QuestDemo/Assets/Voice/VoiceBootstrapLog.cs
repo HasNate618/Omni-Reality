@@ -23,6 +23,7 @@ public static class VoiceBootstrapLog
         "phase",
         "playback_state",
         "host",
+        "track_state",
     };
 
     /// <summary>PCM byte length from base64 without retaining or logging payload.</summary>

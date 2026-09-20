@@ -163,6 +163,10 @@ public class SpatialRuntime : MonoBehaviour
             var capture = go.AddComponent<PerceptionCapture>();
             capture.CameraSource = _pca;
             capture.Runtime = this;
+            var overlay = go.AddComponent<TrackingMaskOverlay>();
+            overlay.Anchor = _centerEye;
+            _coord.TrackingOverlay = overlay;
+            _coord.TrackCapture = capture;
             var mic = go.AddComponent<MicUtterance>();
             mic.Perception = capture;
             _coord.Cache = _cache;

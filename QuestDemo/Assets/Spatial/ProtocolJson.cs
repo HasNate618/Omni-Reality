@@ -262,6 +262,22 @@ public static class ProtocolJson
         return BuildFrame(sessionId, env, utteranceId, null);
     }
 
+    /// <summary>SAM2 stream frame: small JPEG, no utterance, tracking flag set.</summary>
+    public static string BuildTrackingFrame(string sessionId, CaptureEnvelope env, string jpegBase64)
+    {
+        var sb = new StringBuilder(640);
+        sb.Append("{\"envelope\":");
+        sb.Append(ToSpecJson(env));
+        if (!string.IsNullOrEmpty(jpegBase64))
+        {
+            sb.Append(",\"jpeg_b64\":\"");
+            AppendEscaped(sb, jpegBase64);
+            sb.Append('"');
+        }
+        sb.Append(",\"tracking\":true}");
+        return WrapMessage("frame", sessionId, 0, sb.ToString());
+    }
+
     /// <summary>One per-question JPEG with the matching capture-time envelope.</summary>
     public static string BuildFrame(string sessionId, CaptureEnvelope env, string utteranceId, string jpegBase64)
     {
@@ -614,6 +630,101 @@ public static class ProtocolJson
         string gate;
         TryGetStringOrNull(payloadJson, "voice_gate", out gate, out found);
         msg = new SpeakFinalMsg { TurnId = (int)turnId, Text = text, VoiceGate = gate };
+        return true;
+    }
+
+    /// <summary>SAM2 tracking status: selecting/initializing/tracking/stopped/error.</summary>
+    public sealed class TrackingStatusMsg
+    {
+        public string State;
+        public string Text;
+        public int Generation;
+    }
+
+    /// <summary>One SAM2 tracking result; MaskB64 null means the track is lost.</summary>
+    public sealed class TrackingResultMsg
+    {
+        public string FrameId;
+        public string SeedFrameId;
+        public int Generation;
+        public int Width;
+        public int Height;
+        public string MaskB64;
+        public bool HasStageEpoch;
+        public int StageEpoch;
+    }
+
+    /// <summary>Parse a tracking_status payload. False when state missing.</summary>
+    public static bool TryParseTrackingStatus(string payloadJson, out TrackingStatusMsg msg)
+    {
+        msg = null;
+        if (string.IsNullOrEmpty(payloadJson))
+            return false;
+        string state;
+        bool found;
+        if (!TryGetStringOrNull(payloadJson, "state", out state, out found) || !found)
+            return false;
+        string text;
+        TryGetStringOrNull(payloadJson, "text", out text, out found);
+        long generation;
+        TryGetLong(payloadJson, "generation", out generation);
+        msg = new TrackingStatusMsg { State = state, Text = text, Generation = (int)generation };
+        return true;
+    }
+
+    /// <summary>Parse a tracking_result payload. MaskB64 null when no objects.</summary>
+    public static bool TryParseTrackingResult(string payloadJson, out TrackingResultMsg msg)
+    {
+        msg = null;
+        if (string.IsNullOrEmpty(payloadJson))
+            return false;
+        var parsed = new TrackingResultMsg();
+        string value;
+        bool found;
+        if (TryGetStringOrNull(payloadJson, "frame_id", out value, out found) && found)
+            parsed.FrameId = value;
+        if (TryGetStringOrNull(payloadJson, "seed_frame_id", out value, out found) && found)
+            parsed.SeedFrameId = value;
+        long number;
+        if (TryGetLong(payloadJson, "generation", out number))
+            parsed.Generation = (int)number;
+        if (TryGetLong(payloadJson, "width", out number))
+            parsed.Width = (int)number;
+        if (TryGetLong(payloadJson, "height", out number))
+            parsed.Height = (int)number;
+        int objectsAt = IndexOfKey(payloadJson, "objects", 0);
+        if (objectsAt >= 0)
+        {
+            int valueAt = SkipValueStart(payloadJson, objectsAt);
+            if (valueAt >= 0 && valueAt < payloadJson.Length && payloadJson[valueAt] == '[')
+            {
+                int braceAt = payloadJson.IndexOf('{', valueAt);
+                string firstJson;
+                int endAt;
+                if (braceAt >= 0 && ExtractBraced(payloadJson, braceAt, out firstJson, out endAt))
+                    if (TryGetStringOrNull(firstJson, "mask_b64", out value, out found) && found)
+                        parsed.MaskB64 = value;
+            }
+        }
+        int envelopeAt = IndexOfKey(payloadJson, "envelope", 0);
+        if (envelopeAt >= 0)
+        {
+            int valueAt = SkipValueStart(payloadJson, envelopeAt);
+            if (valueAt >= 0 && valueAt < payloadJson.Length && payloadJson[valueAt] == '{')
+            {
+                string envJson;
+                int endAt;
+                if (ExtractBraced(payloadJson, valueAt, out envJson, out endAt)
+                    && TryGetLong(envJson, "stage_epoch", out number))
+                {
+                    parsed.HasStageEpoch = true;
+                    parsed.StageEpoch = (int)number;
+                }
+            }
+        }
+        if (string.IsNullOrEmpty(parsed.FrameId))
+            return false;
+        msg = parsed;
         return true;
     }
 

@@ -492,6 +492,8 @@ public class MicUtterance : MonoBehaviour
         }
         else if (_client.PerceptionEnabled && Perception != null)
         {
+            // The question frame wins the capture gate over tracking streams.
+            _client.CancelTrackCapture();
             Perception.Capture((env, jpeg, reason) => FinishUtterance(id, env, jpeg, reason, true));
         }
         else

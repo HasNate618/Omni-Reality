@@ -41,6 +41,7 @@ class LiveSession:
         on_interrupted: Callable[[], None] | None = None,
         on_usage: Callable[[dict], None] | None = None,
         on_turn_end: Callable[[], None] | None = None,
+        on_tool_call: Callable[[str, dict, str], None] | None = None,
         connector: Callable[[], Awaitable[Any]] | None = None,
     ) -> None:
         self._api_key = api_key
@@ -52,6 +53,7 @@ class LiveSession:
         self._on_interrupted = on_interrupted or _noop
         self._on_usage = on_usage or _noop
         self._on_turn_end = on_turn_end or _noop
+        self._on_tool_call = on_tool_call or _noop
         self._connector = connector or self._default_connector
         self._ws: Any | None = None
         self._send_lock = asyncio.Lock()
@@ -77,6 +79,7 @@ class LiveSession:
     async def connect(self, timeout: float = 20.0) -> None:
         ws = await self._connector()
         try:
+            from coordinator.live_turn import HIGHLIGHT_DECL
             await ws.send(json.dumps({"setup": {
                 "model": f"models/{self._model}",
                 "generationConfig": {"responseModalities": ["AUDIO"], "temperature": 0.2,
@@ -84,6 +87,7 @@ class LiveSession:
                         "voiceName": "Kore"}}}},
                 "outputAudioTranscription": {},
                 "inputAudioTranscription": {},
+                "tools": [{"functionDeclarations": [HIGHLIGHT_DECL]}],
             }}))
             while True:
                 event = json.loads(await asyncio.wait_for(ws.recv(), timeout))
@@ -150,10 +154,21 @@ class LiveSession:
         if not isinstance(event, dict):
             return
         # Type names only (never content): reveals wedges like GoAway/errors.
-        known = {"setupComplete", "serverContent"}
+        known = {"setupComplete", "serverContent", "toolCall"}
         for key in event:
             if key not in known and key != "usageMetadata":
                 logger.info("live session event type=%s", str(key)[:32])
+        tool_call = event.get("toolCall")
+        if isinstance(tool_call, dict):
+            calls = tool_call.get("functionCalls")
+            if isinstance(calls, list):
+                for call in calls:
+                    if not isinstance(call, dict):
+                        continue
+                    args = call.get("args")
+                    self._guard(self._on_tool_call, str(call.get("name") or ""),
+                                args if isinstance(args, dict) else {},
+                                str(call.get("id") or ""))
         if isinstance(event.get("usageMetadata"), dict):
             self._guard(self._on_usage, dict(event["usageMetadata"]))
         server = event.get("serverContent")
@@ -191,6 +206,19 @@ class LiveSession:
         except Exception as exc:
             logger.info("live session callback failed exception_class=%s",
                         type(exc).__name__)
+
+    async def send_tool_response(self, call_id: str, name: str, result: dict) -> None:
+        """Answer one function call so the model keeps talking (silent tool)."""
+        ws = self._ws
+        if ws is None or not call_id:
+            return
+        frame = {"toolResponse": {"functionResponses": [{
+            "id": call_id, "name": name, "response": {"result": result}}]}}
+        try:
+            async with self._send_lock:
+                await ws.send(json.dumps(frame))
+        except Exception:
+            pass
 
     async def close(self) -> None:
         ws, task = self._ws, self._recv_task

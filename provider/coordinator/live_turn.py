@@ -25,11 +25,32 @@ LIVE_TURN_TIMEOUT_S = 12.0
 NO_IMAGE_RECOVERY = ("I couldn't get a camera image. "
                      "Check camera access or lighting, then ask again.")
 SESSION_DOWN_RECOVERY = "Sorry, I couldn't reach the model. Try again."
+HIGHLIGHT_DECL = {
+    "name": "highlight_object",
+    "description": ("Highlight one visible object for the wearer. "
+                      "u/v locate it as fractions across the attached photo."),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "label": {"type": "string",
+                       "description": "Short name of the object, e.g. the red mug."},
+            "u": {"type": "number",
+                  "description": "Horizontal position, 0 left to 1 right."},
+            "v": {"type": "number",
+                  "description": "Vertical position, 0 top to 1 bottom."},
+        },
+        "required": ["label", "u", "v"],
+    },
+}
+
 IMAGE_TURN_PROMPT = ("You are the wearer's assistant standing here with them. "
                      "Answer what I just asked directly in one or two short sentences. "
                      "Never ask me what I want to know, and never mention images, "
                      "photos, or length limits. Describe only what is visible; "
-                     "never invent details.")
+                     "never invent details. If I ask you to show, highlight, find, "
+                     "or point out something visible, call highlight_object with a "
+                     "short label and its u v position, and say briefly what you "
+                     "are highlighting.")
 
 
 class _Turn:
@@ -58,6 +79,7 @@ def _callbacks(state: CoordinatorState):
         on_interrupted=lambda: _on_interrupted(state),
         on_usage=lambda u: _on_usage(state, u),
         on_turn_end=lambda: _on_turn_end(state),
+        on_tool_call=lambda name, args, call_id: _on_tool_call(state, name, args, call_id),
     )
 
 
@@ -106,6 +128,97 @@ async def speak_down(state: CoordinatorState, send: Any, utterance_id: str) -> i
     return turn_id
 
 
+def parse_highlight_args(args: Any, sent_w: Any = None, sent_h: Any = None) -> dict | None:
+    """Validate highlight_object args into a seed target with label.
+
+    u/v are fractions across the question photo; bare pixels are accepted
+    too (the model habit) and normalized when the photo size is known.
+    Anything else returns None: the tool answers unseeded, never invents."""
+    import math
+    if not isinstance(args, dict):
+        return None
+    label = args.get("label")
+    u, v = args.get("u"), args.get("v")
+    if not isinstance(label, str) or not label.strip():
+        return None
+    if any(isinstance(n, bool) or not isinstance(n, (int, float))
+           or not math.isfinite(n) for n in (u, v)):
+        return None
+    if u > 1:
+        if not isinstance(sent_w, (int, float)) or sent_w <= 0:
+            return None
+        u = u / sent_w
+    if v > 1:
+        if not isinstance(sent_h, (int, float)) or sent_h <= 0:
+            return None
+        v = v / sent_h
+    if not 0 <= u <= 1 or not 0 <= v <= 1:
+        return None
+    return {"type": "image_point", "u": u, "v": v, "label": label.strip()[:64]}
+
+
+class _Preempted(Exception):
+    """The turn was tombstoned (barge-in) mid-seed: stop, never paint."""
+
+
+def _on_tool_call(state: CoordinatorState, name: str, args: dict, call_id: str) -> None:
+    """Dispatch a Live function call (sync callback: schedule the work)."""
+    if name != HIGHLIGHT_DECL["name"] or not call_id:
+        return
+    logger.info("VoiceBootstrap component=coordinator event=highlight_tool_called")
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(handle_highlight_tool(state, args, call_id))
+
+
+async def handle_highlight_tool(state: CoordinatorState, args: dict, call_id: str) -> None:
+    """Seed SAM2 tracking from highlight_object and answer the tool call.
+
+    Seeds on the in-flight turn's question frame; the tool response tells
+    the model whether the highlight is live. No bridge, frame, or target:
+    honest failure, never a guess."""
+    from coordinator.sam2_bridge import TrackingError
+    ok, text = False, "Highlighting is unavailable."
+    live = getattr(state, "live", None)
+    turn = getattr(state, "_live_turn", None)
+    bridge = getattr(state, "tracking", None)
+    framed = getattr(state, "_live_frame", None)
+    if (live is not None and turn is not None and not turn.tombstoned
+            and bridge is not None and framed is not None):
+        envelope, jpeg = framed
+        target = parse_highlight_args(args, envelope.get("sent_w"), envelope.get("sent_h"))
+        if target is not None and jpeg:
+            try:
+                generation = await bridge.begin(turn.turn_id, turn.utterance_id)
+                if turn.tombstoned:
+                    raise _Preempted()
+                frame = bridge.history.add(envelope, jpeg)
+                await bridge.seed(frame, target, generation)
+                if turn.tombstoned:
+                    raise _Preempted()
+                ok, text = True, f"Selecting {target['label']}…"
+            except _Preempted:
+                try:
+                    await bridge.stop()
+                except Exception:
+                    pass
+                text = "Interrupted."
+            except TrackingError as exc:
+                text = str(exc)
+            except Exception as exc:
+                logger.info("highlight seed failed exception_class=%s", type(exc).__name__)
+                text = "Highlighting is unavailable."
+    if live is not None:
+        try:
+            await live.send_tool_response(call_id, HIGHLIGHT_DECL["name"],
+                                          {"ok": ok, "message": text})
+        except Exception as exc:
+            logger.info("highlight tool response dropped exception_class=%s",
+                        type(exc).__name__)
+
+
 async def start_live_turn(state: CoordinatorState, send: Any,
                           utterance_id: str, buf: Any) -> int | None:
     """Run one utterance through the live session. Returns turn_id or None."""
@@ -125,6 +238,13 @@ async def start_live_turn(state: CoordinatorState, send: Any,
                     "turn_id=%d", previous.turn_id)
     state.turn_id += 1
     turn_id = state.turn_id
+    state._live_frame = None
+    if getattr(state, "tracking", None) is not None:
+        # A new question supersedes any live track (including barge-in).
+        try:
+            await state.tracking.stop()
+        except Exception:
+            pass
     log_turn_started(turn_id=turn_id, mode="live_session", pcm_bytes=len(buf.pcm))
     await send("turn_started", turn_id,
                {"utterance_id": utterance_id, "turn_id": turn_id}, utterance_id)
@@ -138,6 +258,7 @@ async def start_live_turn(state: CoordinatorState, send: Any,
             perception_frame("perception_degraded", reason=reason)
             await speak_recovery(state, send, turn_id, utterance_id, NO_IMAGE_RECOVERY)
             return turn_id
+        state._live_frame = (buf.envelope, bytes(buf.jpeg))
         await state.live.start_image_turn(bytes(buf.jpeg), bytes(buf.pcm), IMAGE_TURN_PROMPT)
         try:
             await asyncio.wait_for(turn.event.wait(), LIVE_TURN_TIMEOUT_S)
@@ -161,6 +282,7 @@ async def start_live_turn(state: CoordinatorState, send: Any,
     finally:
         if getattr(state, "_live_turn", None) is turn:
             state._live_turn = None
+        state._live_frame = None
     return turn_id
 
 
