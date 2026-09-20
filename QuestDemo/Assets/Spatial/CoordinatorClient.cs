@@ -459,6 +459,16 @@ public class CoordinatorClient : MonoBehaviour
             {
                 if (!PrepareSceneOp(op))
                     return;
+                if (op.Kind == "revise_procedural" && Store != null &&
+                    Store.HasGenerated(op.DrawingId))
+                {
+                    string genError;
+                    bool genOk = Store.ApplyGeneratedRevision(
+                        op.DrawingId, op.Action, op.Direction, out genError);
+                    EnqueueAck(op, genOk ? "applied" : "rejected", op.DrawingId,
+                        genOk ? null : genError, null);
+                    return;
+                }
                 ProceduralFactory.TryHandle(this, op);
                 return;
             }

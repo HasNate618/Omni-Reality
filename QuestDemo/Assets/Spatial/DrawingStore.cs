@@ -272,6 +272,70 @@ public class DrawingStore : MonoBehaviour
         return true;
     }
 
+    /// <summary>
+    /// Revise one generated placement. Nudge, rotate, and remove apply;
+    /// enlarge and shrink are refused because the listed size is the claim
+    /// (spec §7.3) and voice must not quietly break it.
+    /// </summary>
+    public bool ApplyGeneratedRevision(
+        string drawingId, string action, string direction, out string error)
+    {
+        error = null;
+        GeneratedRecord rec = null;
+        if (string.IsNullOrEmpty(drawingId) || !_generated.TryGetValue(drawingId, out rec))
+        {
+            error = "invalid";
+            return false;
+        }
+        if (rec.Root == null)
+        {
+            _generated.Remove(drawingId);
+            error = "invalid";
+            return false;
+        }
+        if (action == "remove")
+        {
+            _generated.Remove(drawingId);
+            _marks.Remove(rec.Root);
+            DestroyMark(rec.Root);
+            return true;
+        }
+        if (action == "enlarge" || action == "shrink")
+        {
+            error = "invalid";
+            return false;
+        }
+        Transform t = rec.Root.transform;
+        if (action == "rotate_cw" || action == "rotate_ccw")
+        {
+            float step = action == "rotate_cw"
+                ? -ProceduralFactory.RotateStepDeg
+                : ProceduralFactory.RotateStepDeg;
+            t.Rotate(Vector3.up, step, Space.Self);
+            return true;
+        }
+        if (action == "nudge")
+        {
+            Vector3 dir;
+            Vector3 flat = new Vector3(t.forward.x, 0f, t.forward.z);
+            if (flat.sqrMagnitude < 1e-6f)
+                flat = Vector3.forward;
+            Transform frame = t;
+            frame.rotation = Quaternion.LookRotation(flat.normalized, Vector3.up);
+            if (!NudgeDirection(direction, frame, out dir))
+            {
+                error = "invalid";
+                return false;
+            }
+            // Floor plane only: generated furniture is not lifted.
+            dir.y = 0f;
+            t.position += dir.normalized * ProceduralFactory.NudgeStepM;
+            return true;
+        }
+        error = "invalid";
+        return false;
+    }
+
     public GameObject PlaceProcedural(
         Vector3 point, Vector3 normal, string drawingId,
         System.Collections.Generic.List<ProtocolJson.ProceduralElement> elements)
