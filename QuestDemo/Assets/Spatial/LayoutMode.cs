@@ -92,7 +92,14 @@ public sealed class LayoutMode : MonoBehaviour
     /// </summary>
     public static bool IsArmed
     {
-        get { return _instance != null && _instance._armed; }
+        get
+        {
+            // Choosing Interior Design arms it. It used to wait for the first
+            // place_box, so A did nothing until you had already summoned a
+            // corner -- the furniture menu was unreachable from a cold start.
+            return ModeLauncher.Chosen == ModeLauncher.Mode.Layout
+                   || (_instance != null && _instance._armed);
+        }
     }
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
@@ -141,7 +148,7 @@ public sealed class LayoutMode : MonoBehaviour
         // The picker owns the controller while it is up.
         if (ModeLauncher.IsOpen)
             return;
-        if (!_armed)
+        if (!IsArmed)
             return;
 
         // A opens the furniture menu; B toggles resize. Button.One IS A on

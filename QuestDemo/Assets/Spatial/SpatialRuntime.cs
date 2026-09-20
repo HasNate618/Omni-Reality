@@ -189,10 +189,11 @@ public class SpatialRuntime : MonoBehaviour
             capture.Runtime = this;
             var mic = go.AddComponent<MicUtterance>();
             mic.Perception = capture;
-            // A-mode (QuestStreamInput push-to-talk) owns the microphone while
-            // tracking is on; B hands it to the conversation loop.
-            if (ModeLauncher.Chosen != ModeLauncher.Mode.Layout
-                && _trackingSettings != null && _trackingSettings.enableTracking)
+            // QuestStreamInput's push-to-talk owns the microphone; B hands it
+            // to the conversation loop. MicUtterance also binds A for its
+            // listening toggle, so leaving it enabled in Layout mode stole A
+            // from the furniture menu -- pressing A said "listening" instead.
+            if (_trackingSettings != null && _trackingSettings.enableTracking)
                 mic.enabled = false;
             _coord.Cache = _cache;
             _coord.Store = _store;

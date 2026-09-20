@@ -187,6 +187,14 @@ public class MicUtterance : MonoBehaviour
 
     void PollToggleButton()
     {
+        // A belongs to the picker and to Layout's furniture menu. This
+        // component is normally disabled in those modes; the guard is here
+        // because when it was not, A silently became "listening".
+        if (ModeLauncher.IsOpen || ModeLauncher.Chosen == ModeLauncher.Mode.Layout)
+        {
+            _toggleWasHeld = PttHeld();
+            return;
+        }
         bool held = PttHeld();
         if (held && !_toggleWasHeld)
             ToggleListening();
