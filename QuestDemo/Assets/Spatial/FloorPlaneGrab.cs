@@ -46,6 +46,9 @@ public class FloorPlaneGrab : MonoBehaviour
         grab.trackPosition = false;
         grab.trackRotation = false;
         grab.trackScale = false;
+        // The body is kinematic, so Detach would log a warning on every
+        // release before early-returning.
+        grab.throwOnDetach = false;
     }
 
     /// <summary>Attach a grabbable to a generated root. Returns the constraint.</summary>
@@ -84,6 +87,11 @@ public class FloorPlaneGrab : MonoBehaviour
 
     void OnDisable()
     {
+        // The listeners are gone, so a still-held root would keep being driven
+        // from a hand with no active selection. Drop the grab state with them.
+        _held = false;
+        _interactor = null;
+        _interactable = null;
         XRGrabInteractable grab = GetComponent<XRGrabInteractable>();
         if (grab == null)
             return;

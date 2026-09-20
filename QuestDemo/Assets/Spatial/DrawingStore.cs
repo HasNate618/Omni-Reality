@@ -364,17 +364,21 @@ public class DrawingStore : MonoBehaviour
         }
         if (action == "nudge")
         {
-            Vector3 dir;
             Vector3 flat = new Vector3(t.forward.x, 0f, t.forward.z);
             if (flat.sqrMagnitude < 1e-6f)
                 flat = Vector3.forward;
-            Transform frame = t;
-            frame.rotation = Quaternion.LookRotation(flat.normalized, Vector3.up);
+            // The floor-plane frame the root is re-laid in. The direction is
+            // resolved against that frame before it is written, so a rejected
+            // nudge cannot rewrite the root's rotation — the same order the
+            // procedural path uses.
+            Quaternion frame = Quaternion.LookRotation(flat.normalized, Vector3.up);
+            Vector3 dir;
             if (!NudgeDirection(direction, frame, out dir))
             {
                 error = "invalid";
                 return false;
             }
+            t.rotation = frame;
             // Floor plane only: generated furniture is not lifted.
             dir.y = 0f;
             t.position += dir.normalized * ProceduralFactory.NudgeStepM;
@@ -455,7 +459,7 @@ public class DrawingStore : MonoBehaviour
         if (action == "nudge")
         {
             Vector3 dir;
-            if (!NudgeDirection(direction, t, out dir))
+            if (!NudgeDirection(direction, t.rotation, out dir))
             {
                 error = "invalid";
                 return false;
@@ -467,16 +471,26 @@ public class DrawingStore : MonoBehaviour
         return false;
     }
 
-    static bool NudgeDirection(string direction, Transform frame, out Vector3 dir)
+    /// <summary>
+    /// The frame's axis for a direction word; false for an unknown word. The
+    /// axis is the rotation applied to the world unit vector, which is exactly
+    /// the transform's own right/up/forward for that rotation — so the
+    /// procedural path is unchanged, and a caller can resolve a direction
+    /// before writing the rotation it belongs to.
+    /// </summary>
+    static bool NudgeDirection(string direction, Quaternion frame, out Vector3 dir)
     {
+        Vector3 right = frame * Vector3.right;
+        Vector3 up = frame * Vector3.up;
+        Vector3 forward = frame * Vector3.forward;
         switch (direction)
         {
-            case "left": dir = -frame.right; return true;
-            case "right": dir = frame.right; return true;
-            case "up": dir = frame.up; return true;
-            case "down": dir = -frame.up; return true;
-            case "forward": dir = frame.forward; return true;
-            case "back": dir = -frame.forward; return true;
+            case "left": dir = -right; return true;
+            case "right": dir = right; return true;
+            case "up": dir = up; return true;
+            case "down": dir = -up; return true;
+            case "forward": dir = forward; return true;
+            case "back": dir = -forward; return true;
             default: dir = Vector3.zero; return false;
         }
     }

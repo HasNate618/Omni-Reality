@@ -465,8 +465,13 @@ public class CoordinatorClient : MonoBehaviour
                     string genError;
                     bool genOk = Store.ApplyGeneratedRevision(
                         op.DrawingId, op.Action, op.Direction, out genError);
-                    EnqueueAck(op, genOk ? "applied" : "rejected", op.DrawingId,
-                        genOk ? null : genError, null);
+                    // placement_ack requires a null drawing_id and a reason on a
+                    // rejection: a non-null id fails validation, the ack is
+                    // dropped, and the op never settles.
+                    EnqueueAck(op, genOk ? "applied" : "rejected",
+                        genOk ? op.DrawingId : null,
+                        genOk ? null : (genError ?? "invalid"),
+                        null);
                     return;
                 }
                 ProceduralFactory.TryHandle(this, op);
