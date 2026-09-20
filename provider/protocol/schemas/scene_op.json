@@ -33,7 +33,14 @@
     "text": { "type": "string", "maxLength": 48 },
     "asset_id": { "type": "string" },
     "scale": { "type": "number", "minimum": 0.1, "maximum": 2 },
-    "job_id": { "$ref": "#/$defs/ulid" }
+    "job_id": { "$ref": "#/$defs/ulid" },
+    "extent_m": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "type": "number", "minimum": 0.05, "maximum": 3.0 }
+    },
+    "offset_m": { "type": "number", "minimum": -3.0, "maximum": 3.0 }
   },
   "allOf": [
     {

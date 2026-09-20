@@ -1,0 +1,11 @@
+{
+  "op_id": "01k5j8g0019q3m7b2d6h9n4r5v",
+  "turn_id": 4,
+  "stage_epoch": 1,
+  "kind": "place_generated",
+  "drawing_id": null,
+  "job_id": "01m2xbae3n81b4scq0k83teqjw",
+  "extent_m": [0.55, 0.40, 0.72],
+  "offset_m": 0.0,
+  "target": { "type": "capture_hint", "frame_id": "01k5j8g0008q3m7b2d6h9n4r5v" }
+}

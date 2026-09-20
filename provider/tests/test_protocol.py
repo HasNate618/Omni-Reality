@@ -350,6 +350,47 @@ class SchemaTests(unittest.TestCase):
             with self.subTest(missing=key), self.assertRaises(ValidationError):
                 validate_instance("model_scene_op", bad)
 
+    def test_valid_place_generated_with_extent(self) -> None:
+        data = load_fixture("valid", "scene_op_place_generated_extent.json")
+        validate_instance("scene_op", data)
+
+    def test_extent_must_be_exactly_three_numbers(self) -> None:
+        data = load_fixture("valid", "scene_op_place_generated_extent.json")
+        for bad in ([0.55, 0.40], [0.55, 0.40, 0.72, 0.10], [0.55, 0.40, "tall"]):
+            data["extent_m"] = bad
+            with self.assertRaises(ValidationError):
+                validate_instance("scene_op", data)
+
+    def test_extent_axes_out_of_range_rejected(self) -> None:
+        data = load_fixture("valid", "scene_op_place_generated_extent.json")
+        for bad in ([0.04, 0.40, 0.72], [0.55, 0.40, 3.01], [-0.55, 0.40, 0.72]):
+            data["extent_m"] = bad
+            with self.assertRaises(ValidationError):
+                validate_instance("scene_op", data)
+
+    def test_model_cannot_smuggle_extents_into_a_valid_op(self) -> None:
+        # A valid model op with extent_m bolted on must be refused:
+        # model_scene_op is additionalProperties:false, and that is what keeps
+        # sizes off the model's wire.
+        data = load_fixture("valid", "scene_op_procedural.json")
+        data["extent_m"] = [0.55, 0.40, 0.72]
+        with self.assertRaises(ValidationError):
+            validate_instance("model_scene_op", data)
+
+    def test_place_generated_is_not_a_model_kind(self) -> None:
+        data = load_fixture("valid", "scene_op_place_generated_extent.json")
+        with self.assertRaises(ValidationError):
+            validate_instance("model_scene_op", data)
+
+    def test_offset_is_optional_and_bounded(self) -> None:
+        data = load_fixture("valid", "scene_op_place_generated_extent.json")
+        data.pop("offset_m", None)
+        validate_instance("scene_op", data)
+        for bad in (-3.01, 3.01):
+            data["offset_m"] = bad
+            with self.assertRaises(ValidationError):
+                validate_instance("scene_op", data)
+
 
 class StaleTests(unittest.TestCase):
     def test_same_ray_far_is_stale(self) -> None:
