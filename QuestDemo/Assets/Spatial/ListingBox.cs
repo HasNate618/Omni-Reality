@@ -89,7 +89,11 @@ public static class ListingBox
         Renderer rend = root.GetComponent<Renderer>();
         if (rend != null)
         {
-            rend.material = new Material(Shader.Find("Unlit/Color"));
+            // Unlit/Transparent, not Unlit/Color: Unlit/Color is an opaque pass
+            // whose fragment forces alpha to 1, so the alpha below would be
+            // inert and the box would render solid. TrackingMaskOverlay already
+            // uses Unlit/Transparent for the same reason.
+            rend.material = new Material(Shader.Find("Unlit/Transparent"));
             Color c = PulsingRing.RingColor;
             c.a = 0.25f;
             rend.material.color = c;
