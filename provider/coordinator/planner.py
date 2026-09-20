@@ -216,7 +216,8 @@ def _parse_reply(text: str) -> tuple[str, str | None, list]:
     obj = _extract_json_object(text)
     if obj is None:
         return text.strip(), None, []
-    say = obj.get("say") if isinstance(obj.get("say"), str) else ""
+    raw_say = obj.get("say")
+    say = raw_say if isinstance(raw_say, str) else ""
     heard = obj.get("heard") if isinstance(obj.get("heard"), str) else None
     return say, heard, obj.get("ops") or []
 
@@ -250,7 +251,7 @@ class YibuPlanner:
         self._frame_id: str | None = None
         self._inspect_fn: Any | None = None
         self._queue_fn: Any | None = None
-        self._listings: Any | None = None
+        self._listings: Any = None
         self._prebaked: dict[str, str] = {}
         self._coordinator_ops: list[dict] = []
 
@@ -316,6 +317,7 @@ class YibuPlanner:
                 current_frame_id=self._frame_id,
                 prebaked=self._prebaked,
                 queue_fn=self._queue_fn or _default_queue_fn,
+                jpeg_b64=self._jpeg_b64,
             )
             if op is not None:
                 self._coordinator_ops.append(op)

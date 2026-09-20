@@ -103,6 +103,7 @@ async def handle_place_item(
     current_frame_id: str | None,
     prebaked: dict[str, str],
     queue_fn: Any | None = None,
+    jpeg_b64: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Validate one place_item call. Returns (tool_result, coordinator_op).
 
@@ -134,6 +135,9 @@ async def handle_place_item(
             "status": "ready",
             "extent_m": extents,
             "planted": True,
+            # Operator-owned artifact: session teardown must not unlink it
+            # (spec §5.3), or one demo take deletes the night-before bake.
+            "prebaked": True,
         }
         return result
 
@@ -159,13 +163,14 @@ async def handle_place_item(
     # which refuses every later placement.
     try:
         if queue_fn is not None:
+            # Exactly the six kwargs workers.gen_client.queue_job accepts; pack
+            # and extent arithmetic stay coordinator/Quest-owned (spec §7.1).
             await _maybe_await(queue_fn(
                 job_id=job_id,
                 frame_id=current_frame_id,
-                jpeg_b64=None,
+                jpeg_b64=jpeg_b64,
                 prompt=name,
                 mask_png_b64=None,
-                extent_m=extents,
             ))
         return _place_result(listings, name, extents, target, current_frame_id, job_id)
     except BusyError:

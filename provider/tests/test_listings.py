@@ -120,6 +120,33 @@ class HandlePlaceItemTests(unittest.TestCase):
         self.assertEqual(result["error"], "invalid")
         self.assertIsNone(op)
 
+    def test_queue_kwargs_match_the_real_worker_signature(self) -> None:
+        # Regression guard for C1: every fake queue_fn in this file was a
+        # **kwargs stub, which accepted an `extent_m` kwarg and hid the
+        # TypeError that killed every non-pre-baked placement before any HTTP
+        # request. The sent kwargs must be a subset of the real signature.
+        import inspect
+
+        from workers.gen_client import queue_job
+
+        sent: dict = {}
+
+        async def queue_fn(**kwargs):
+            sent.update(kwargs)
+            return {"status": "queued"}
+
+        asyncio.run(handle_place_item(
+            self.store, listings=self.memory, args=self._good(),
+            current_frame_id=_FRAME, prebaked={}, queue_fn=queue_fn,
+            jpeg_b64="qq==",
+        ))
+        accepted = set(inspect.signature(queue_job).parameters)
+        self.assertTrue(
+            set(sent) <= accepted, f"unexpected kwargs: {set(sent) - accepted}")
+        # The worker is image→3D only; a None jpeg would leave it nothing to
+        # generate from. handle_place_item carries the turn's frame JPEG here.
+        self.assertEqual(sent["jpeg_b64"], "qq==")
+
     def test_empty_name_refused(self) -> None:
         args = self._good()
         args["name"] = "   "
