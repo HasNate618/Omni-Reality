@@ -121,6 +121,11 @@ placement frame is §6.2.
 
 - New optional property `extent_m`: array of exactly 3 numbers, each ≥ 0.05 and
   ≤ 3.0.
+- New optional property `offset_m`: a number between −3.0 and 3.0, the
+  frame-relative distance along the placement frame's width axis that this
+  item's centre sits from the first item's centre (§7.1). It is metres in a
+  local frame, the same category as `extent_m`, which is why it may be on the
+  wire while `world_point` may not.
 - When present, it is authoritative for the planted object's box.
 - When absent, behaviour is unchanged (unit-sphere fit). This keeps existing
   fixtures and the shop-to-life path working.
@@ -243,9 +248,12 @@ placeholder cube is no longer the failure mode for `place_generated`.
 ### 7.1 Packing rule
 
 Items pack along the horizontal width axis of the placement frame (§6.2), the
-direction the row of objects runs across the wearer's view. The first item's
-box front is at the hit; each subsequent item's centre offsets by the previous
-width plus a 0.05 m gap, sharing one floor height and one facing.
+direction the row of objects runs across the wearer's view. The **first item
+is centred on the hit**, so a lone placement lands where the wearer pointed;
+each later item's centre offsets from the first by the widths between them
+plus a 0.05 m gap, sharing one floor height and one facing. Offsets are
+relative to the first item, and the coordinator states each one as
+`offset_m` on the op.
 
 The arithmetic is a pure function of the ordered listing extents, unit-tested
 without Unity. The coordinator owns it. The model speaks layout language
@@ -319,6 +327,7 @@ Python, offline, no credit (`cd provider && . .venv/bin/activate && python -m un
 
 - `extent_m` accepts a 3-number array in range; rejects missing length, 2 or 4
   numbers, non-numbers, negatives, and values outside 0.05–3.0 m.
+- `offset_m` is optional and bounded at ±3.0 m.
 - `place_generated` without `extent_m` still validates, so existing fixtures
   and the shop-to-life path are unchanged.
 - `place_listing` is refused with `extent_m` missing, with the wrong number
@@ -331,8 +340,9 @@ Python, offline, no credit (`cd provider && . .venv/bin/activate && python -m un
   when the job turns ready. A job without extents still emits only at ready.
 - A pre-baked listing resolves to its configured artifact without queueing a
   worker.
-- Pack arithmetic: first item at the hit, widths plus 0.05 m gaps, stable
-  ordering, single floor height, and a run length that matches the inputs.
+- Pack arithmetic: a lone item's offset is zero so it lands on the hit;
+  later items clear the widths between them plus 0.05 m gaps; offsets are
+  monotonic and never overlap; a run length matches the inputs.
 - Job record retains `extent_m` across the queued → ready transition.
 
 Unity EditMode, no headset:
