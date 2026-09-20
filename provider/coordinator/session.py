@@ -56,7 +56,10 @@ class CoordinatorState:
         self.completed_ops: dict[str, dict] = {}
         self.cancelled_op_ids: list[str] = []
         self.mark_sent: bool = False
-        self.tracking = None  # optional Sam2Bridge; existing mark/voice paths stay default
+        # Optional Sam2Bridge; existing mark/voice paths stay default.
+        self.tracking: Any = None
+        # Test seam: injected LiveSession factory (None = construct directly).
+        self.live_factory: Any = None
         self.last_clock_skew_ns: int | None = None
         self.jobs = JobStore()
         # Cloud speech synth for speak.audio (None = caption-only degraded).
@@ -64,7 +67,8 @@ class CoordinatorState:
         self.synthesizer: Any | None = None
         # Persistent Live session for the realtime voice loop (None until
         # hello warms it). _live_turn is the in-flight turn, if any.
-        self.live: Any | None = None
+        # Any (not Optional): the live session or a test fake; None until warmed.
+        self.live: Any = None
         self._live_turn: Any | None = None
         self._live_last_totals: dict[str, int] = {}
         # Last audio actually played on Quest (16 kHz mono s16le) + send time.

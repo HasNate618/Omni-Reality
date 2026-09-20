@@ -4,12 +4,13 @@ using UnityEngine;
 using UnityEngine.XR;
 
 /// <summary>
-/// Quest mic uplink: controller A is push-to-talk. Holding A opens a bounded
-/// websocket utterance; releasing A captures the camera frame and closes with
-/// utterance_end. Nothing transmits while A is up — no VAD auto-open, and
-/// barge-in only fires while held. Streams ~100 ms 16 kHz mono s16le PCM
-/// chunks tagged with <see cref="CoordinatorClient.OpenUtteranceId"/>;
-/// keyword hooks remain debug fallbacks.
+/// Quest mic uplink: controller A toggles listening (on by default, green
+/// dot shown while on). While listening, automatic VAD opens bounded
+/// websocket utterances via <see cref="VoiceActivityGate"/>; a loud onset
+/// during playback barges in. While off the mic is fully gated. Streams
+/// ~100 ms 16 kHz mono s16le PCM chunks tagged with
+/// <see cref="CoordinatorClient.OpenUtteranceId"/> and closes with
+/// utterance_end when the gate ends; keyword hooks remain debug fallbacks.
 /// </summary>
 public class MicUtterance : MonoBehaviour
 {
@@ -84,30 +85,78 @@ public class MicUtterance : MonoBehaviour
         BeginUtterance();
     }
 
-    /// <summary>Maximum hold before the utterance auto-asks (15 s of s16le).</summary>
-    public const int PttMaxPcmBytes = SampleRate * 2 * 15;
+    bool _listening;
+    bool _toggleWasHeld;
+    bool _replyWasPlaying;
+    GameObject _listeningDot;
 
-    /// <summary>Controller A press: arm the button and open if possible.
-    /// Held through playback, a loud onset barges in instead.</summary>
-    bool _pttWasHeld;
-
-    internal void PressPtt()
+    /// <summary>Controller A press: flip listening. Off cuts any reply and
+    /// gates the mic; an in-flight utterance still finishes its turn.</summary>
+    internal void ToggleListening()
     {
-        _manualCapture = true;
-        VoiceBootstrapLog.Log(VoiceBootstrapLog.ComponentMic, "ptt_press");
-        bool opened = _utteranceId != null || BeginUtterance();
+        _listening = !_listening;
+        VoiceBootstrapLog.Log(VoiceBootstrapLog.ComponentMic, "listen_toggled",
+            ("on", _listening));
+        UpdateListeningDot();
         if (_client != null)
-            _client.ShowVoiceFeedback(opened
-                ? "Listening\u2026 release A to ask."
-                : "Not ready \u2014 try again in a moment.");
+            _client.ShowVoiceFeedback(_listening
+                ? "Listening on. Just talk."
+                : "Listening off.");
+        if (!_listening)
+        {
+            if (_utteranceId != null)
+                EndUtterance();
+            SpeakCloudPlayer player = _client != null ? _client.SpeakPlayer : null;
+            if (player != null)
+                player.StopPlayback();
+        }
     }
 
-    /// <summary>Controller A release: flush, capture, close, ask.</summary>
-    internal void ReleasePtt()
+    /// <summary>Green dot while listening: small unlit sphere pinned below
+    /// the center-eye view. Hidden when listening is off.</summary>
+    internal void UpdateListeningDot()
     {
-        _manualCapture = false;
-        VoiceBootstrapLog.Log(VoiceBootstrapLog.ComponentMic, "ptt_release");
-        EndUtterance();
+        if (_listeningDot == null)
+            BuildListeningDot();
+        if (_listeningDot != null)
+            _listeningDot.SetActive(_listening);
+    }
+
+    void BuildListeningDot()
+    {
+        try
+        {
+            Transform anchor = _client != null ? _client.CenterEye : null;
+            if (anchor == null && Camera.main != null)
+                anchor = Camera.main.transform;
+            _listeningDot = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            _listeningDot.name = "ListeningDot";
+            var renderer = _listeningDot.GetComponent<Renderer>();
+            if (renderer != null)
+            {
+                var mat = new Material(Shader.Find("Unlit/Color"));
+                mat.color = Color.green;
+                renderer.material = mat;
+            }
+            var collider = _listeningDot.GetComponent<Collider>();
+            if (collider != null)
+#if UNITY_EDITOR
+                UnityEngine.Object.DestroyImmediate(collider);
+#else
+                UnityEngine.Object.Destroy(collider);
+#endif
+            _listeningDot.transform.localScale = Vector3.one * 0.015f;
+            if (anchor != null)
+            {
+                _listeningDot.transform.SetParent(anchor, false);
+                _listeningDot.transform.localPosition = new Vector3(0f, -0.06f, 0.6f);
+            }
+            _listeningDot.SetActive(_listening);
+        }
+        catch (Exception)
+        {
+            _listeningDot = null;
+        }
     }
 
     /// <summary>Primary button held on either controller. OVRInput first,
@@ -136,22 +185,18 @@ public class MicUtterance : MonoBehaviour
         }
     }
 
-    void PollPttButton()
+    void PollToggleButton()
     {
         bool held = PttHeld();
-        if (held && !_pttWasHeld)
-            PressPtt();
-        else if (!held && _pttWasHeld)
-            ReleasePtt();
-        _pttWasHeld = held;
+        if (held && !_toggleWasHeld)
+            ToggleListening();
+        _toggleWasHeld = held;
     }
 
     void Update()
     {
         TryEnsureAutoCapture();
-        bool live = _client != null && _client.LiveConversation;
-        if (!live)
-            PollPttButton();
+        PollToggleButton();
         if (_client == null || !_client.IsConnected
             || (_utteranceId != null && _utteranceSessionId != _client.SessionId))
         {
@@ -163,41 +208,31 @@ public class MicUtterance : MonoBehaviour
             DiscardMicWindow();
             return;
         }
-        if (_client.SpeakPlayer != null && _client.SpeakPlayer.IsPlaying)
+        bool playing = _client.SpeakPlayer != null && _client.SpeakPlayer.IsPlaying;
+        if (playing)
         {
-            if (_manualCapture || live)
+            _replyWasPlaying = true;
+            if (_listening)
                 PumpMicBargeIn();
             else
                 DiscardMicWindow();
             return;
         }
-        // B-mode: the gate opens on speech onset (with pre-roll) and closes on
-        // a silence run, so no button is held. A-mode PTT is untouched below.
-        if (live)
+        if (_replyWasPlaying && _listening && !_client.AwaitingReply)
         {
-            if (_clip != null)
-                PumpMicVad();
+            // One-shot: the reply just finished, stand down until next press.
+            _replyWasPlaying = false;
+            ToggleListening();
             return;
         }
-        if (_utteranceId != null && !_manualCapture)
+        _replyWasPlaying = false;
+        if (!_listening || _clip == null)
         {
-            // Release edge missed: heal by closing, never strand.
-            EndUtterance();
-            return;
-        }
-        if (!_manualCapture || _utteranceId == null || _clip == null)
-        {
-            if (!_manualCapture)
+            if (!_listening)
                 DiscardMicWindow();
             return;
         }
-        if (_utterancePcmBytes >= PttMaxPcmBytes)
-        {
-            _manualCapture = false;
-            CloseUtterance();
-            return;
-        }
-        PumpMicManual();
+        PumpMicVad();
     }
 
     void DiscardMicWindow()
@@ -276,11 +311,10 @@ public class MicUtterance : MonoBehaviour
         VoiceBootstrapLog.MicPermission(granted);
     }
 
-    /// <summary>Held-A loud onset during playback interrupts.</summary>
+    /// <summary>Loud onset during playback interrupts (listening only).</summary>
     void PumpMicBargeIn()
     {
-        if (_clip == null || _utteranceId != null
-            || !(_manualCapture || (_client != null && _client.LiveConversation)))
+        if (_clip == null || _utteranceId != null || !_listening)
             return;
         AppendMicSamples();
         while (_pending.Count >= ChunkSamples)
@@ -456,13 +490,13 @@ public class MicUtterance : MonoBehaviour
             _client.ShowVoiceFeedback("That was too short. Please ask again.");
             FinishUtterance(id, null, null, null, false);
         }
-        else if (_client.WantsCameraFrame && Perception != null)
+        else if (_client.PerceptionEnabled && Perception != null)
         {
             Perception.Capture((env, jpeg, reason) => FinishUtterance(id, env, jpeg, reason, true));
         }
         else
         {
-            FinishUtterance(id, null, null, _client.WantsCameraFrame ? "camera_down" : null, true);
+            FinishUtterance(id, null, null, _client.PerceptionEnabled ? "camera_down" : null, true);
         }
     }
 
