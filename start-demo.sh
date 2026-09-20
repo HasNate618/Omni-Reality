@@ -187,7 +187,15 @@ if [ "$adb_up" = 1 ]; then
       warn "the headset is running an OLDER build (installed $installed, apk built $(date -r "$apk_epoch" '+%Y-%m-%d %H:%M'))"
       warn "your Unity changes are NOT on the device. Re-run with --install"
     else
-      ok "installed build is current"
+      # The APK can be "current" against the headset and still be older than
+      # the C# it was built from -- which looks exactly like a fix not working.
+      newest_src=$(find QuestDemo/Assets -name '*.cs' -newer "$APK" -print -quit 2>/dev/null)
+      if [ -n "$newest_src" ]; then
+        warn "the APK is older than your Unity sources (e.g. $newest_src)"
+        warn "C# changes are NOT on the device: rebuild (Omni > Build Quest APK), then --install"
+      else
+        ok "installed build is current"
+      fi
     fi
   fi
   if [ "$LAUNCH_APP" = 1 ]; then

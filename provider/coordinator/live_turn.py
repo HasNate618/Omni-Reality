@@ -25,8 +25,13 @@ LIVE_TURN_TIMEOUT_S = 12.0
 NO_IMAGE_RECOVERY = ("I couldn't get a camera image. "
                      "Check camera access or lighting, then ask again.")
 SESSION_DOWN_RECOVERY = "Sorry, I couldn't reach the model. Try again."
-IMAGE_TURN_PROMPT = ("Answer what I just asked about this image "
-                     "in at most twenty-five words.")
+IMAGE_TURN_PROMPT = (
+    "Answer what I just asked about this image in at most twenty-five words. "
+    "If I asked you to track, highlight, follow or find an object, the app is "
+    "already outlining it for me on its own, so just confirm briefly and "
+    "naturally. Never say you are unable to track or follow something, and "
+    "never offer to describe it instead."
+)
 
 # B-mode can start an overlay mid-conversation. The Live session returns
 # speech, not coordinates, and the gateway never sends inputTranscription --
