@@ -6,6 +6,8 @@
 #   ./start-demo.sh --no-app   don't relaunch the Quest app
 #   ./start-demo.sh --quiet    less logging (INFO instead of DEBUG)
 #   ./start-demo.sh --install  install QuestDemo/Builds/QuestDemo.apk first
+#   ./start-demo.sh --wifi     headset talks over Wi-Fi instead of the USB tunnel
+#   ./start-demo.sh --set-ip X point the app at address X (then rebuild in Unity)
 #
 # Ctrl+C stops everything this script started. Logs live in logs/.
 set -u -o pipefail
@@ -20,7 +22,10 @@ SAM2_PORT=8766
 APP_ID=com.omni.questdemo
 STARTED_SAM2=0
 INSTALL_APK=0
+WIFI=0
+SET_IP=""
 APK=QuestDemo/Builds/QuestDemo.apk
+SETTINGS=QuestDemo/Assets/Resources/QuestTrackingSettings.asset
 PIDS=()
 
 for arg in "$@"; do
@@ -29,14 +34,26 @@ for arg in "$@"; do
     --no-app) LAUNCH_APP=0 ;;
     --quiet) LOG_LEVEL=INFO ;;
     --install) INSTALL_APK=1 ;;
+    --wifi) WIFI=1 ;;
+    --set-ip=*) SET_IP="${arg#*=}" ;;
     -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg (try --help)"; exit 1 ;;
   esac
 done
 
+app_address() { sed -n 's/ *laptopIpv4: *//p' "$SETTINGS" 2>/dev/null | tr -d '\r'; }
+
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 ok()  { printf '    \033[32mok\033[0m  %s\n' "$*"; }
 warn(){ printf '    \033[33m!!\033[0m  %s\n' "$*"; }
+
+if [ -n "$SET_IP" ]; then
+  # The address is baked into the build, so this needs a rebuild to take effect.
+  sed -i '' "s/  laptopIpv4: .*/  laptopIpv4: $SET_IP/" "$SETTINGS"
+  say "App address set to $SET_IP"
+  echo "    Now rebuild in Unity, then: ./start-demo.sh --install$([ "$SET_IP" = 127.0.0.1 ] || echo ' --wifi')"
+  exit 0
+fi
 
 cleanup() {
   say "Stopping"
@@ -97,8 +114,32 @@ ok "started (planner=$PLANNER, logs=$LOG_LEVEL)"
 
 # 3. Headset: USB tunnel, so the app can use 127.0.0.1 and ignore Wi-Fi.
 say "Headset"
-if [ -n "$(adb devices | sed -n '2p' | grep -w device)" ]; then
+lan_ip=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "")
+app_ip=$(app_address)
+adb_up=$([ -n "$(adb devices | sed -n '2p' | grep -w device)" ] && echo 1 || echo 0)
+
+if [ "$WIFI" = 1 ]; then
+  [ "$adb_up" = 1 ] && adb reverse --remove tcp:$COORD_PORT >/dev/null 2>&1
+  if [ "$app_ip" = "$lan_ip" ]; then
+    ok "Wi-Fi mode: the app connects to $app_ip:$COORD_PORT"
+  else
+    warn "the app is built to reach '$app_ip', but this Mac is $lan_ip"
+    warn "run: ./start-demo.sh --set-ip=$lan_ip   then rebuild in Unity and --install"
+  fi
+  echo "    Both devices need the same network, and it must allow device-to-device"
+  echo "    traffic (campus Wi-Fi usually blocks it; a phone hotspot works)."
+  echo "    macOS may also ask to allow incoming connections for python: say yes."
+elif [ "$adb_up" = 1 ]; then
   adb reverse tcp:$COORD_PORT tcp:$COORD_PORT >/dev/null && ok "USB tunnel ready (app connects to 127.0.0.1:$COORD_PORT)"
+  [ "$app_ip" = "127.0.0.1" ] || warn "the app is built to reach '$app_ip', not 127.0.0.1: run --set-ip=127.0.0.1, rebuild, --install"
+fi
+
+if [ "$adb_up" = 0 ] && [ "$INSTALL_APK" = 1 ]; then
+  warn "--install needs the USB cable (adb sees no device); nothing was installed"
+  warn "plug in, run: adb install -r $APK   (and 'adb tcpip 5555' for wireless logs), then unplug"
+fi
+
+if [ "$adb_up" = 1 ]; then
   # A freshly built APK that was never installed is the classic "my change
   # did nothing": Unity writes the file, the headset keeps the old build.
   if [ -f "$APK" ]; then
@@ -127,8 +168,8 @@ if [ -n "$(adb devices | sed -n '2p' | grep -w device)" ]; then
     *) warn "app is NOT in the foreground: $(echo "$focus" | tr -d '\r')"
        warn "PUT THE HEADSET ON. Off your face it suspends the app: no frames, no A button, no mic." ;;
   esac
-else
-  warn "no headset over USB. Plug it in and rerun, or set the app's laptop_ipv4 to $(ipconfig getifaddr en0 2>/dev/null || echo '<this mac ip>')"
+elif [ "$WIFI" != 1 ]; then
+  warn "no headset over USB. Plug it in, or use Wi-Fi: ./start-demo.sh --set-ip=$lan_ip (rebuild) then --wifi"
 fi
 
 say "Ready"
@@ -164,6 +205,12 @@ cat <<'STEPS'
 
     Ctrl+C stops everything. Full logs: logs/coordinator.log, logs/sam2.log
 STEPS
+if [ "$WIFI" = 1 ] && [ -z "$(adb devices | sed -n '2p' | grep -w device)" ]; then
+  echo "    No adb connection, so no headset logs below. To get them over Wi-Fi:"
+  echo "      1. plug in USB once and run: adb tcpip 5555"
+  echo "      2. unplug, then: adb connect <headset-ip>:5555   (headset Settings > Wi-Fi > your network)"
+  echo
+fi
 echo
 tail -f logs/coordinator.log | grep --line-buffered -v "websockets.server" | sed -u 's/^/coord:   /' &
 PIDS+=($!)
