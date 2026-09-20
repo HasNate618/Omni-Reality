@@ -5,11 +5,10 @@ using UnityEngine;
 /// Layout mode: the cart lands in your corner as true-size boxes.
 ///
 /// Owns the box set, resolves one corner frame per summon so every box in a
-/// turn shares it, and reports clearance. Every number shown here comes from
-/// a listing or from depth sensing, so the caption says "approximate" and the
-/// copy never states a figure as measured. That is not decoration: the repo's
-/// own research brief warns that fit guidance needs known dimensions and real
-/// calibration, and this has neither.
+/// turn shares it, and reports clearance. Nothing shown here is measured, so
+/// the caption says "approximate" and the copy never states a figure as fact.
+/// That is not decoration: the repo's own research brief warns that fit
+/// guidance needs known dimensions and real calibration, and this has neither.
 /// </summary>
 public sealed class LayoutMode : MonoBehaviour
 {
@@ -17,8 +16,13 @@ public sealed class LayoutMode : MonoBehaviour
     public const float TightClearanceM = 0.10f;
     public static readonly Color DefaultTint = new Color(0.24f, 0.86f, 1f, BoxAlpha);
 
-    public const string HonestyCopy =
-        "Approximate. Sizes from the listing, room from depth sensing.";
+    public const string HonestyCopy = "Approximate sizes, not measured.";
+
+    /// <summary>Always on screen while Layout owns the controller.</summary>
+    public const string ControlsCopy =
+        "A: menu    B: resize    double-tap: rotate    trigger: move";
+    public const string ControlsCopyResizing =
+        "A: menu    B: done resizing    trigger: hold and move your hand";
 
     static LayoutMode _instance;
 
@@ -30,13 +34,18 @@ public sealed class LayoutMode : MonoBehaviour
     FurnitureSelector _selector;
     RotateMenu _rotate;
     float _lastTapAt = -1f;
+    bool _wasDragging;
+    bool _wasResizing;
+    string _lastHovered;
     LayoutBox _lastTapBox;
     LayoutRoom.CornerFrame _corner;
     bool _hasCorner;
     int _cornerTurn = -1;
     Transform _centerEye;
     LayoutLabel _status;
+    LayoutLabel _controls;
     float _statusUntil;
+    float _rotateTapAt = -1f;
     bool _resizeMode;
     bool _armed;
 
@@ -109,12 +118,16 @@ public sealed class LayoutMode : MonoBehaviour
         if (!_armed)
             return;
 
-        // A opens the furniture menu; B toggles resize. Button.Two is the one
-        // that reads as A on this headset -- measured on device, not assumed.
+        // A opens the furniture menu; B toggles resize. Button.One IS A on
+        // RTouch -- the SDK says so ("Maps to RawButton: [RTouch: A]") and
+        // QuestStreamInput has always used it that way for push-to-talk.
+        // These were briefly swapped here on a behaviour report that came from
+        // a build predating the code; do not swap them again without checking
+        // the installed build is newer than the source.
         // Both only once Layout owns them, so a normal A/B run is untouched.
-        if (OVRInput.GetDown(OVRInput.Button.Two, OVRInput.Controller.RTouch))
-            ToggleSelector();
         if (OVRInput.GetDown(OVRInput.Button.One, OVRInput.Controller.RTouch))
+            ToggleSelector();
+        if (OVRInput.GetDown(OVRInput.Button.Two, OVRInput.Controller.RTouch))
             ToggleResizeMode();
 
         if (_pointer == null || !_pointer.HasAim)
@@ -153,7 +166,8 @@ public sealed class LayoutMode : MonoBehaviour
                 if (_resize != null)
                     _resize.Release();
                 _rotate.Open(aimed);
-                ShowStatus("Rotate " + aimed.ItemLabel + ". Pick an angle, or done.", 6f);
+                _rotateTapAt = -1f;
+                ShowStatus("Rotate " + aimed.ItemLabel + ". Pick an angle, or double-tap to finish.", 6f);
                 return;
             }
             _lastTapAt = now;
@@ -174,16 +188,57 @@ public sealed class LayoutMode : MonoBehaviour
             _resize.Tick(_boxes, _pointer, aimed);
             if (aimed != null)
                 aimed.SetHighlighted(true);
+            NarrateResize();
             if (OVRInput.GetUp(OVRInput.Button.PrimaryIndexTrigger, OVRInput.Controller.RTouch))
                 AnnounceFit();
             return;
         }
 
+        NarrateHover(aimed);
         _drag.Tick(_boxes, onFloor, floorPoint, aimed);
+        NarrateDrag();
         // Clearance is only worth recomputing once the wearer lets go.
         if (!_drag.IsDragging && OVRInput.GetUp(
                 OVRInput.Button.PrimaryIndexTrigger, OVRInput.Controller.RTouch))
             AnnounceFit();
+    }
+
+    /// <summary>Name the piece under the pointer, so aiming is never silent.</summary>
+    void NarrateHover(LayoutBox aimed)
+    {
+        string now = aimed != null ? aimed.ItemLabel : null;
+        if (now == _lastHovered)
+            return;
+        _lastHovered = now;
+        if (now != null && !_drag.IsDragging)
+            ShowStatus(now + " - hold the trigger to move it", 3f);
+    }
+
+    void NarrateDrag()
+    {
+        if (_drag.IsDragging == _wasDragging)
+            return;
+        _wasDragging = _drag.IsDragging;
+        if (_wasDragging && _drag.Held != null)
+            ShowStatus("Moving " + _drag.Held.ItemLabel + "…", 4f);
+        else if (!_wasDragging)
+            ShowStatus("Placed.", 3f);
+    }
+
+    void NarrateResize()
+    {
+        bool now = _resize.IsResizing;
+        if (now && _resize.Held != null)
+        {
+            // Live, while the hand moves: the number is the whole point here.
+            ShowStatus(string.Format("{0} - {1:0}%",
+                       _resize.Held.ItemLabel, _resize.Held.ScaleFactor * 100f), 3f);
+        }
+        else if (_wasResizing && !now)
+        {
+            ShowStatus("Size set.", 3f);
+        }
+        _wasResizing = now;
     }
 
     void TickSelector(Ray ray)
@@ -213,14 +268,33 @@ public sealed class LayoutMode : MonoBehaviour
             _pointer.Draw(hit, true, false);
         else
             _pointer.DrawMiss();
-        if (index < 0 || !OVRInput.GetDown(
-                OVRInput.Button.PrimaryIndexTrigger, OVRInput.Controller.RTouch))
+        if (!OVRInput.GetDown(OVRInput.Button.PrimaryIndexTrigger, OVRInput.Controller.RTouch))
             return;
-        if (!_rotate.Apply(index))
+
+        string piece = _rotate.Target != null ? _rotate.Target.ItemLabel : "piece";
+        float now = Time.realtimeSinceStartup;
+        // Double tap dismisses it: the same gesture that opened the menu, so
+        // there is nothing new to learn and no need to hunt for the done card.
+        if (IsDoubleTap(_rotateTapAt, now, true))
         {
+            _rotateTapAt = -1f;
             _rotate.Close();
+            ShowStatus(piece + " set.", 4f);
             AnnounceFit();
+            return;
         }
+        _rotateTapAt = now;
+
+        if (index < 0)
+            return;
+        if (_rotate.Apply(index))
+        {
+            ShowStatus(piece + " turned " + RotateMenu.StepLabel(index), 4f);
+            return;
+        }
+        _rotate.Close();
+        ShowStatus(piece + " set.", 4f);
+        AnnounceFit();
     }
 
     void ToggleSelector()
@@ -233,8 +307,8 @@ public sealed class LayoutMode : MonoBehaviour
             _rotate.Close();
         _selector.Toggle();
         ShowStatus(_selector.IsOpen
-            ? "Pick a piece. Point and pull the trigger."
-            : HonestyCopy, 4f);
+            ? "Furniture menu open. Point at a piece and pull the trigger."
+            : "Menu closed.", 4f);
     }
 
     void ToggleResizeMode()
@@ -281,7 +355,7 @@ public sealed class LayoutMode : MonoBehaviour
             Quaternion.LookRotation(_corner.AxisZ, Vector3.up));
         _boxes.Add(box);
         Debug.Log("QUEST_LAYOUT added " + e.Label + " from the selector");
-        ShowStatus(e.Label + " added. " + HonestyCopy, 5f);
+        ShowStatus(e.Label + " selected - point at the floor and hold the trigger to move it", 6f);
         return box;
     }
 
@@ -418,7 +492,7 @@ public sealed class LayoutMode : MonoBehaviour
 
     /// <summary>
     /// Plain-language clearance between footprints. Hedged on purpose: these
-    /// are listing sizes on a depth-sensed floor, not a measurement.
+    /// are approximate sizes on a depth-sensed floor, not a measurement.
     /// </summary>
     public static string FitVerdict(IList<LayoutBox> boxes)
     {
@@ -475,6 +549,16 @@ public sealed class LayoutMode : MonoBehaviour
     /// to be read while walking around the corner, so it is a LayoutLabel at
     /// three times the character size, held in front of the wearer.
     /// </summary>
+    /// <summary>The always-on controls line. Created lazily like the status.</summary>
+    void EnsureControls()
+    {
+        if (_controls != null)
+            return;
+        _controls = LayoutLabel.Create(transform, Color.white);
+        _controls.transform.SetParent(null, true);
+        _controls.SetScale(0.8f);
+    }
+
     void ShowStatus(string text, float seconds)
     {
         if (_status == null)
@@ -489,23 +573,37 @@ public sealed class LayoutMode : MonoBehaviour
 
     void LateUpdate()
     {
-        if (_status == null)
-            return;
-        if (Time.realtimeSinceStartup >= _statusUntil)
-        {
+        // The status line fades; the controls line never does.
+        bool statusLive = _status != null && Time.realtimeSinceStartup < _statusUntil;
+        if (_status != null && !statusLive)
             _status.SetVisible(false);
-            return;
+
+        if (_armed)
+        {
+            EnsureControls();
+            _controls.SetText(_resizeMode ? ControlsCopyResizing : ControlsCopy);
+            _controls.SetVisible(true);
         }
+        else if (_controls != null)
+        {
+            _controls.SetVisible(false);
+        }
+
         if (_centerEye == null)
             return;
         Vector3 forward = _centerEye.forward;
         forward.y = 0f;
         if (forward.sqrMagnitude < 1e-6f)
             return;
-        // High and far: tips sitting in front of the furniture block the very
-        // thing they describe, so this rides near the top of the view instead.
-        _status.transform.position = _centerEye.position
-                                     + (forward.normalized * 2.0f)
-                                     + (Vector3.up * 0.62f);
+        forward.Normalize();
+        Vector3 eye = _centerEye.position;
+
+        // High and far: anything sitting in front of the furniture blocks the
+        // very thing it describes, so both lines ride near the top of the view.
+        // Controls sit above the status so the two never overlap.
+        if (_controls != null)
+            _controls.transform.position = eye + (forward * 2.4f) + (Vector3.up * 0.95f);
+        if (statusLive)
+            _status.transform.position = eye + (forward * 2.0f) + (Vector3.up * 0.62f);
     }
 }

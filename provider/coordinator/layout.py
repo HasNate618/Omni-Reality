@@ -1,13 +1,13 @@
-"""Layout mode: three cart listings as true-size boxes in a room corner.
+"""Layout mode: three cart items as true-size furniture in a room corner.
 
 The wearer asks for the corner to be filled; this planner answers with one
-`place_box` op per listing. Sizes are the seller's stated dimensions, never
-something measured, and the spoken copy says so.
+`place_box` op per item. Sizes are approximate and the spoken copy says so;
+nothing here is a measurement we made.
 
 Slots are corner-relative (`layout_slot`), not world points: the headset owns
 corner detection, so the coordinator never needs room geometry and the whole
 path runs with no network. `LayoutPlanner()` with no model is the canned
-brain; passing `complete_fn` lets the model choose which listings go where,
+brain; passing `complete_fn` lets the model choose which items go where,
 falling back to the canned arrangement on anything it does not like.
 """
 
@@ -51,11 +51,11 @@ def model_layout_enabled() -> bool:
 
     return os.environ.get("OMNI_LAYOUT_MODEL", "").strip() in ("1", "true", "yes")
 
-# Said after the boxes land. Hedged on purpose: the numbers come from a
-# listing and the corner from depth sensing, so nothing here is a measurement.
+# Said after the boxes land. Hedged on purpose: nothing here is measured --
+# the sizes are approximate and the corner comes from depth sensing.
 SAY_PLACED = (
-    "There's your corner. Sizes come from the listing, so treat it as "
-    "approximate. Pull the trigger to push anything around."
+    "There's your corner. Sizes are approximate. "
+    "Pull the trigger to push anything around."
 )
 SAY_NO_CART = "I couldn't read the cart, so there's nothing to place."
 
@@ -73,9 +73,9 @@ def load_cart(path: Path | None = None) -> dict:
     return data
 
 
-def _mm_to_m(listing_mm: dict) -> dict | None:
+def _mm_to_m(size_mm: dict) -> dict | None:
     try:
-        size = {axis: float(listing_mm[axis]) / 1000.0 for axis in ("w", "d", "h")}
+        size = {axis: float(size_mm[axis]) / 1000.0 for axis in ("w", "d", "h")}
     except (KeyError, TypeError, ValueError):
         return None
     if any(not (0 < value <= MAX_EXTENT_M) for value in size.values()):
@@ -96,17 +96,17 @@ def _slot(raw: object) -> dict | None:
 
 
 def box_op(item: dict, slot: dict | None = None) -> dict | None:
-    """One `place_box` model-op, or None when the listing is unusable.
+    """One `place_box` model-op, or None when the item is unusable.
 
     Returned without op_id/turn_id/stage_epoch: `turn._to_scene_op` stamps
     those and validates the result, exactly as it does for every other kind.
     """
     if not isinstance(item, dict):
         return None
-    size = _mm_to_m(item.get("listing_mm") or {})
+    size = _mm_to_m(item.get("size_mm") or {})
     target = slot if slot is not None else _slot(item.get("slot"))
     if size is None or target is None:
-        logger.info("dropping unusable listing id=%s", str(item.get("id"))[:32])
+        logger.info("dropping unusable item id=%s", str(item.get("id"))[:32])
         return None
     label = str(item.get("label") or item.get("id") or "item")[:40]
     op = {
@@ -124,7 +124,7 @@ def box_op(item: dict, slot: dict | None = None) -> dict | None:
 
 
 def canned_ops(cart: dict) -> list[dict]:
-    """The fixed arrangement: every listing at the slot the cart names."""
+    """The fixed arrangement: every item at the slot the cart names."""
     ops = []
     for item in (cart.get("items") or [])[:MAX_ITEMS]:
         op = box_op(item)
@@ -204,18 +204,18 @@ class LayoutPlanner:
             from yibu_http import extract_text
 
             extent = self.cart.get("corner_extent_m") or {}
-            listing = [
+            catalog = [
                 {"id": item.get("id"), "label": item.get("label"),
-                 "w": (item.get("listing_mm") or {}).get("w"),
-                 "d": (item.get("listing_mm") or {}).get("d")}
+                 "w": (item.get("size_mm") or {}).get("w"),
+                 "d": (item.get("size_mm") or {}).get("d")}
                 for item in (self.cart.get("items") or [])[:MAX_ITEMS]
             ]
             prompt = (
                 "Lay these out in a room corner. The corner is at the origin; "
                 f"x and z run into the room up to {extent.get('x', 2.4)} and "
                 f"{extent.get('z', 2.4)} metres. Sizes are millimetres. "
-                f"Listings: {json.dumps(listing)}. "
-                "Reply with only a JSON array, one entry per listing: "
+                f"Items: {json.dumps(catalog)}. "
+                "Reply with only a JSON array, one entry per item: "
                 '[{"id":"...","dx":metres,"dz":metres,"yaw_deg":-180..180}]. '
                 "dx and dz are the centre of the footprint. Keep pieces apart "
                 "and inside the corner. No prose."

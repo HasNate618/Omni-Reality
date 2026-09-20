@@ -18,6 +18,7 @@ from pathlib import Path
 
 from coordinator import layout
 from coordinator.layout import (
+    CART_PATH,
     LayoutPlanner,
     apply_model_slots,
     box_op,
@@ -42,7 +43,7 @@ class CartTests(unittest.TestCase):
         self.assertEqual(len(cart["items"]), 3)
         for item in cart["items"]:
             for axis in ("w", "d", "h"):
-                self.assertGreater(item["listing_mm"][axis], 0)
+                self.assertGreater(item["size_mm"][axis], 0)
 
     def test_missing_cart_is_empty_not_an_exception(self) -> None:
         self.assertEqual(load_cart(Path("/nonexistent/cart.json")), {})
@@ -56,6 +57,20 @@ class CartTests(unittest.TestCase):
             self.assertEqual(load_cart(path), {})
 
 
+class CopyTests(unittest.TestCase):
+    def test_spoken_copy_never_says_where_sizes_came_from(self) -> None:
+        """This line is spoken aloud, so it is the one that matters most."""
+        for line in (layout.SAY_PLACED, layout.SAY_NO_CART):
+            self.assertNotIn("listing", line.lower())
+
+    def test_spoken_copy_still_hedges(self) -> None:
+        self.assertIn("approximate", layout.SAY_PLACED.lower())
+
+    def test_cart_file_has_no_listing_wording(self) -> None:
+        raw = CART_PATH.read_text().lower()
+        self.assertNotIn("listing", raw)
+
+
 class BoxOpTests(unittest.TestCase):
     def test_canned_ops_all_validate_as_scene_ops(self) -> None:
         ops = canned_ops(load_cart())
@@ -64,7 +79,7 @@ class BoxOpTests(unittest.TestCase):
             validate_instance("scene_op", stamp(op))
 
     def test_millimetres_become_metres(self) -> None:
-        op = box_op({"id": "x", "label": "sofa", "listing_mm": {"w": 1800, "d": 900, "h": 830},
+        op = box_op({"id": "x", "label": "sofa", "size_mm": {"w": 1800, "d": 900, "h": 830},
                      "slot": {"dx": 1.0, "dz": 0.5, "yaw_deg": 0}})
         self.assertAlmostEqual(op["size_m"]["w"], 1.8)
         self.assertAlmostEqual(op["size_m"]["d"], 0.9)
@@ -76,14 +91,14 @@ class BoxOpTests(unittest.TestCase):
                     {"w": 9000, "d": 900, "h": 830},        # 9 m sofa
                     {"w": "wide", "d": 900, "h": 830},      # not a number
                     {"w": 1800, "d": 900}):                 # missing axis
-            self.assertIsNone(box_op({"id": "x", "listing_mm": bad, "slot": slot}), bad)
+            self.assertIsNone(box_op({"id": "x", "size_mm": bad, "slot": slot}), bad)
 
     def test_out_of_range_slot_is_dropped(self) -> None:
         mm = {"w": 1800, "d": 900, "h": 830}
         for bad in ({"dx": 99.0, "dz": 0.0, "yaw_deg": 0},
                     {"dx": 0.0, "dz": 0.0, "yaw_deg": 400},
                     {"dx": 0.0, "dz": 0.0}):
-            self.assertIsNone(box_op({"id": "x", "listing_mm": mm, "slot": bad}), bad)
+            self.assertIsNone(box_op({"id": "x", "size_mm": mm, "slot": bad}), bad)
 
     def test_canned_layout_has_no_overlapping_footprints(self) -> None:
         """The default arrangement must look right before anyone drags it."""

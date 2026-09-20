@@ -95,10 +95,17 @@ public sealed class FurnitureSelector : MonoBehaviour
         Debug.Log("QUEST_LAYOUT selector closed");
     }
 
+    bool _built;
+
     void Build()
     {
-        if (_cards.Count == FurnitureCatalog.Count)
+        // Counting _cards cannot work: each entry contributes both a card and
+        // a preview mesh, so the count never equalled the catalog size and
+        // every Open() stacked a second label on the first -- which read as
+        // the text being drawn twice.
+        if (_built)
             return;
+        _built = true;
         int n = FurnitureCatalog.Count;
         for (int i = 0; i < n; i++)
         {

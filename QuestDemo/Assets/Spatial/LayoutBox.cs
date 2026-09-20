@@ -4,12 +4,12 @@ using UnityEngine;
 /// <summary>
 /// One piece of furniture at true size, standing on the floor.
 ///
-/// The mesh is built to fill the listing's w x d x h exactly, so the shape the
+/// The mesh is built to fill its w x d x h exactly, so the shape the
 /// wearer sees and the footprint the fit check measures are the same volume.
 /// A bright rectangle on the floor is the part that actually answers "will it
 /// fit"; the furniture on top of it is there so the corner reads as a room.
 ///
-/// Resizing is allowed. `ListingSizeM` keeps the original so scaling stays
+/// Resizing is allowed. `BaseSizeM` keeps the original so scaling stays
 /// anchored to it and repeated grabs cannot drift; the label always shows the
 /// piece's live size.
 /// </summary>
@@ -25,8 +25,8 @@ public sealed class LayoutBox : MonoBehaviour
     public string Kind { get; private set; }
     /// <summary>Current footprint and height in metres (w = x, d = z, h = y).</summary>
     public Vector3 SizeM { get; private set; }
-    /// <summary>The size the listing stated, before any resizing.</summary>
-    public Vector3 ListingSizeM { get; private set; }
+    /// <summary>The size the piece started at, before any resizing.</summary>
+    public Vector3 BaseSizeM { get; private set; }
     public Color Tint { get; private set; }
     public bool IsResized { get; private set; }
 
@@ -75,7 +75,7 @@ public sealed class LayoutBox : MonoBehaviour
         box.ItemLabel = label;
         box.Kind = FurnitureCatalog.IsKnown(kind) ? kind : FurnitureCatalog.Sofa;
         box.SizeM = sizeM;
-        box.ListingSizeM = sizeM;
+        box.BaseSizeM = sizeM;
         box.Tint = tint;
         box.Rebuild();
         return box;
@@ -145,9 +145,9 @@ public sealed class LayoutBox : MonoBehaviour
     {
         if (float.IsNaN(factor) || float.IsInfinity(factor) || factor <= 0f)
             return false;
-        float current = ListingSizeM.x > 0f ? SizeM.x / ListingSizeM.x : 1f;
+        float current = BaseSizeM.x > 0f ? SizeM.x / BaseSizeM.x : 1f;
         float target = Mathf.Clamp(current * factor, MinScale, MaxScale);
-        Vector3 next = ListingSizeM * target;
+        Vector3 next = BaseSizeM * target;
         if (!IsUsableSize(next))
             return false;
         if (Mathf.Approximately(next.x, SizeM.x))
@@ -166,7 +166,7 @@ public sealed class LayoutBox : MonoBehaviour
 
     public float ScaleFactor
     {
-        get { return ListingSizeM.x > 0f ? SizeM.x / ListingSizeM.x : 1f; }
+        get { return BaseSizeM.x > 0f ? SizeM.x / BaseSizeM.x : 1f; }
     }
 
     public void SetHighlighted(bool on)

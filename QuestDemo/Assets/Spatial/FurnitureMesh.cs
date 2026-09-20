@@ -1,7 +1,7 @@
 using UnityEngine;
 
 /// <summary>
-/// Furniture built from primitives, sized to fill its listing dimensions.
+/// Furniture built from primitives, sized to fill its stated dimensions.
 ///
 /// There is no mesh generator and no asset library in this project, and a
 /// downloaded model would arrive at an arbitrary scale -- which is the one

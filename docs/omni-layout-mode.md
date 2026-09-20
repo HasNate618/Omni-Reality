@@ -11,7 +11,7 @@ the promise; everything else is decoration.
 
 | Piece | Where | Needs the key? |
 |---|---|---|
-| Canned cart (3 listings, mm) | `provider/coordinator/cart.json` | no |
+| Canned cart (3 items, mm) | `provider/coordinator/cart.json` | no |
 | Layout planner | `provider/coordinator/layout.py` | no (model optional) |
 | `place_box` scene op | `provider/protocol/schemas/scene_op.json` | no |
 | Furniture catalog and meshes | `Furniture{Catalog,Mesh,Selector}.cs` | no |
@@ -53,11 +53,11 @@ over 4 m.
 ## Honesty
 
 The research brief warns that fit guidance "needs known dimensions, reliable
-calibration, or an appropriate CAD model." This has listing numbers on a
+calibration, or an appropriate CAD model." This has approximate numbers on a
 depth-sensed floor, which is none of those. So:
 
-- A caption reads **"Approximate. Sizes from the listing, room from depth
-  sensing."** whenever boxes are placed. It is a `LayoutLabel` at more than
+- A caption reads **"Approximate sizes, not measured."** whenever boxes are
+  placed. It is a `LayoutLabel` at more than
   three times `VoiceCaption`'s character size, because it has to be readable
   while walking around the corner, and it rides near the top of the view --
   tips sitting in front of the furniture obscure the thing they describe.
@@ -68,7 +68,7 @@ depth-sensed floor, which is none of those. So:
 - Clearance is computed on yaw-expanded axis-aligned extents, which
   over-estimates a rotated footprint — erring towards "tight", never towards
   "it fits".
-- The spoken line after placement says the sizes come from the listing.
+- The spoken line after placement says the sizes are approximate.
 
 This is enforced by test, not by convention:
 `LayoutTests.FitVerdictIsAlwaysHedgedAndNeverClaimsMeasurement`.
@@ -166,7 +166,7 @@ rather than something to verify.
 ## Resizing and rotating
 
 B toggles resize; hold the trigger on a piece and move your hand out to grow it,
-back to shrink. Scale is uniform and anchored to the **listing** size rather
+back to shrink. Scale is uniform and anchored to the **starting** size rather
 than the current size, so repeated grabs cannot drift. Clamped to 0.35x-2.5x.
 
 Double-tapping the trigger on a piece opens the rotate menu above it: -90, -45,
@@ -174,7 +174,7 @@ Double-tapping the trigger on a piece opens the rotate menu above it: -90, -45,
 takes several nudges. A double tap is the one gesture left that drag and resize
 cannot swallow.
 
-Each name plate shows the piece's live size, resized or not. `ListingSizeM` is
+Each name plate shows the piece's live size, resized or not. `BaseSizeM` is
 kept internally for the scaling anchor. The approximate-sizes caption covers the
 honesty case for the scene as a whole.
 

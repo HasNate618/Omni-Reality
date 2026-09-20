@@ -5,7 +5,7 @@ using UnityEngine;
 /// B-button resize: aim at a piece, hold the index trigger, move your hand
 /// away to grow it and back to shrink it.
 ///
-/// Scale is uniform and anchored to the listing size, not to whatever the
+/// Scale is uniform and anchored to its starting size, not to whatever the
 /// piece currently is, so repeated grabs cannot drift. It is clamped hard --
 /// a 3 m armchair is not a fit check, it is a joke.
 /// </summary>
@@ -49,7 +49,7 @@ public sealed class LayoutResize : MonoBehaviour
         if (_held != null && !held)
         {
             Debug.Log("QUEST_LAYOUT resized " + _held.ItemLabel
-                      + " to " + Mathf.RoundToInt(_held.ScaleFactor * 100f) + "% of the listing");
+                      + " to " + Mathf.RoundToInt(_held.ScaleFactor * 100f) + "%");
             _held = null;
             return;
         }

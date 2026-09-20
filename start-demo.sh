@@ -291,7 +291,7 @@ cat <<'STEPS'
         headset: QUEST_LAYOUT selector open           <- A opened the menu
         headset: QUEST_LAYOUT added armchair ...      <- picked from the menu
         headset: QUEST_LAYOUT resize mode ON          <- B toggled resize
-        headset: QUEST_LAYOUT resized sofa to 140% .. <- scaled, listing kept
+        headset: QUEST_LAYOUT resized sofa to 140% .. <- scaled from its start size
         headset: QUEST_LAYOUT rotate menu open for .. <- double tap registered
         headset: QUEST_LAYOUT rotated sofa by 90 deg  <- angle applied
         headset: QUEST_LAYOUT fit Roughly -- about ... <- clearance, hedged

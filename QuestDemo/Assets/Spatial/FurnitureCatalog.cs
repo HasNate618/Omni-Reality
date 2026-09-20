@@ -2,11 +2,11 @@ using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
-/// The furniture the selector offers, and the listing sizes each one ships at.
+/// The furniture the selector offers, and the size each one ships at.
 ///
-/// Sizes are ordinary retail dimensions in millimetres. They are defaults for
-/// pieces the wearer adds by hand; anything that arrives from the cart carries
-/// the cart's own numbers instead. Either way the mesh is built to fill the
+/// Sizes are ordinary furniture dimensions. They are defaults for pieces the
+/// wearer adds by hand; anything that arrives from the cart carries the cart's
+/// own numbers instead. Either way the mesh is built to fill the
 /// size exactly, so what you see is the footprint the fit check uses.
 /// </summary>
 public static class FurnitureCatalog

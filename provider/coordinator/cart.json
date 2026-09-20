@@ -1,5 +1,5 @@
 {
-  "note": "Three listings for the corner demo. Dimensions are the seller's stated numbers in millimetres, not measurements we made. Edit this file when the props change; nothing else needs to change.",
+  "note": "Three items for the corner demo. Dimensions are approximate, in millimetres, and are not measurements we made. Edit this file when the props change; nothing else needs to change.",
   "corner_extent_m": {
     "x": 2.4,
     "z": 2.4
@@ -8,7 +8,7 @@
     {
       "id": "sofa",
       "label": "2-seat sofa",
-      "listing_mm": {
+      "size_mm": {
         "w": 1800,
         "d": 900,
         "h": 830
@@ -24,7 +24,7 @@
     {
       "id": "armchair",
       "label": "armchair",
-      "listing_mm": {
+      "size_mm": {
         "w": 780,
         "d": 820,
         "h": 1000
@@ -40,7 +40,7 @@
     {
       "id": "side_table",
       "label": "side table",
-      "listing_mm": {
+      "size_mm": {
         "w": 550,
         "d": 550,
         "h": 450

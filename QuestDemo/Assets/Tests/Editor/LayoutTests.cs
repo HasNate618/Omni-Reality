@@ -3,7 +3,7 @@ using NUnit.Framework;
 using UnityEngine;
 
 /// <summary>
-/// Layout mode EditMode tests: listing sizes, corner-relative slot maths,
+/// Layout mode EditMode tests: piece sizes, corner-relative slot maths,
 /// footprint picking, and the hedged clearance copy.
 ///
 /// These cover the parts that must be right before anyone puts the headset
@@ -226,7 +226,7 @@ public class LayoutTests
     }
 
     [Test]
-    public void SizeCaptionReportsTheListingInCentimetres()
+    public void SizeCaptionReportsTheSizeInCentimetres()
     {
         LayoutBox a = MakeBox("sofa", new Vector3(1.8f, 0.83f, 0.9f), Vector3.zero, 0f);
         try
@@ -257,7 +257,11 @@ public class LayoutTests
     public void HonestyCopyNamesBothSourcesOfError()
     {
         Assert.That(LayoutMode.HonestyCopy.ToLower(), Does.Contain("approximate"));
-        Assert.That(LayoutMode.HonestyCopy.ToLower(), Does.Contain("listing"));
+        Assert.That(LayoutMode.HonestyCopy.ToLower(), Does.Not.Contain("listing"));
+        Assert.That(LayoutMode.ControlsCopy.ToLower(), Does.Not.Contain("listing"));
+        Assert.That(LayoutMode.ControlsCopyResizing.ToLower(), Does.Not.Contain("listing"));
+        // The honesty framing stays even though the sourcing wording is gone.
+        Assert.That(LayoutMode.HonestyCopy.ToLower(), Does.Contain("approximate"));
     }
 
     [Test]
@@ -286,7 +290,7 @@ public class LayoutTests
 
 /// <summary>
 /// Furniture, the selector, and resizing. The honesty rule under test here is
-/// that a resized piece stops claiming the listing's dimensions.
+/// that no user-facing copy mentions where the sizes came from.
 /// </summary>
 public class FurnitureTests
 {
@@ -328,7 +332,7 @@ public class FurnitureTests
     }
 
     [Test]
-    public void EveryKindBuildsGeometryInsideItsListingSize()
+    public void EveryKindBuildsGeometryInsideItsStatedSize()
     {
         foreach (FurnitureCatalog.Entry e in FurnitureCatalog.All)
         {
@@ -430,7 +434,7 @@ public class FurnitureTests
             Assert.That(box.SizeCaption(), Does.Contain("270"));
             Assert.That(box.SizeCaption(), Does.Not.Contain("listing"));
             // Still remembered internally: scaling anchors to it.
-            Assert.That(box.ListingSizeM, Is.EqualTo(e.SizeM));
+            Assert.That(box.BaseSizeM, Is.EqualTo(e.SizeM));
         }
         finally
         {
@@ -560,7 +564,7 @@ public class FurnitureTests
     }
 
     [Test]
-    public void ScalingIsAnchoredToTheListingSoRepeatedGrabsDoNotDrift()
+    public void ScalingIsAnchoredToTheStartSizeSoRepeatedGrabsDoNotDrift()
     {
         FurnitureCatalog.Entry e = FurnitureCatalog.Find(FurnitureCatalog.SideTable);
         LayoutBox box = LayoutBox.Create(e.Label, e.SizeM, e.Tint, e.Kind);
@@ -598,6 +602,43 @@ public class FurnitureTests
             var high = new Ray(centre - (selector.transform.forward * 1f) + (Vector3.up * 2f),
                                selector.transform.forward);
             Assert.That(selector.IndexUnderRay(high, out hit), Is.EqualTo(-1));
+        }
+        finally
+        {
+            Object.DestroyImmediate(go);
+        }
+    }
+
+    [Test]
+    public void ControlsLineNamesEveryAction()
+    {
+        string c = LayoutMode.ControlsCopy.ToLower();
+        Assert.That(c, Does.Contain("menu"));
+        Assert.That(c, Does.Contain("resize"));
+        Assert.That(c, Does.Contain("rotate"));
+        Assert.That(c, Does.Contain("move"));
+        // While resizing, B stops meaning "resize" and the line must say so.
+        Assert.That(LayoutMode.ControlsCopyResizing.ToLower(), Does.Contain("done"));
+    }
+
+    [Test]
+    public void ReopeningTheMenuDoesNotStackDuplicateLabels()
+    {
+        var go = new GameObject("Selector");
+        var selector = go.AddComponent<FurnitureSelector>();
+        try
+        {
+            selector.Open();
+            int first = go.GetComponentsInChildren<TextMesh>(true).Length;
+            Assert.That(first, Is.GreaterThan(0));
+
+            selector.Close();
+            selector.Open();
+            int second = go.GetComponentsInChildren<TextMesh>(true).Length;
+
+            // Build() used to guard on _cards.Count, which counts two entries
+            // per item, so every reopen drew a second label over the first.
+            Assert.That(second, Is.EqualTo(first), "menu doubled its labels on reopen");
         }
         finally
         {
