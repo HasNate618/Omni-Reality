@@ -1,5 +1,44 @@
 # SAM 2 Streaming Architecture
 
+## Selection latency, measured
+
+Numbers from `provider/tools/bench_tracking.py` (21 gateway calls) and a
+direct probe of the SAM 2 socket, on the Mac + Quest 3S setup.
+
+| stage | cost | notes |
+| --- | --- | --- |
+| model call (`qwen3.8-omni-flash`) | **2.3-2.7 s**, outliers to 5.3 s | dominates; see below |
+| SAM 2 connect | 15 ms | per tracking session |
+| SAM 2 first inference | 88-125 ms | no per-connection penalty; `warm_up()` covers it |
+| SAM 2 steady state | ~105 ms/frame | |
+| catch-up replay | model latency x `streamFps` x 105 ms | ~1-2 s at `streamFps: 3` |
+| spoken reply | 2.3 s cold, **0 ms cached** | canned lines warmed at startup |
+
+**Levers that do nothing.** Each was measured, not assumed:
+
+- Image size 640 -> 320 px (27 KB -> 10 KB): no change.
+- Dropping `heard` from the tracking reply: no change.
+- `max_tokens` 96 -> 32: no change.
+- Utterance 2.35 s -> 1.02 s: no change.
+- Reusing one `httpx` connection instead of one per call: no change (a
+  1-token request still costs ~1 s, so that is gateway floor, not handshake).
+
+So the model call is a fixed ~2.5 s of gateway time that payload tuning does
+not touch. What remains controllable is everything around it.
+
+**What was changed.** The spoken line is cached (2.3 s -> 0), and the seed
+mask is now published before the backlog is replayed, so it appears as soon
+as the point lands instead of one catch-up later.
+
+**Still available, with trade-offs:**
+
+- Lower `streamFps` to 2 in `QuestTrackingSettings`: shrinks the backlog by a
+  third, at coarser tracking of fast motion.
+- Subsample the catch-up (replay every 2nd frame): roughly halves it; SAM 2
+  tolerates gaps but is likelier to lose a fast-moving object.
+- Skip catch-up entirely and jump from the seed frame to the newest: removes
+  it, and is the most likely to lose the object outright.
+
 ## What it is
 A decoupled client-server architecture for real-time SAM 2 tracking. 
 - **Server** (`sam2/sam2_ws_server.py`): Hosts the SAM 2 PyTorch model locally (CUDA, Apple Silicon MPS, or CPU). It asynchronously accepts base64-encoded frames and click coordinates over WebSockets, and returns base64-encoded segmentation masks.

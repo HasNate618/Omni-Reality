@@ -75,7 +75,14 @@ class TrackingTests(unittest.IsolatedAsyncioTestCase):
                     await ws.inject(frame_message(env, image))
                 await asyncio.sleep(.02)
                 planner.release.set()
-                result = await wait_for(ws, lambda m: m["type"] == "tracking_result")
+                first = await wait_for(ws, lambda m: m["type"] == "tracking_result")
+                # The seed mask is published before the backlog is replayed, so
+                # the wearer sees it as soon as the point lands rather than one
+                # catch-up later.
+                self.assertEqual(first["payload"]["frame_id"], selected["frame_id"])
+                self.assertEqual(first["payload"]["seed_frame_id"], selected["frame_id"])
+                result = await wait_for(ws, lambda m: m["type"] == "tracking_result"
+                                        and m["payload"]["frame_id"] == successors[-1][0]["frame_id"])
                 self.assertEqual(planner.input["jpeg"], jpeg)
                 self.assertEqual(planner.input["pcm"], ONE_SECOND)
                 self.assertEqual(planner.input["envelope"]["frame_id"], selected["frame_id"])

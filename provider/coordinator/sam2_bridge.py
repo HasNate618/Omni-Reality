@@ -183,6 +183,15 @@ class Sam2Bridge:
                     response = await self._exchange(ws, frame, [click] if frame is seed else [])
                     if generation != self.generation:
                         return
+                    if frame is seed:
+                        # Draw the seed mask at once instead of after catch-up.
+                        # The backlog is the model's thinking time x stream FPS
+                        # (~3/s), so replaying it first used to hide the mask for
+                        # another 1-2 s. The overlay is world-locked to the
+                        # capture pose, so this lands in the right place; catch-up
+                        # then walks it forward to the live frame.
+                        await self.status("tracking", "SAM 2 is running.", seed_frame_id=seed.id)
+                        await self._send_result(seed, seed, response, generation)
                     pending = self.history.successors(frame.sequence) if catching_up else []
                     if catching_up and pending:
                         if time.monotonic() - started > self.history.seconds:
@@ -191,13 +200,9 @@ class Sam2Bridge:
                         continue
                     if catching_up:
                         catching_up = False
-                        await self.status("tracking", "SAM 2 is running.", seed_frame_id=seed.id)
-                    await self.send("tracking_result", self.turn_id, {
-                        "frame_id": frame.id, "seed_frame_id": seed.id,
-                        "generation": generation, "stage_epoch": frame.envelope["stage_epoch"],
-                        "width": frame.size[0], "height": frame.size[1],
-                        "objects": response["objects"], "envelope": frame.envelope,
-                    }, self.utterance_id)
+                        logger.info("SAM2 caught up %d ms after seeding",
+                                    int((time.monotonic() - started) * 1000))
+                    await self._send_result(frame, seed, response, generation)
                     # At steady state keep only the freshest unsent frame, just
                     # like sam2_ws_client.py. The initial catch-up is ordered.
                     while generation == self.generation:
@@ -213,6 +218,15 @@ class Sam2Bridge:
             if generation == self.generation:
                 text = str(exc) if isinstance(exc, TrackingError) else "SAM 2 disconnected or timed out. Check the server and try again."
                 await self.status("error", text)
+
+    async def _send_result(self, frame: VideoFrame, seed: VideoFrame,
+                           response: dict, generation: int) -> None:
+        await self.send("tracking_result", self.turn_id, {
+            "frame_id": frame.id, "seed_frame_id": seed.id,
+            "generation": generation, "stage_epoch": frame.envelope["stage_epoch"],
+            "width": frame.size[0], "height": frame.size[1],
+            "objects": response["objects"], "envelope": frame.envelope,
+        }, self.utterance_id)
 
     async def _exchange(self, ws, frame: VideoFrame, clicks: list) -> dict:
         await asyncio.wait_for(ws.send(json.dumps({
