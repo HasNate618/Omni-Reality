@@ -39,6 +39,13 @@ as the point lands instead of one catch-up later.
 - Skip catch-up entirely and jump from the seed frame to the newest: removes
   it, and is the most likely to lose the object outright.
 
+## Guided tutorial integration
+
+[Guided tutorials](omni-guided-tutorials.md) reuse the exact-frame multi-object
+seed path. The bridge caps seeds at three objects and exposes readiness after
+all seed masks arrive. Tutorial step changes never call `seed()` or restart
+the stream; Unity filters presentation while every selected object tracks.
+
 ## What it is
 A decoupled client-server architecture for real-time SAM 2 tracking. 
 - **Server** (`sam2/sam2_ws_server.py`): Hosts the SAM 2 PyTorch model locally (CUDA, Apple Silicon MPS, or CPU). It asynchronously accepts base64-encoded frames and click coordinates over WebSockets, and returns base64-encoded segmentation masks.

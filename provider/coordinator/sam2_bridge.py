@@ -133,6 +133,10 @@ class Sam2Bridge:
         self.utterance_id = None
         self.epoch = None
         self.labels: dict[int, str | None] = {}
+        self.ready = asyncio.Event()
+        self.presentation_ready = asyncio.Event()
+        self.presentation_ready.set()
+        self.start_error: str | None = None
 
     async def stop(self):
         self.generation += 1
@@ -156,9 +160,11 @@ class Sam2Bridge:
         await self.status("selecting", "Selecting the requested object…")
         return self.generation
 
-    async def seed(self, frame: VideoFrame, targets: list[dict], generation: int):
+    async def seed(self, frame: VideoFrame, targets: list[dict], generation: int, *, defer_results=False):
         if generation != self.generation:
             return
+        if len(targets) > 3:
+            raise TrackingError("Tracking supports at most three objects.")
         if not targets:
             raise TrackingError("No object was selected. Look at it and try again.")
         # obj_id 1..N in the model's own order, all clicked on this one frame.
@@ -174,7 +180,21 @@ class Sam2Bridge:
         logger.info("SAM2 seed frame_id=%s objects=%d [%s]", frame.id, len(clicks), " ".join(
             "%d:%s@(%.1f,%.1f)" % (c["obj_id"], self.labels.get(c["obj_id"]) or "?", c["x"], c["y"])
             for c in clicks))
+        self.ready.clear()
+        if defer_results:
+            self.presentation_ready.clear()
+        else:
+            self.presentation_ready.set()
+        self.start_error = None
         self.task = asyncio.create_task(self._run(frame, clicks, generation))
+
+    async def wait_ready(self, generation: int):
+        """A guide starts only after every seed object has a mask."""
+        await asyncio.wait_for(self.ready.wait(), self.timeout + 1)
+        if generation != self.generation:
+            raise TrackingError("Tracking selection was replaced.")
+        if self.start_error:
+            raise TrackingError(self.start_error)
 
     async def _run(self, seed: VideoFrame, clicks: list, generation: int):
         import websockets
@@ -193,6 +213,7 @@ class Sam2Bridge:
                     if generation != self.generation:
                         return
                     if frame is seed:
+                        self.ready.set()
                         # Draw the seed mask at once instead of after catch-up.
                         # The backlog is the model's thinking time x stream FPS
                         # (~3/s), so replaying it first used to hide the mask for
@@ -226,10 +247,16 @@ class Sam2Bridge:
             logger.warning("SAM2 stream stopped: %s", exc)
             if generation == self.generation:
                 text = str(exc) if isinstance(exc, TrackingError) else "SAM 2 disconnected or timed out. Check the server and try again."
+                self.start_error = text
+                self.ready.set()
                 await self.status("error", text)
 
     async def _send_result(self, frame: VideoFrame, seed: VideoFrame,
                            response: dict, generation: int) -> None:
+        # A guide publishes its first active step before any masks can draw.
+        await self.presentation_ready.wait()
+        if generation != self.generation:
+            return
         # SAM 2 knows obj_ids, not names; re-attach what the model called each
         # one so the headset can label the mask it draws.
         objects = [{**obj, "label": self.labels.get(obj.get("obj_id"))}

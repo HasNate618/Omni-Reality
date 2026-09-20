@@ -40,6 +40,15 @@ public class QuestSpeech : MonoBehaviour
         _instance.Enqueue(text);
     }
 
+    public static void Stop()
+    {
+        if (_instance == null) return;
+        _instance._pending.Clear();
+        if (_instance._tts == null) return;
+        try { _instance._tts.Call<int>("stop"); }
+        catch (Exception) { }
+    }
+
     void Awake()
     {
         _instance = this;

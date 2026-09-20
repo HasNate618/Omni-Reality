@@ -110,8 +110,38 @@ The coordinator owns snapshot identity and converts UVs to the existing SAM 2
 pixel-click protocol, assigning `obj_id` 1..N and clicking all of them on the
 one selected frame. Selection is called once per utterance, not per tracked
 frame. This path emits tracking status/masks, not placement ACKs or success
-speech. Defaults remain `qwen3.8-omni-flash`, 256 requested output tokens, and
-the same env-only key/audit handling. See [Quest camera + push-to-talk setup](quest-audio-setup.md).
+speech. The model remains `qwen3.8-omni-flash` with the same env-only key/audit
+handling; the tutorial-capable budget is described below. See [Quest camera + push-to-talk setup](quest-audio-setup.md).
+
+### Structured tutorials in tracking mode
+
+The same `YibuPlanner(tracking=True)` multimodal call also recognizes requests
+for step-by-step physical help. It returns `guide` instead of `track`, containing
+`title`, `objects` (`id`, `label`, normalized image `u`/`v`) and ordered `steps`
+(`index`, `instruction`, `highlight` IDs). Ordinary object selection retains the
+existing `track` response. Tracking-mode calls request at least 1536 output
+tokens so a complete bounded tutorial fits; other planner budgets are unchanged.
+
+`coordinator/guide.py` rejects the entire guide unless it has 1–3 distinct
+objects, 1–8 contiguous steps, instructions of at most 240 characters, valid
+highlight references, and finite normalized coordinates. Extra fields, including
+world coordinates, are rejected. There must be a captured JPEG and envelope.
+`PlanResult.guide_plan` carries the validated plan; its tracking targets preserve
+object order for SAM 2 IDs 1..N. The session controller advances or repeats these
+stored steps without regenerating a plan or changing object identities.
+
+While a guide is active, `YibuPlanner.guide_command(pcm=...)` uses an audio-only,
+tools-disabled transcription call with purpose `guide-command` and a 128-token
+budget. It returns only the transcript; deterministic full-utterance matching
+handles `next`/`done`, `repeat`, and `stop`/`cancel`. Questions containing these
+words do not advance the guide. The call uses the existing env-only API key and
+`chat_completion` audit ledger, including failure logging. It sends no camera
+image or tutorial history and cannot create new guide steps.
+
+Offline verification: from `provider/`, run
+`python -m unittest tests.test_guide tests.test_tracking tests.test_voice_turn -v`.
+Live model grounding, cloud speech, SAM 2 tracking, and Quest rendering still
+require device verification.
 
 ## LAN coordinator voice planners (`coordinator/server.py`)
 

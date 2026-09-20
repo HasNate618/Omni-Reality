@@ -31,6 +31,12 @@ public class VoiceCaption : MonoBehaviour
         LateUpdate();
     }
 
+    public void Hide()
+    {
+        _hideAt = 0f;
+        if (_renderer != null) _renderer.enabled = false;
+    }
+
     void LateUpdate()
     {
         if (_renderer == null) return;

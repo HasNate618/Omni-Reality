@@ -164,6 +164,9 @@ public class CoordinatorClient : MonoBehaviour
     bool _offlineShown;
     bool _attemptFailed;
     int _trackingGeneration;
+    string _guideTrackingUtterance;
+    int _guideTrackingTurn;
+    int _finishedGuideGeneration = -1;
     int _activeTurn;
     string _activeUtterance;
     int _droppedResults;
@@ -180,6 +183,9 @@ public class CoordinatorClient : MonoBehaviour
     public string SessionId { get { return _sessionId; } }
     public bool AwaitingReply { get { return _pendingReplyId != null; } }
     public TrackingResult LatestTrackingResult { get; private set; }
+    public GuideStep ActiveGuideStep { get; private set; }
+    public event Action<GuideStep> GuideStepReceived;
+    public event Action<GuideFinished> GuideFinishedReceived;
     public event Action<TrackingResult> TrackingResultReceived;
     public event Action<TrackingStatus> TrackingStatusReceived;
 
@@ -478,6 +484,41 @@ public class CoordinatorClient : MonoBehaviour
             // New session never clears drawings: no Store call here by design.
             return;
         }
+        if (type == "guide_step" || type == "guide_finished")
+        {
+            string session, payload;
+            if (!ProtocolJson.TryGetSessionId(text, out session) || session == null || session != _sessionId
+                || !ProtocolJson.TryGetPayloadObject(text, out payload)) return;
+            if (type == "guide_step")
+            {
+                var step = JsonUtility.FromJson<GuideStep>(payload);
+                if (step == null || !step.IsValid || step.generation < _trackingGeneration
+                    || step.generation <= _finishedGuideGeneration) return;
+                if (ActiveGuideStep == null || ActiveGuideStep.guide_id != step.guide_id)
+                {
+                    ProtocolJson.TryGetUtteranceId(text, out _guideTrackingUtterance);
+                    _guideTrackingTurn = JsonUtility.FromJson<TrackingMessageHeader>(text).turn_id;
+                    LatestTrackingResult = null;
+                }
+                _trackingGeneration = step.generation;
+                ActiveGuideStep = step;
+                if (SpeakPlayer != null) SpeakPlayer.StopPlayback();
+                QuestSpeech.Stop();
+                GuideStepReceived?.Invoke(step);
+                // Speech belongs to the following speak message, which carries cloud PCM.
+                ShowVoiceFeedback(step.instruction, 30f);
+            }
+            else
+            {
+                var finished = JsonUtility.FromJson<GuideFinished>(payload);
+                if (finished == null || ActiveGuideStep == null
+                    || finished.guide_id != ActiveGuideStep.guide_id
+                    || finished.generation < ActiveGuideStep.generation) return;
+                FinishGuide(finished);
+                if (!string.IsNullOrEmpty(finished.instruction)) ShowVoiceFeedback(finished.instruction);
+            }
+            return;
+        }
         if (type == "pong")
             return;
         if (type == "turn_started" || type == "tracking_status" || type == "tracking_result")
@@ -486,7 +527,9 @@ public class CoordinatorClient : MonoBehaviour
             if (!ProtocolJson.TryGetSessionId(text, out session) || session != _sessionId)
                 return;
             var header = JsonUtility.FromJson<TrackingMessageHeader>(text);
-            if (header.utterance_id != _activeUtterance)
+            bool guideTracking = type != "turn_started" && ActiveGuideStep != null
+                && header.utterance_id == _guideTrackingUtterance;
+            if (header.utterance_id != _activeUtterance && !guideTracking)
             {
                 // A newer request supersedes older results locally. Logged
                 // because a silent drop here looks exactly like "no masks".
@@ -510,7 +553,7 @@ public class CoordinatorClient : MonoBehaviour
             if (type == "tracking_status")
             {
                 var status = JsonUtility.FromJson<TrackingStatus>(payload);
-                if (status.generation < _trackingGeneration) return;
+                if (status.generation < _trackingGeneration || status.generation <= _finishedGuideGeneration) return;
                 _trackingGeneration = status.generation;
                 if (status.state != "tracking") LatestTrackingResult = null;
                 Debug.Log("QUEST_TRACKING " + status.state + ": " + status.text);
@@ -519,7 +562,8 @@ public class CoordinatorClient : MonoBehaviour
             else
             {
                 var result = JsonUtility.FromJson<TrackingResult>(payload);
-                if (result.generation < _trackingGeneration || result.stage_epoch != GetStageEpoch()) return;
+                if (result.generation < _trackingGeneration || result.generation <= _finishedGuideGeneration
+                    || result.stage_epoch != GetStageEpoch()) return;
                 _trackingGeneration = result.generation;
                 result.RawPayloadJson = payload;
                 bool first = LatestTrackingResult == null;
@@ -849,7 +893,7 @@ public class CoordinatorClient : MonoBehaviour
         _activeUtterance = utteranceId;
         _activeTurn = 0;
         _stoppedUtterance = null;
-        LatestTrackingResult = null;
+        if (ActiveGuideStep == null) LatestTrackingResult = null;
         _outbox.Enqueue(PriorityUtteranceEnd,
             ProtocolJson.BuildUtteranceEnd(_sessionId, utteranceId));
     }
@@ -873,7 +917,7 @@ public class CoordinatorClient : MonoBehaviour
         _activeUtterance = utteranceId;
         _activeTurn = 0;
         _stoppedUtterance = null;
-        LatestTrackingResult = null;
+        if (ActiveGuideStep == null) LatestTrackingResult = null;
         // All audio chunks and utterance_end share a FIFO priority: end cannot
         // overtake its own PCM. The pinned JPEG occupies the next higher lane.
         const int chunkBytes = 3200;
@@ -883,12 +927,33 @@ public class CoordinatorClient : MonoBehaviour
         _outbox.Enqueue(8, ProtocolJson.BuildUtteranceEnd(_sessionId, utteranceId, frameId));
     }
 
+    void FinishGuide(GuideFinished finished)
+    {
+        _finishedGuideGeneration = Mathf.Max(_finishedGuideGeneration, finished.generation);
+        ActiveGuideStep = null;
+        _guideTrackingUtterance = null;
+        LatestTrackingResult = null;
+        if (SpeakPlayer != null) SpeakPlayer.StopPlayback();
+        QuestSpeech.Stop();
+        if (Caption != null) Caption.Hide();
+        GuideFinishedReceived?.Invoke(finished);
+    }
+
+    void ClearGuide(string reason)
+    {
+        if (ActiveGuideStep != null)
+            FinishGuide(new GuideFinished { guide_id = ActiveGuideStep.guide_id,
+                generation = ActiveGuideStep.generation, reason = reason });
+    }
+
     public void StopTracking()
     {
+        int cancelTurn = ActiveGuideStep != null ? _guideTrackingTurn : _activeTurn;
+        ClearGuide("stopped");
         _stoppedUtterance = _activeUtterance;
         LatestTrackingResult = null;
-        if (IsReady && _activeTurn > 0)
-            _outbox.Enqueue(PriorityCancel, ProtocolJson.BuildTrackingCancel(_sessionId, _activeTurn));
+        if (IsReady && cancelTurn > 0)
+            _outbox.Enqueue(PriorityCancel, ProtocolJson.BuildTrackingCancel(_sessionId, cancelTurn));
         TrackingStatusReceived?.Invoke(new TrackingStatus { state = "stopped", text = "Tracking stopped.", generation = _trackingGeneration });
         Debug.Log("QUEST_TRACKING stopped locally");
     }
@@ -931,6 +996,8 @@ public class CoordinatorClient : MonoBehaviour
 
     void CleanupSocket()
     {
+        ClearGuide("stopped");
+        _finishedGuideGeneration = -1;
         TrackingStatusReceived?.Invoke(new TrackingStatus {
             state = "stopped", text = "Laptop disconnected.", generation = _trackingGeneration
         });

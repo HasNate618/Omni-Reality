@@ -56,6 +56,8 @@ public class TrackingMaskOverlay : MonoBehaviour
     Shader _shader;
     float _lastResult;
     bool _visible;
+    GuideStep _guide;
+    int _finishedGuideGeneration = -1;
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     static void AutoCreate()
@@ -76,6 +78,10 @@ public class TrackingMaskOverlay : MonoBehaviour
             Unsubscribe();
             client.TrackingResultReceived += OnTrackingResult;
             client.TrackingStatusReceived += OnTrackingStatus;
+            client.GuideStepReceived += OnGuideStep;
+            client.GuideFinishedReceived += OnGuideFinished;
+            _finishedGuideGeneration = -1;
+            _guide = client.ActiveGuideStep;
             _subscribed = client;
             Debug.Log("QUEST_OVERLAY subscribed to tracking results");
         }
@@ -102,13 +108,38 @@ public class TrackingMaskOverlay : MonoBehaviour
             return;
         _subscribed.TrackingResultReceived -= OnTrackingResult;
         _subscribed.TrackingStatusReceived -= OnTrackingStatus;
+        _subscribed.GuideStepReceived -= OnGuideStep;
+        _subscribed.GuideFinishedReceived -= OnGuideFinished;
         _subscribed = null;
+    }
+
+    void OnGuideStep(GuideStep step)
+    {
+        bool newGeneration = _guide == null || _guide.generation != step.generation;
+        _guide = step;
+        if (newGeneration) HideAll();
+        // Cached layers switch immediately; tracking keeps running for all objects.
+        foreach (var entry in _layers)
+        {
+            float opacity = step.OpacityFor(entry.Key);
+            entry.Value.SetEmphasis(opacity);
+            entry.Value.Show(opacity > 0f && _seen.Contains(entry.Key));
+        }
+    }
+
+    void OnGuideFinished(GuideFinished finished)
+    {
+        _finishedGuideGeneration = finished.generation;
+        _guide = null;
+        HideAll();
     }
 
     void OnTrackingStatus(TrackingStatus status)
     {
         if (status == null)
             return;
+        // A reconnect restarts coordinator generations from zero.
+        if (status.text == "Laptop disconnected.") _finishedGuideGeneration = -1;
         Debug.Log("QUEST_OVERLAY status " + status.state + ": " + status.text);
         if (status.state == "stopped" || status.state == "error")
             HideAll();
@@ -119,6 +150,8 @@ public class TrackingMaskOverlay : MonoBehaviour
     {
         try
         {
+            if (result != null && (result.generation <= _finishedGuideGeneration
+                || (_guide != null && result.generation != _guide.generation))) return;
             if (result == null || result.objects == null || result.objects.Length == 0)
             {
                 Debug.Log("QUEST_OVERLAY result with no objects; hiding");
@@ -148,7 +181,9 @@ public class TrackingMaskOverlay : MonoBehaviour
                     continue;
                 }
                 Place(layer, payload.envelope, obj.label);
-                layer.Show(true);
+                float opacity = _guide != null ? _guide.OpacityFor(obj.obj_id) : 1f;
+                layer.SetEmphasis(opacity);
+                layer.Show(opacity > 0f);
                 _seen.Add(obj.obj_id);
             }
             // An object that stopped coming back is gone, not frozen in place.
@@ -462,6 +497,15 @@ public class TrackingMaskOverlay : MonoBehaviour
             _label.text = text;
             _label.transform.localPosition = localPosition;
             _label.transform.localRotation = Quaternion.identity;
+        }
+
+        public void SetEmphasis(float opacity)
+        {
+            // The shader multiplies the texture tint, so changing step never
+            // requires decoding masks again or reseeding the tracker.
+            _material.color = new Color(1f, 1f, 1f, opacity);
+            if (_label != null)
+                _label.color = new Color(Tint.r / 255f, Tint.g / 255f, Tint.b / 255f, opacity);
         }
 
         public void Show(bool visible)

@@ -9,6 +9,7 @@ Quest 3S spatial assistant for the Huawei OMNI Live track. Unity renders on-devi
 - `sam2/` — SAM 2 streaming server and client. Setup/usage docs in `docs/omni-sam2-streaming.md`.
 - `docs/` — one doc per topic (see Documentation procedure). Start here: `docs/omni-provider-api.md` (gateway contract), `docs/questdemo-build.md` (Unity→Quest build), `docs/omni-live-pitch.md` (product), `docs/omni-live-research.md` (research). Design specs live in `docs/superpowers/specs/`.
 - `docs/omni-spatial-loop.md`: Quest-laptop drawing loop (slices 0-2).
+- `docs/omni-guided-tutorials.md`: persistent image-grounded tutorials, guide commands, and mask highlighting.
 - `docs/quest-audio-setup.md`: Quest camera, push-to-talk audio, and voice-seeded SAM 2 setup.
 - `docs/omni-worker-tools.md`: Omni-track SAM2/generation tool loop.
 - `docs/omni-layout-mode.md`: true-size cart boxes in a room corner; the path that still runs with a dead key.
