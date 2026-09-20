@@ -117,7 +117,16 @@ Append to `provider/tests/test_protocol.py`, inside `class SchemaTests`:
             with self.assertRaises(ValidationError):
                 validate_instance("scene_op", data)
 
-    def test_model_still_cannot_emit_extents(self) -> None:
+    def test_model_cannot_smuggle_extents_into_a_valid_op(self) -> None:
+        # A valid model op with extent_m bolted on must be refused:
+        # model_scene_op is additionalProperties:false, and that is what keeps
+        # sizes off the model's wire.
+        data = load_fixture("valid", "scene_op_procedural.json")
+        data["extent_m"] = [0.55, 0.40, 0.72]
+        with self.assertRaises(ValidationError):
+            validate_instance("model_scene_op", data)
+
+    def test_place_generated_is_not_a_model_kind(self) -> None:
         data = load_fixture("valid", "scene_op_place_generated_extent.json")
         with self.assertRaises(ValidationError):
             validate_instance("model_scene_op", data)
@@ -176,7 +185,7 @@ Remember the trailing comma on the preceding `"job_id"` line. Do **not** touch `
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `cd provider && . .venv/bin/activate && python -m unittest tests.test_protocol -v`
-Expected: PASS, including the four new tests and every pre-existing schema test.
+Expected: PASS, including the six new tests and every pre-existing schema test.
 
 - [ ] **Step 6: Commit**
 
@@ -707,6 +716,7 @@ git commit -m "Omni tool: place_listing requires stated sizes"
 - Modify: `provider/coordinator/listings.py`
 - Modify: `provider/coordinator/planner.py`
 - Modify: `provider/coordinator/session.py`
+- Modify: `provider/coordinator/jobs.py`
 - Test: `provider/tests/test_listings.py`
 
 **Interfaces:**
@@ -875,6 +885,22 @@ class HandlePlaceListingTests(unittest.TestCase):
         self._call({"name": "floor lamp", "extent_m": [0.30, 0.30, 1.50], "target": _TARGET})
         _, op = self._call(self._good())
         self.assertAlmostEqual(op["offset_m"], 0.0, places=6)
+
+    def test_result_reports_the_packed_run_length(self) -> None:
+        self._call(self._good())
+        lamp = {"name": "floor lamp", "extent_m": [0.30, 0.30, 1.50], "target": _TARGET}
+        result, _ = self._call(lamp)
+        self.assertAlmostEqual(result["run_length_m"], 0.55 + 0.30 + 0.05, places=6)
+
+    def test_run_length_present_on_the_prebaked_path_too(self) -> None:
+        result, _ = asyncio.run(handle_place_listing(
+            self.store,
+            listings=self.memory,
+            args=self._good(),
+            current_frame_id=_FRAME,
+            prebaked={"oak side table": _ARTIFACT},
+        ))
+        self.assertAlmostEqual(result["run_length_m"], 0.55, places=6)
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -887,8 +913,8 @@ Expected: FAIL — `ImportError: cannot import name 'handle_place_listing'`.
 Append to `provider/coordinator/listings.py`. Add these imports at the top of the file, below the existing `from typing import Any`:
 
 ```python
-from coordinator.jobs import JobStore
-from coordinator.layout import pack_offsets
+from coordinator.jobs import JobStore, session_generation_busy
+from coordinator.layout import pack_offsets, run_length
 from coordinator.prebaked import lookup
 from protocol.ids import new_ulid
 
@@ -960,6 +986,7 @@ async def handle_place_listing(
     offset_m = _offset_for(listings, name)
 
     artifact_id = lookup(prebaked, name)
+    row_extents = [row["extent_m"] for row in listings.rows()]
     if artifact_id is not None:
         job_id = artifact_id
         store.jobs[job_id] = {
@@ -972,13 +999,18 @@ async def handle_place_listing(
             "planted": True,
         }
         return (
-            {"listed": name, "extent_m": extents, "job_id": job_id},
+            {
+                "listed": name,
+                "extent_m": extents,
+                "job_id": job_id,
+                "run_length_m": run_length(row_extents),
+            },
             _place_op(job_id, extents, target, offset_m),
         )
 
     from workers.gen_client import BusyError
 
-    if _session_busy(store):
+    if session_generation_busy(store):
         return {"error": "busy"}, None
 
     job_id = new_ulid()
@@ -1005,7 +1037,12 @@ async def handle_place_listing(
             store.jobs.pop(job_id, None)
             return {"error": "busy"}, None
     return (
-        {"listed": name, "extent_m": extents, "job_id": job_id},
+        {
+            "listed": name,
+            "extent_m": extents,
+            "job_id": job_id,
+            "run_length_m": run_length(row_extents),
+        },
         _place_op(job_id, extents, target, offset_m),
     )
 
@@ -1039,13 +1076,6 @@ def _place_op(job_id: str, extents: list[float], target: dict, offset_m: float) 
     }
 
 
-def _session_busy(store: JobStore) -> bool:
-    for job in store.jobs.values():
-        if job.get("status") in ("queued", "running"):
-            return True
-    return False
-
-
 async def _maybe_await(value: Any) -> Any:
     import inspect as inspect_module
 
@@ -1057,9 +1087,33 @@ async def _maybe_await(value: Any) -> Any:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd provider && . .venv/bin/activate && python -m unittest tests.test_listings -v`
-Expected: PASS, 25 tests.
+Expected: PASS, 27 tests.
 
-- [ ] **Step 5: Add listings to session state**
+- [ ] **Step 5: Make the busy check shared, not duplicated**
+
+`coordinator/jobs.py` already has the one-worker-at-a-time rule as
+`_session_generation_busy`. Reuse it rather than copying the loop into
+`listings.py`. In `provider/coordinator/jobs.py`, rename it and update its one
+caller:
+
+```python
+def session_generation_busy(store: JobStore) -> bool:
+    """True while any worker job is queued or running (one job at a time)."""
+    for job in store.jobs.values():
+        if job.get("status") in ("queued", "running"):
+            return True
+    return False
+```
+
+and inside `handle_start_generation`, change `if _session_generation_busy(store):`
+to `if session_generation_busy(store):`.
+
+Confirm nothing else referenced the old private name:
+
+Run: `cd provider && grep -rn "_session_generation_busy" --include=*.py .`
+Expected: no matches. If a test references it, update that test to the new name.
+
+- [ ] **Step 6: Add listings to session state****
 
 In `provider/coordinator/session.py`, add the import beside the existing job import:
 
@@ -1236,7 +1290,7 @@ and the legacy path line becomes:
 - [ ] **Step 9: Run the tests to verify they pass**
 
 Run: `cd provider && . .venv/bin/activate && python -m unittest tests.test_place_listing_turn tests.test_listings -v`
-Expected: PASS, 26 tests.
+Expected: PASS, 31 tests.
 
 Then run the whole suite to catch regressions from the `bind_tools` signature change:
 
@@ -1789,7 +1843,7 @@ git commit -m "Quest: listed box with uniform fit math"
 
 **Interfaces:**
 - Consumes: `ListingBox.ToBoxSize`, `ListingBox.FitScale`, `ListingBox.IsApproximate`, `ListingBox.Create` (Task 9); `HasExtentM` / `ExtentM` (Task 8).
-- Produces: `DrawingStore.PlaceGenerated(Vector3 point, Vector3 normal, string drawingId, Vector3? extentM) -> GameObject`, `DrawingStore.MarkMeshFitted(string drawingId, bool approximate) -> void`. Consumed by Task 11.
+- Produces: `DrawingStore.PlaceGenerated(Vector3 point, Vector3 normal, string drawingId, Vector3? extentM, float offsetM = 0f) -> GameObject`, `DrawingStore.MarkMeshFitted(string drawingId, bool approximate) -> void`. Consumed by Task 11.
 
 **Why the store matters:** today generated roots bypass `DrawingStore` entirely, so the clutter cap, `Clear`, and revise cannot see them. Registering them is what makes the object addressable.
 
@@ -1824,16 +1878,20 @@ public class GeneratedMeshPlacerTests
     }
 
     [Test]
-    public void FailureFallbackIsTheListedBoxNotASmallCube()
+    public void FailureLeavesTheListedBoxNotASmallCube()
     {
-        // A 55 x 72 x 40 cm listing must never degrade to a 10 cm cube.
-        Vector3 box = ListingBox.ToBoxSize(new Vector3(0.55f, 0.40f, 0.72f));
-        GameObject fallback = GeneratedMeshPlacer.BuildFailureVisual(box, "drawing-9");
-        Assert.IsNotNull(fallback);
-        Assert.AreEqual(0.55f, fallback.transform.localScale.x, 1e-4f);
-        Assert.AreEqual(0.72f, fallback.transform.localScale.y, 1e-4f);
-        Assert.AreEqual(0.40f, fallback.transform.localScale.z, 1e-4f);
-        Object.DestroyImmediate(fallback);
+        // A 55 x 72 x 40 cm listing must never degrade to a 10 cm cube. This
+        // is the real failure path: no mesh ever arrives, so the store's
+        // listed box is what remains.
+        var go = new GameObject("store");
+        var store = go.AddComponent<DrawingStore>();
+        GameObject placed = store.PlaceGenerated(
+            Vector3.zero, Vector3.up, "d-fail", new Vector3(0.55f, 0.40f, 0.72f));
+        Transform box = placed.transform.GetChild(0);
+        Assert.AreEqual(0.55f, box.localScale.x, 1e-4f);
+        Assert.AreEqual(0.72f, box.localScale.y, 1e-4f);
+        Assert.AreEqual(0.40f, box.localScale.z, 1e-4f);
+        Object.DestroyImmediate(go);
     }
 
     [Test]
@@ -1905,7 +1963,7 @@ public class GeneratedMeshPlacerTests
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `nix run .# -- -c 'cd QuestDemo && $UNITY_EDITOR_6000 -batchmode -nographics -projectPath $(pwd) -runTests -testPlatform EditMode -assemblyNames Omni.Spatial.Editor.Tests -testFilter GeneratedMeshPlacerTests -testResults /tmp/gen-red.xml -logFile /tmp/unity-gen-red.log'`
-Expected: FAIL to compile — no `MaxFetchAttempts`, no `BuildFailureVisual`, no `PlaceGenerated`, no `HasGenerated`.
+Expected: FAIL to compile — no `MaxFetchAttempts`, no `PlaceGenerated`, no `HasGenerated`.
 
 - [ ] **Step 3: Add the store surface**
 
@@ -2183,16 +2241,7 @@ and in `FetchAndPlace`:
             Object.Destroy(mesh);
 ```
 
-Delete `FitInsideUnitSphere` entirely, and delete the `GameObject.CreatePrimitive(PrimitiveType.Cube)` placeholder path. Add the fallback visual used by the test:
-
-```csharp
-    /// <summary>Failure shows the listed box at full stated size, never a small cube.</summary>
-    public static GameObject BuildFailureVisual(Vector3 boxSize, string drawingId)
-    {
-        GameObject box = ListingBox.Create(boxSize, Vector3.zero, Vector3.forward, drawingId);
-        return box;
-    }
-```
+Delete `FitInsideUnitSphere` entirely, and delete the `GameObject.CreatePrimitive(PrimitiveType.Cube)` placeholder path. Do **not** add a failure-visual helper: the listed box that `store.PlaceGenerated` already created is the failure visual, and it stays at full stated size because nothing ever replaces it.
 
 Update `TryHandle` to take the store and thread it through:
 
