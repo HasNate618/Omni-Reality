@@ -23,6 +23,29 @@ public sealed class LayoutMode : MonoBehaviour
         "A: menu    B: resize    double-tap: rotate    trigger: move";
     public const string ControlsCopyResizing =
         "A: menu    B: done resizing    trigger: hold and move your hand";
+    /// <summary>How to leave any mode. Shown in all of them.</summary>
+    public const string ExitCopy = "Left Menu or Y: switch mode";
+
+    /// <summary>
+    /// The controls line for whichever mode is running. Every mode gets one:
+    /// without it there was no way to discover how to get back to the picker.
+    /// </summary>
+    public static string ControlsFor(ModeLauncher.Mode mode, bool resizing)
+    {
+        switch (mode)
+        {
+            case ModeLauncher.Mode.Layout:
+                return (resizing ? ControlsCopyResizing : ControlsCopy) + "\n" + ExitCopy;
+            case ModeLauncher.Mode.Tutorial:
+                return "Hold the side trigger and ask for a tutorial\n"
+                       + "Then say \"next\", \"repeat\" or \"stop\"\n" + ExitCopy;
+            case ModeLauncher.Mode.Tracking:
+                return "Hold the side trigger and name what to track\n"
+                       + "B: conversation    Left X: stop tracking\n" + ExitCopy;
+            default:
+                return ExitCopy;
+        }
+    }
 
     static LayoutMode _instance;
 
@@ -115,6 +138,9 @@ public sealed class LayoutMode : MonoBehaviour
                 _centerEye = centerGO.transform;
         }
         Prune();
+        // The picker owns the controller while it is up.
+        if (ModeLauncher.IsOpen)
+            return;
         if (!_armed)
             return;
 
@@ -578,10 +604,13 @@ public sealed class LayoutMode : MonoBehaviour
         if (_status != null && !statusLive)
             _status.SetVisible(false);
 
-        if (_armed)
+        // Shown in every mode, not just Layout: the exit is only discoverable
+        // if something says it, and tracking/tutorial had no controls line.
+        bool showControls = ModeLauncher.HasChosen && !ModeLauncher.IsOpen;
+        if (showControls)
         {
             EnsureControls();
-            _controls.SetText(_resizeMode ? ControlsCopyResizing : ControlsCopy);
+            _controls.SetText(ControlsFor(ModeLauncher.Chosen, _resizeMode));
             _controls.SetVisible(true);
         }
         else if (_controls != null)

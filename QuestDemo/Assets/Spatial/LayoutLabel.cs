@@ -56,6 +56,52 @@ public sealed class LayoutLabel : MonoBehaviour
             1f);
     }
 
+    /// <summary>
+    /// Break `text` so no line exceeds `maxChars`, on word boundaries.
+    ///
+    /// TextMesh does not wrap, so a long line just runs off the side of
+    /// whatever it is labelling. Existing newlines are kept.
+    /// </summary>
+    public static string Wrap(string text, int maxChars)
+    {
+        if (string.IsNullOrEmpty(text) || maxChars <= 0)
+            return text ?? "";
+        var outp = new System.Text.StringBuilder();
+        string[] paragraphs = text.Split('\n');
+        for (int p = 0; p < paragraphs.Length; p++)
+        {
+            if (p > 0)
+                outp.Append('\n');
+            int column = 0;
+            string[] words = paragraphs[p].Split(' ');
+            for (int w = 0; w < words.Length; w++)
+            {
+                string word = words[w];
+                if (word.Length == 0)
+                    continue;
+                if (column > 0 && column + 1 + word.Length > maxChars)
+                {
+                    outp.Append('\n');
+                    column = 0;
+                }
+                else if (column > 0)
+                {
+                    outp.Append(' ');
+                    column++;
+                }
+                outp.Append(word);
+                column += word.Length;
+            }
+        }
+        return outp.ToString();
+    }
+
+    /// <summary>Set text, wrapped so it stays inside its card.</summary>
+    public void SetTextWrapped(string text, int maxChars)
+    {
+        SetText(Wrap(text, maxChars));
+    }
+
     public void SetText(string text)
     {
         if (_text != null)

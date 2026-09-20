@@ -244,9 +244,25 @@ public static class ProtocolJson
 
     public static string BuildTrackingHello(string osVersion)
     {
+        return BuildTrackingHello(osVersion, null);
+    }
+
+    /// <summary>
+    /// Hello with the chosen mode. The laptop builds its planner from this,
+    /// so it has to travel on the first message of the connection. `payload`
+    /// is unconstrained by the schema, so this needs no protocol change.
+    /// </summary>
+    public static string BuildTrackingHello(string osVersion, string mode)
+    {
         var sb = new StringBuilder("{\"device\":\"quest\",\"app\":\"QuestDemo\",\"os_version\":");
         AppendNullable(sb, osVersion);
-        sb.Append(",\"capabilities\":{\"pca\":true,\"depth\":false,\"tts\":true}}");
+        sb.Append(",\"capabilities\":{\"pca\":true,\"depth\":false,\"tts\":true}");
+        if (!string.IsNullOrEmpty(mode))
+        {
+            sb.Append(",\"mode\":");
+            AppendNullable(sb, mode);
+        }
+        sb.Append('}');
         return WrapMessage("hello", null, 0, sb.ToString());
     }
 

@@ -156,9 +156,26 @@ public class SpatialRuntime : MonoBehaviour
     /// laptop_ipv4 is empty (no connect); otherwise create the client once
     /// and tick it every frame while the IP is configured.
     /// </summary>
+    /// <summary>
+    /// Drop the coordinator so the next tick rebuilds it. Switching modes
+    /// needs a fresh socket: the laptop picks its planner from the `hello`,
+    /// and the hello is only sent once per connection.
+    /// </summary>
+    internal void RestartCoordinator()
+    {
+        if (_coord == null)
+            return;
+        Destroy(_coord.gameObject);
+        _coord = null;
+    }
+
     void TickCoordinator()
     {
         if (string.IsNullOrEmpty(_laptopIpv4))
+            return;
+        // The mode decides what goes in the hello and who owns the mic, and
+        // both are read once at construction. Wait for the launcher.
+        if (!ModeLauncher.HasChosen)
             return;
         if (_coord == null)
         {
@@ -174,7 +191,8 @@ public class SpatialRuntime : MonoBehaviour
             mic.Perception = capture;
             // A-mode (QuestStreamInput push-to-talk) owns the microphone while
             // tracking is on; B hands it to the conversation loop.
-            if (_trackingSettings != null && _trackingSettings.enableTracking)
+            if (ModeLauncher.Chosen != ModeLauncher.Mode.Layout
+                && _trackingSettings != null && _trackingSettings.enableTracking)
                 mic.enabled = false;
             _coord.Cache = _cache;
             _coord.Store = _store;

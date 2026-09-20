@@ -137,6 +137,59 @@ def _extract_envelope(payload: object) -> dict | None:
     return candidate
 
 
+HEADSET_MODES = ("tracking", "tutorial", "layout")
+
+
+def apply_headset_mode(state: CoordinatorState, ws: Any, mode: str | None, *,
+                       planner_kind: str, model: str | None, sam2_url: str | None,
+                       voice_only: bool, perception_qa: bool) -> str | None:
+    """Rebuild this connection's planner for the mode the headset asked for.
+
+    The launcher picks on the headset, so the laptop cannot know the mode until
+    `hello` arrives. Everything mode-dependent lives here: the planner, the SAM 2
+    bridge, and the synthesizer. Returns the mode applied, or None when the
+    headset did not ask for one (an older build) and the CLI choice stands.
+
+    "tutorial" is deliberately the same configuration as "tracking": the guided
+    tutorial is a branch inside the tracking planner, not a separate mode.
+    """
+    if mode not in HEADSET_MODES:
+        if mode is not None:
+            logger.info("ignoring unknown headset mode %r", str(mode)[:32])
+        return None
+
+    if mode == "layout":
+        state.planner = make_planner("layout", model)
+        state.tracking = None
+        from voice.audio import say_to_pcm
+
+        async def _layout_synth(text: str) -> bytes | None:
+            return await asyncio.to_thread(say_to_pcm, text)
+
+        state.synthesizer = _layout_synth
+        logger.info("headset chose layout: canned cart, no SAM 2")
+        return mode
+
+    # tracking and tutorial share one configuration.
+    state.planner = make_planner(planner_kind, model, tracking=bool(sam2_url),
+                                 voice_only=voice_only, perception_qa=perception_qa)
+    if sam2_url and state.tracking is None:
+        from coordinator.sam2_bridge import Sam2Bridge
+        state.tracking = Sam2Bridge(sam2_url, _turn_sender(ws, state))
+    if planner_kind == "yibu":
+        from voice.cloud_speech import synthesize_line
+
+        speak_purpose = ("perception-qa-speak" if perception_qa
+                         else ("voice-only-speak" if voice_only else "voice-speak"))
+
+        async def _live_synth(text: str) -> bytes | None:
+            return await synthesize_line(text=text, purpose=speak_purpose)
+
+        state.synthesizer = _live_synth
+    logger.info("headset chose %s: planner=%s sam2=%s", mode, planner_kind, bool(sam2_url))
+    return mode
+
+
 async def _handle_hello(ws: Any, state: CoordinatorState, message: dict) -> None:
     incoming = message["session_id"]
     if incoming is not None and incoming == state.session_id:
@@ -144,6 +197,10 @@ async def _handle_hello(ws: Any, state: CoordinatorState, message: dict) -> None
     else:
         session_id = new_ulid()
         state.session_id = session_id
+    configure = getattr(state, "configure_mode", None)
+    if callable(configure):
+        # Before hello_ok: that reply advertises the planner we ended up with.
+        configure(ws, message.get("payload", {}).get("mode"))
     await ws.send(
         _sendable(
             "hello_ok",
@@ -704,6 +761,15 @@ async def run_server(
         state = CoordinatorState(planner=make_planner(
             planner_kind, model, tracking=bool(sam2_url),
             voice_only=voice_only, perception_qa=perception_qa))
+        # The headset's launcher picks the mode and sends it in `hello`; this
+        # closure lets _handle_hello rebuild the planner for that choice. The
+        # CLI values below remain the default for headset-free tools.
+        def _configure(socket, mode):
+            return apply_headset_mode(
+                state, socket, mode, planner_kind=planner_kind, model=model,
+                sam2_url=sam2_url, voice_only=voice_only, perception_qa=perception_qa)
+
+        state.configure_mode = _configure
         if sam2_url:
             from coordinator.sam2_bridge import Sam2Bridge
             state.tracking = Sam2Bridge(sam2_url, _turn_sender(ws, state))

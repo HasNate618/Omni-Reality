@@ -3,8 +3,8 @@
 #
 #   ./start-demo.sh            live Huawei planner (needs provider/.env)
 #   ./start-demo.sh --stub     no model call, seeds the centre of the frame
-#   ./start-demo.sh --layout   Layout mode: cart boxes in your corner, no SAM 2
-#                              (works with a dead key: canned cart, local voice)
+#   ./start-demo.sh --layout   force layout on the laptop (headset-free testing;
+#                              normally the headset's launcher picks the mode)
 #   ./start-demo.sh --no-app   don't relaunch the Quest app
 #   ./start-demo.sh --quiet    less logging (INFO instead of DEBUG)
 #   ./start-demo.sh --install  install QuestDemo/Builds/QuestDemo.apk first
@@ -25,6 +25,7 @@ SAM2_PORT=8766
 APP_ID=com.omni.questdemo
 STARTED_SAM2=0
 USE_SAM2=1
+FORCED_MODE=0
 INSTALL_APK=0
 WIFI=0
 SET_IP=""
@@ -35,7 +36,7 @@ PIDS=()
 for arg in "$@"; do
   case "$arg" in
     --stub) PLANNER=stub ;;
-    --layout) PLANNER=layout; USE_SAM2=0 ;;
+    --layout) PLANNER=layout; USE_SAM2=0 ; FORCED_MODE=1 ;;
     --no-app) LAUNCH_APP=0 ;;
     --quiet) LOG_LEVEL=INFO ;;
     --install) INSTALL_APK=1 ;;
@@ -130,6 +131,9 @@ ok "started (planner=$PLANNER, logs=$LOG_LEVEL)"
 if [ "$PLANNER" = stub ]; then
   warn "stub planner: seeds the centre of the frame, Huawei is not called"
   warn "B-mode conversation needs the live model, so it will not work with --stub"
+fi
+if [ "$FORCED_MODE" = 0 ]; then
+  ok "serving every mode; the headset's launcher picks one per connection"
 fi
 if [ "$PLANNER" = layout ]; then
   if [ -n "${YIBU_API_KEY:-}" ]; then
@@ -235,7 +239,21 @@ cat <<'STEPS'
     Put the headset ON first. Off your face the app suspends: no frames,
     no buttons, no mic. Shake the right controller to wake it.
 
-    ---- A: push to talk (tracking) ----------------------------------
+    ---- Pick a mode -------------------------------------------------
+      The app opens on a picker: Tracking | Tutorial | Interior Design.
+      Point with the right controller, pull the INDEX trigger.
+      The LEFT Menu button reopens it at any time, so you can move
+      between all three without taking the headset off.
+
+      Nothing connects to this laptop until you pick, and picking again
+      reconnects -- that is how the laptop learns which mode to serve.
+
+      Tracking and Tutorial are the same mode underneath. The guided
+      tutorial is a branch inside the tracking planner, so the only
+      difference is what you say: "track the mug" vs "show me how to
+      tidy this desk".
+
+    ---- Tracking: push to talk --------------------------------------
       1. Look at the object, or at up to 3 of them.
       2. HOLD A, say "track the laptop and the mug" (speak > 0.5 s), RELEASE A.
 
@@ -251,7 +269,7 @@ cat <<'STEPS'
         headset: QUEST_OVERLAY drawn obj=1 ...         <- one line per mask placed
         headset: QUEST_SPEAK <the reply>               <- Android TTS speaks it
 
-    ---- B: continuous conversation ---------------------------------
+    ---- Tracking: continuous conversation ---------------------------
       1. Press B once. Caption: "Conversation on. Just speak."
       2. Talk with NO button held. Silence ends the turn.
       3. Mid-conversation say "track the mug" to drop an overlay on it.
@@ -268,7 +286,7 @@ cat <<'STEPS'
         coord:   live tracking seed: turn N seeded ... <- only after a "track the ..."
         headset: QUEST_TRACKING first mask frame=...   <- overlay, conversation continues
 
-    ---- C: layout mode (./start-demo.sh --layout) -------------------
+    ---- Interior design ---------------------------------------------
       1. Stand facing an empty corner, a couple of metres back.
       2. HOLD the right SIDE trigger, say "fill my corner", RELEASE.
          Three true-size boxes land: sofa, armchair, side table.
@@ -301,7 +319,7 @@ cat <<'STEPS'
       arrangement and macOS "say". Both are meant to work.
 
     If it stops, the LAST line you saw tells you where. Common causes:
-      C: no boxes at all       -> check "mode=layout": running without --layout
+      C: no boxes at all       -> pick Interior Design in the launcher first
       C: boxes but no voice    -> macOS 'say' is the fallback; check laptop volume
       C: corner says fallback  -> walls too far or too dark; boxes still land ahead
       C: cannot grab a box     -> point at the FLOOR where it stands, not at the air
@@ -327,22 +345,32 @@ cat <<'STEPS'
       white/blank square       -> old build installed: rebuild in Unity, then --install
       neither mode connects    -> USB: app must be built for 127.0.0.1 (see above)
 
-    Ctrl+C stops everything. Full logs: logs/coordinator.log, logs/sam2.log
+    Ctrl+C stops everything. Logs are written to logs/, not to this terminal.
 STEPS
 if [ "$WIFI" = 1 ] && [ -z "$(adb devices | sed -n '2p' | grep -w device)" ]; then
-  echo "    No adb connection, so no headset logs below. To get them over Wi-Fi:"
+  echo "    No adb connection, so no headset logs are captured. To get them over Wi-Fi:"
   echo "      1. plug in USB once and run: adb tcpip 5555"
   echo "      2. unplug, then: adb connect <headset-ip>:5555   (headset Settings > Wi-Fi > your network)"
   echo
 fi
-echo
-tail -f logs/coordinator.log | grep --line-buffered -v "websockets.server" | sed -u 's/^/coord:   /' &
-PIDS+=($!)
-tail -f logs/sam2.log | grep --line-buffered -E "stats|Error|error|Traceback" | sed -u 's/^/sam2:    /' &
-PIDS+=($!)
+# Everything is captured to logs/ already, so nothing is echoed here. A live
+# feed scrolling behind the demo made the real output impossible to read.
 if [ -n "$(adb devices | sed -n '2p' | grep -w device)" ]; then
-  adb logcat -s Unity | grep --line-buffered -E "QUEST_TRACKING|QUEST_OVERLAY|QUEST_STREAM|QUEST_MODE|QUEST_SPEAK|VoiceBootstrap|CoordinatorClient" \
-    | sed -u 's/^.*I Unity   : /headset: /' &
+  adb logcat -c >/dev/null 2>&1
+  adb logcat -s Unity > logs/headset.log 2>&1 &
   PIDS+=($!)
 fi
+echo
+say "Running"
+ok "logs/coordinator.log   the laptop side"
+ok "logs/sam2.log          the tracker"
+if [ -n "$(adb devices | sed -n '2p' | grep -w device)" ]; then
+  ok "logs/headset.log       the headset"
+else
+  warn "no adb: headset logs are not being captured"
+fi
+echo "    Follow one in another terminal, e.g.:"
+echo "      tail -f logs/headset.log | grep -E 'QUEST_MODE|QUEST_LAYOUT|QUEST_TRACKING'"
+echo
+echo "    Ctrl+C stops everything."
 wait

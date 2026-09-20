@@ -223,7 +223,7 @@ public class CoordinatorClient : MonoBehaviour
         _ipv4 = ipv4;
         var settings = QuestTrackingSettings.Load();
         _helloJson = settings != null && settings.enableTracking
-            ? ProtocolJson.BuildTrackingHello(SystemInfo.operatingSystem)
+            ? ProtocolJson.BuildTrackingHello(SystemInfo.operatingSystem, ModeLauncher.WireMode)
             : ProtocolJson.BuildHello(null);
         _beginRequested = true;
     }

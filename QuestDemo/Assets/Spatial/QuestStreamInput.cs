@@ -65,7 +65,16 @@ public class QuestStreamInput : MonoBehaviour
         // Once Layout has placed anything, A is its furniture menu and B is
         // its resize toggle. Leaving them wired to conversation here would
         // mean every menu press also flipped the microphone away from A-mode.
-        bool layoutOwnsFaceButtons = LayoutMode.IsArmed;
+        // The picker owns the trigger while it is up. The right grip is the
+        // one unguarded push-to-talk binding, so without this it would record
+        // audio from behind the menu.
+        if (ModeLauncher.IsOpen)
+        {
+            AbortAudio();
+            return;
+        }
+        bool layoutOwnsFaceButtons = LayoutMode.IsArmed
+            || ModeLauncher.Chosen == ModeLauncher.Mode.Layout;
 
         // B toggles continuous conversation; stop-tracking moved to left X.
         if (!layoutOwnsFaceButtons

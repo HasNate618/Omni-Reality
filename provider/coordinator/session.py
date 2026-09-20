@@ -78,6 +78,10 @@ class CoordinatorState:
         self.last_speak_pcm: bytes | None = None
         self.last_speak_at: float = 0.0
         self.artifact_port: int = ARTIFACT_PORT
+        # Set by run_server so `hello` can rebuild the planner for the mode
+        # the headset's launcher picked. None in tests and headset-free tools,
+        # where the CLI choice is the whole story.
+        self.configure_mode: Any = None
         self.artifact_root: Path = Path(__file__).resolve().parent.parent / "artifacts" / "generated"
         self.clear_generation: int = 1
 
