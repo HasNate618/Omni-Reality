@@ -86,9 +86,11 @@ public static class BuildAndroid
         EditorUserBuildSettings.SwitchActiveBuildTarget(BuildTargetGroup.Android, BuildTarget.Android);
 
         // Runtime-created materials (rings, ghosts, labels, procedural,
-        // generated) use Unlit/Color via Shader.Find: pin it so release
-        // stripping cannot drop it (else visuals silently vanish on device).
+        // generated) use Unlit/Color and Unlit/Transparent via Shader.Find:
+        // pin both so release stripping cannot drop either (else visuals
+        // silently vanish on device).
         EnsureAlwaysIncludedShader("Unlit/Color");
+        EnsureAlwaysIncludedShader("Unlit/Transparent");
 
         System.IO.Directory.CreateDirectory("Builds");
         BuildPlayerOptions opts = new BuildPlayerOptions
