@@ -15,7 +15,7 @@ from unittest import mock
 
 from coordinator import turn
 from coordinator.planner import StubPlanner, accept_model_ops
-from coordinator.server import CoordinatorState, handle_connection
+from coordinator.server import CoordinatorState, UtteranceBuffer, handle_connection
 from protocol.validate import load_fixture, validate_instance
 from tests.test_coordinator import DummyWs, make_hello, wait_for
 from voice.audio import pcm_to_wav_bytes, read_wav_pcm
@@ -138,6 +138,25 @@ class Session:
 
 def run(coro):
     return asyncio.run(coro)
+
+
+async def _run_turn_for_test(state: CoordinatorState, utterance_id: str) -> list[dict]:
+    """Drive one turn to completion without a WebSocket.
+
+    start_turn owns the utterance floor and the background task; the tool
+    bind happens inside _run_turn, which is what this exercises.
+    """
+    state.utterances[utterance_id] = UtteranceBuffer(pcm=bytearray(ONE_SECOND))
+    sent: list[dict] = []
+
+    async def send(msg_type: str, turn_id: int, payload: dict, uid: str | None = None) -> None:
+        sent.append({"type": msg_type, "payload": payload})
+
+    task = turn.start_turn(state, send, utterance_id)
+    if task is None:
+        raise AssertionError(f"turn not started for {utterance_id}")
+    await task
+    return sent
 
 
 class TurnTests(unittest.TestCase):
@@ -315,6 +334,26 @@ class TurnTests(unittest.TestCase):
 
         ws = run(scenario())
         self.assertEqual([m["type"] for m in ws.sent], ["scene_op"])
+
+    def test_turn_binds_session_stores_into_the_planner(self) -> None:
+        bound = {}
+
+        class RecordingPlanner:
+            def bind_tools(self, **kwargs):
+                bound.update(kwargs)
+
+            async def plan(self, **kwargs):
+                from coordinator.planner import PlanResult
+
+                return PlanResult(ops=[], text="ok")
+
+        state = CoordinatorState(planner=RecordingPlanner())
+        state.listings.record("oak side table", [0.55, 0.40, 0.72], "f1", "page")
+        state.prebaked = {"oak side table": "01m2xbae3n81b4scq0k83teqjw"}
+        asyncio.run(_run_turn_for_test(state, "utt-1"))
+        self.assertIs(bound.get("listings"), state.listings)
+        self.assertEqual(bound.get("prebaked"), state.prebaked)
+        self.assertIs(bound.get("jobs"), state.jobs)
 
 
 class AudioHelperTests(unittest.TestCase):

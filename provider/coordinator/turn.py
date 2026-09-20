@@ -152,6 +152,8 @@ async def _run_turn(
                 jobs=state.jobs,
                 jpeg_b64=base64.b64encode(buf.jpeg).decode() if buf.jpeg else None,
                 frame_id=(buf.envelope or {}).get("frame_id"),
+                listings=state.listings,
+                prebaked=state.prebaked,
             )
         except Exception:
             logger.exception("tool bind failed for turn %d", turn_id)
@@ -325,7 +327,14 @@ async def freeze_and_ack(
     return await wait_acks(frozen, timeout_s) or []
 
 
-def build_place_generated(*, job_id: str, turn_id: int, stage_epoch: int, target: dict) -> dict:
+def build_place_generated(
+    *,
+    job_id: str,
+    turn_id: int,
+    stage_epoch: int,
+    target: dict,
+    extent_m: list[float] | None = None,
+) -> dict:
     op = {
         "op_id": new_ulid(),
         "turn_id": turn_id,
@@ -335,6 +344,8 @@ def build_place_generated(*, job_id: str, turn_id: int, stage_epoch: int, target
         "job_id": job_id,
         "target": target,
     }
+    if extent_m is not None:
+        op["extent_m"] = [float(axis) for axis in extent_m]
     validate_instance("scene_op", op)
     return op
 
@@ -350,6 +361,12 @@ async def on_job_terminal(
         return
     status = job.get("status")
     if status not in ("ready", "failed"):
+        return
+    if job.get("extent_m") and job.get("planted"):
+        # Planted when the listing was accepted, so a stated-size box has been
+        # in the room since before the mesh existed. Emitting again would
+        # place the same object twice. Quest is already fetching the artifact.
+        await complete_final_fn({"status": "ready", "planted": True})
         return
     stage_epoch = int(job.get("stage_epoch") or state.latest_stage_epoch)
     if stage_epoch < state.latest_stage_epoch:

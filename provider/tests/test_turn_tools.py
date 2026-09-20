@@ -127,3 +127,63 @@ class PlaceGeneratedTests(unittest.TestCase):
         asyncio.run(on_job_terminal(self.state, job_id, send, complete_final_fn))
         self.assertEqual(self.sent, [])
         self.assertEqual(self.announced, [])
+
+    def test_extent_m_is_carried_onto_the_op(self) -> None:
+        op = build_place_generated(
+            job_id=new_ulid(), turn_id=2, stage_epoch=1,
+            target=self.target, extent_m=[0.55, 0.40, 0.72],
+        )
+        validate_instance("scene_op", op)
+        self.assertEqual(op["extent_m"], [0.55, 0.40, 0.72])
+
+    def test_op_without_extents_still_validates(self) -> None:
+        op = build_place_generated(
+            job_id=new_ulid(), turn_id=2, stage_epoch=1, target=self.target,
+        )
+        validate_instance("scene_op", op)
+        self.assertNotIn("extent_m", op)
+
+    def test_planted_job_does_not_emit_a_second_op(self) -> None:
+        job_id = new_ulid()
+        self.store.jobs[job_id] = {
+            "job_id": job_id,
+            "frame_id": self.target["frame_id"],
+            "target": self.target,
+            "status": "ready",
+            "stage_epoch": 1,
+            "extent_m": [0.55, 0.40, 0.72],
+            "planted": True,
+        }
+
+        async def send(op):
+            self.sent.append(op)
+            return {"status": "placed", "op_id": op["op_id"]}
+
+        async def complete_final_fn(ack):
+            self.announced.append(ack)
+
+        asyncio.run(on_job_terminal(self.state, job_id, send, complete_final_fn))
+        self.assertEqual(self.sent, [], "already planted; no second op")
+        self.assertEqual(self.announced, [{"status": "ready", "planted": True}])
+
+    def test_unplanted_ready_job_still_emits(self) -> None:
+        job_id = new_ulid()
+        self.store.jobs[job_id] = {
+            "job_id": job_id,
+            "frame_id": self.target["frame_id"],
+            "target": self.target,
+            "status": "queued",
+            "stage_epoch": 1,
+        }
+        mark_ready(self.store, job_id)
+
+        async def send(op):
+            self.sent.append(op)
+            return {"status": "placed", "op_id": op["op_id"]}
+
+        async def complete_final_fn(ack):
+            self.announced.append(ack)
+
+        asyncio.run(on_job_terminal(self.state, job_id, send, complete_final_fn))
+        self.assertEqual(len(self.sent), 1)
+        self.assertNotIn("extent_m", self.sent[0])
