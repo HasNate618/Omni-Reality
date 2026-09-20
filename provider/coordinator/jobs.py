@@ -110,7 +110,8 @@ def _object_target(frame_id: str, obj: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _session_generation_busy(store: JobStore) -> bool:
+def session_generation_busy(store: JobStore) -> bool:
+    """True while any worker job is queued or running (one job at a time)."""
     for job in store.jobs.values():
         if job.get("status") in ("queued", "running"):
             return True
@@ -128,7 +129,7 @@ async def handle_start_generation(
     if not jpeg_b64:
         return {"error": "missing_image"}
 
-    if _session_generation_busy(store):
+    if session_generation_busy(store):
         return {"error": "busy"}
 
     object_id = args.get("object_id")

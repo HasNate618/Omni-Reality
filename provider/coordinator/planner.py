@@ -250,6 +250,9 @@ class YibuPlanner:
         self._frame_id: str | None = None
         self._inspect_fn: Any | None = None
         self._queue_fn: Any | None = None
+        self._listings: Any | None = None
+        self._prebaked: dict[str, str] = {}
+        self._coordinator_ops: list[dict] = []
 
     def bind_tools(
         self,
@@ -259,6 +262,8 @@ class YibuPlanner:
         frame_id: str | None,
         inspect_fn: Any | None = None,
         queue_fn: Any | None = None,
+        listings: Any | None = None,
+        prebaked: dict[str, str] | None = None,
     ) -> None:
         """Attach session tool context (called by the turn loop per turn)."""
         self._jobs = jobs
@@ -266,6 +271,9 @@ class YibuPlanner:
         self._frame_id = frame_id
         self._inspect_fn = inspect_fn
         self._queue_fn = queue_fn
+        self._listings = listings
+        self._prebaked = prebaked or {}
+        self._coordinator_ops = []
 
     async def _dispatch_tool(self, name: str, arguments: dict) -> Any:
         """Route one model tool call to workers (never to Quest)."""
@@ -298,7 +306,30 @@ class YibuPlanner:
                 jpeg_b64=self._jpeg_b64,
                 queue_fn=self._queue_fn or _default_queue_fn,
             )
+        if name == "place_item":
+            from coordinator.listings import handle_place_item
+
+            result, op = await handle_place_item(
+                self._jobs,
+                listings=self._listings,
+                args=dict(arguments),
+                current_frame_id=self._frame_id,
+                prebaked=self._prebaked,
+                queue_fn=self._queue_fn or _default_queue_fn,
+            )
+            if op is not None:
+                self._coordinator_ops.append(op)
+            return result
         return {"error": "unknown_tool"}
+
+    def _merge_ops(self, model_ops: list[dict], frame_id: str | None) -> list[dict]:
+        """Coordinator-authored ops lead, model ops follow, cap applies to both.
+
+        Coordinator ops are already frame-anchored and are validated by
+        _to_scene_op in the turn loop, which is the single send-time gate.
+        """
+        merged = list(self._coordinator_ops) + list(model_ops)
+        return merged[:MAX_OPS_PER_TURN]
 
     def _call(self, messages: list[dict[str, Any]]) -> tuple[str, dict]:
         from yibu_http import chat_completion, require_api_key
@@ -338,7 +369,9 @@ class YibuPlanner:
             text, record = await asyncio.to_thread(self._call, messages)
             latency_ms = int((time.monotonic() - started) * 1000)
             say, heard, raw_ops = _parse_reply(text)
-            ops = accept_model_ops(raw_ops, frame_id) if frame_id else []
+            ops = self._merge_ops(
+                accept_model_ops(raw_ops, frame_id) if frame_id else [], frame_id
+            )
             return PlanResult(
                 ops=ops,
                 text=say,
@@ -364,7 +397,9 @@ class YibuPlanner:
             final_text = _extract_text(final)
         say, heard, _ = _parse_reply(final_text)
         latency_ms = int((time.monotonic() - started) * 1000)
-        ops = accept_model_ops(collected, frame_id) if frame_id else []
+        ops = self._merge_ops(
+            accept_model_ops(collected, frame_id) if frame_id else [], frame_id
+        )
         return PlanResult(
             ops=ops,
             text=say,

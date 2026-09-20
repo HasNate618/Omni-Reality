@@ -2,7 +2,7 @@
 
 A listing name that maps to an artifact id is placeable without queueing a
 worker. This exists because generation is serialized by
-``_session_generation_busy``: a demonstration that places several listings
+``session_generation_busy``: a demonstration that places several listings
 cannot generate them concurrently.
 
 Whether a listing is pre-baked is coordinator configuration, never a model

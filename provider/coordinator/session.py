@@ -17,6 +17,7 @@ from typing import Any
 
 from coordinator.artifacts import ARTIFACT_PORT
 from coordinator.jobs import JobStore
+from coordinator.listings import ListingMemory
 
 
 @dataclass
@@ -57,6 +58,8 @@ class CoordinatorState:
         self.mark_sent: bool = False
         self.last_clock_skew_ns: int | None = None
         self.jobs = JobStore()
+        self.listings = ListingMemory()
+        self.prebaked: dict[str, str] = {}
         # Cloud speech synth for speak.audio (None = caption-only degraded).
         # Server sets a live synth for yibu turns; tests inject fakes.
         self.synthesizer: Any | None = None
@@ -100,6 +103,7 @@ class CoordinatorState:
         self.last_envelope = None
         self.ack_events.clear()
         self.pending_ops.clear()
+        self.listings.clear()
 
     def is_session_allowed(self, incoming: str | None) -> bool:
         """True unless an established session is contradicted."""

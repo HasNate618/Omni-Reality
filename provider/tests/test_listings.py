@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 
-from coordinator.listings import ListingMemory, normalize_name
+from coordinator.jobs import JobStore
+from coordinator.listings import ListingMemory, handle_place_item, normalize_name
 
 
 class NormalizeNameTests(unittest.TestCase):
@@ -52,3 +54,171 @@ class ListingMemoryTests(unittest.TestCase):
         self.memory.record("table", extents, "f1", "page")
         extents[0] = 9.99
         self.assertEqual(self.memory.get("table")["extent_m"], [0.55, 0.40, 0.72])
+
+
+_FRAME = "01k5j8g0008q3m7b2d6h9n4r5v"
+_TARGET = {"type": "capture_hint", "frame_id": _FRAME}
+_ARTIFACT = "01m2xbae3n81b4scq0k83teqjw"
+
+
+class HandlePlaceItemTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = JobStore()
+        self.memory = ListingMemory()
+
+    def _call(self, args, *, prebaked=None, current_frame_id=_FRAME):
+        return asyncio.run(handle_place_item(
+            self.store,
+            listings=self.memory,
+            args=args,
+            current_frame_id=current_frame_id,
+            prebaked=prebaked or {},
+        ))
+
+    def _good(self) -> dict:
+        return {"name": "oak side table", "extent_m": [0.55, 0.40, 0.72], "target": _TARGET}
+
+    def test_valid_args_return_an_op(self) -> None:
+        result, op = self._call(self._good())
+        self.assertNotIn("error", result)
+        self.assertEqual(op["kind"], "place_generated")
+        self.assertEqual(op["extent_m"], [0.55, 0.40, 0.72])
+        self.assertEqual(op["target"], _TARGET)
+
+    def test_valid_args_record_a_row(self) -> None:
+        self._call(self._good())
+        row = self.memory.get("oak side table")
+        self.assertEqual(row["extent_m"], [0.55, 0.40, 0.72])
+        self.assertEqual(row["source"], "page")
+        self.assertEqual(row["source_frame_id"], _FRAME)
+
+    def test_missing_extent_m_refused(self) -> None:
+        result, op = self._call({"name": "table", "target": _TARGET})
+        self.assertEqual(result["error"], "invalid")
+        self.assertIsNone(op)
+        self.assertEqual(self.memory.rows(), [])
+
+    def test_wrong_axis_count_refused(self) -> None:
+        args = self._good()
+        args["extent_m"] = [0.55, 0.40]
+        result, op = self._call(args)
+        self.assertEqual(result["error"], "invalid")
+        self.assertIsNone(op)
+
+    def test_out_of_range_axis_refused(self) -> None:
+        for bad in (0.04, 3.01, -0.5):
+            args = self._good()
+            args["extent_m"] = [bad, 0.40, 0.72]
+            result, op = self._call(args)
+            self.assertEqual(result["error"], "invalid", f"axis {bad} should refuse")
+            self.assertIsNone(op)
+
+    def test_non_numeric_axis_refused(self) -> None:
+        args = self._good()
+        args["extent_m"] = [0.55, 0.40, "tall"]
+        result, op = self._call(args)
+        self.assertEqual(result["error"], "invalid")
+        self.assertIsNone(op)
+
+    def test_empty_name_refused(self) -> None:
+        args = self._good()
+        args["name"] = "   "
+        result, op = self._call(args)
+        self.assertEqual(result["error"], "invalid")
+        self.assertIsNone(op)
+
+    def test_overlong_name_refused(self) -> None:
+        args = self._good()
+        args["name"] = "x" * 41
+        result, op = self._call(args)
+        self.assertEqual(result["error"], "invalid")
+        self.assertIsNone(op)
+
+    def test_no_current_frame_refused(self) -> None:
+        result, op = self._call(self._good(), current_frame_id=None)
+        self.assertEqual(result["error"], "invalid")
+        self.assertIsNone(op)
+
+    def test_stale_frame_target_refused(self) -> None:
+        args = self._good()
+        args["target"] = {"type": "capture_hint", "frame_id": "01k5j8g0008q3m7b2d6h9n4r5w"}
+        result, op = self._call(args)
+        self.assertEqual(result["error"], "invalid")
+        self.assertIsNone(op)
+
+    def test_world_point_target_refused(self) -> None:
+        args = self._good()
+        args["target"] = {"type": "world_point", "px": 1.0, "py": 1.0, "pz": 1.0,
+                          "frame": "openxr_floor_stage"}
+        result, op = self._call(args)
+        self.assertEqual(result["error"], "invalid")
+        self.assertIsNone(op)
+
+    def test_live_path_queues_a_job(self) -> None:
+        result, op = self._call(self._good())
+        job = self.store.jobs[op["job_id"]]
+        self.assertEqual(job["status"], "queued")
+        self.assertEqual(job["extent_m"], [0.55, 0.40, 0.72])
+        self.assertTrue(job["planted"])
+
+    def test_prebaked_path_creates_a_ready_job_with_no_worker(self) -> None:
+        queued = []
+
+        async def queue_fn(**kwargs):
+            queued.append(kwargs)
+            return {"status": "queued"}
+
+        result, op = asyncio.run(handle_place_item(
+            self.store,
+            listings=self.memory,
+            args=self._good(),
+            current_frame_id=_FRAME,
+            prebaked={"oak side table": _ARTIFACT},
+            queue_fn=queue_fn,
+        ))
+        self.assertNotIn("error", result)
+        self.assertEqual(op["job_id"], _ARTIFACT)
+        self.assertEqual(self.store.jobs[_ARTIFACT]["status"], "ready")
+        self.assertTrue(self.store.jobs[_ARTIFACT]["planted"])
+        self.assertEqual(queued, [])
+
+    def test_repeat_placement_updates_one_row(self) -> None:
+        self._call(self._good())
+        args = self._good()
+        args["extent_m"] = [0.60, 0.40, 0.72]
+        self._call(args)
+        self.assertEqual(len(self.memory.rows()), 1)
+        self.assertEqual(self.memory.get("oak side table")["extent_m"], [0.60, 0.40, 0.72])
+
+    def test_first_item_sits_at_the_hit(self) -> None:
+        _, op = self._call(self._good())
+        self.assertAlmostEqual(op["offset_m"], 0.0, places=6)
+
+    def test_second_item_clears_the_first(self) -> None:
+        self._call(self._good())
+        lamp = {"name": "floor lamp", "extent_m": [0.30, 0.30, 1.50], "target": _TARGET}
+        _, op = self._call(lamp)
+        # first width 0.55 half + 0.05 gap + second width 0.30 half
+        self.assertAlmostEqual(op["offset_m"], 0.275 + 0.05 + 0.15, places=6)
+
+    def test_repeat_placement_keeps_its_slot(self) -> None:
+        self._call(self._good())
+        self._call({"name": "floor lamp", "extent_m": [0.30, 0.30, 1.50], "target": _TARGET})
+        _, op = self._call(self._good())
+        self.assertAlmostEqual(op["offset_m"], 0.0, places=6)
+
+    def test_result_reports_the_packed_run_length(self) -> None:
+        self._call(self._good())
+        lamp = {"name": "floor lamp", "extent_m": [0.30, 0.30, 1.50], "target": _TARGET}
+        result, _ = self._call(lamp)
+        self.assertAlmostEqual(result["run_length_m"], 0.55 + 0.30 + 0.05, places=6)
+
+    def test_run_length_present_on_the_prebaked_path_too(self) -> None:
+        result, _ = asyncio.run(handle_place_item(
+            self.store,
+            listings=self.memory,
+            args=self._good(),
+            current_frame_id=_FRAME,
+            prebaked={"oak side table": _ARTIFACT},
+        ))
+        self.assertAlmostEqual(result["run_length_m"], 0.55, places=6)
