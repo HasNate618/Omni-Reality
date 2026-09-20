@@ -464,6 +464,18 @@ public static class ProtocolJson
         public float MotionDistanceM;
         public bool HasMotion;
         public float MotionPeriodS;
+        // place_box: true-size footprint plus its corner-relative slot.
+        public bool HasSize;
+        public float SizeW;
+        public float SizeD;
+        public float SizeH;
+        public bool HasSlot;
+        public float SlotDx;
+        public float SlotDz;
+        public float SlotYawDeg;
+        public string StyleColor;
+        public string StyleLabel;
+        public string Furniture;
     }
 
     /// <summary>One closed-grammar procedural element (voice spec §3.1).</summary>
@@ -568,8 +580,58 @@ public static class ProtocolJson
                 }
             }
         }
+        ReadObject(payloadJson, "size_m", delegate(string sizeJson)
+        {
+            double w, d, h;
+            if (TryGetDouble(sizeJson, "w", out w) && TryGetDouble(sizeJson, "d", out d)
+                && TryGetDouble(sizeJson, "h", out h))
+            {
+                parsed.HasSize = true;
+                parsed.SizeW = (float)w;
+                parsed.SizeD = (float)d;
+                parsed.SizeH = (float)h;
+            }
+        });
+        ReadObject(payloadJson, "target", delegate(string targetJson)
+        {
+            double dx, dz, yaw;
+            if (TryGetDouble(targetJson, "dx", out dx) && TryGetDouble(targetJson, "dz", out dz)
+                && TryGetDouble(targetJson, "yaw_deg", out yaw))
+            {
+                parsed.HasSlot = true;
+                parsed.SlotDx = (float)dx;
+                parsed.SlotDz = (float)dz;
+                parsed.SlotYawDeg = (float)yaw;
+            }
+        });
+        if (TryGetStringOrNull(payloadJson, "furniture", out s, out found) && found)
+            parsed.Furniture = s;
+        ReadObject(payloadJson, "style", delegate(string styleJson)
+        {
+            string value;
+            bool has;
+            if (TryGetStringOrNull(styleJson, "color", out value, out has) && has)
+                parsed.StyleColor = value;
+            if (TryGetStringOrNull(styleJson, "label", out value, out has) && has)
+                parsed.StyleLabel = value;
+        });
         op = parsed;
         return true;
+    }
+
+    /// <summary>Run `read` over the braced value of `key`, if there is one.</summary>
+    static void ReadObject(string json, string key, System.Action<string> read)
+    {
+        int keyAt = IndexOfKey(json, key, 0);
+        if (keyAt < 0)
+            return;
+        int valueAt = SkipValueStart(json, keyAt);
+        if (valueAt < 0 || valueAt >= json.Length || json[valueAt] != '{')
+            return;
+        string obj;
+        int endAt;
+        if (ExtractBraced(json, valueAt, out obj, out endAt))
+            read(obj);
     }
 
     static void TryGetTargetFrameId(string payloadJson, string key, out string frameId)

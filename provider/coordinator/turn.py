@@ -155,7 +155,8 @@ async def _run_turn(
         pcm_bytes=pcm_len,
     )
     await send("turn_started", turn_id, {"utterance_id": utterance_id, "turn_id": turn_id}, utterance_id)
-    if state.tracking is not None:
+    # Layout turns author their own boxes; SAM 2 would swallow the turn.
+    if state.tracking is not None and not getattr(state.planner, "layout", False):
         await _run_tracking_turn(state, turn_id, utterance_id, buf)
         return
     bind = getattr(state.planner, "bind_tools", None)

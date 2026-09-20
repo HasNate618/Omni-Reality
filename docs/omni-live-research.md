@@ -116,6 +116,8 @@ Examples:
 
 An illustrative explanation should not look like a verified measurement or exact reconstruction. Precise fit guidance needs known dimensions, reliable calibration, or an appropriate CAD model.
 
+**Amended 2026-09-20.** Layout mode (`docs/omni-layout-mode.md`) gives fit guidance without any of those three, and the warning above is why it is built the way it is. It has the seller's stated dimensions (known, but not verified by us) on a depth-sensed floor (calibrated only as well as the headset's depth is) and no CAD model at all. It therefore never claims precision: every clearance line is hedged, overlap is reported as overlap, the arithmetic errs towards "tight", and a caption states both sources of error whenever boxes are on screen. Read this paragraph as the constraint the feature is designed against, not as a warning it ignored.
+
 ### Closed-loop task assistance
 
 A task-aware assistant could explain a step, indicate the relevant part, observe the result, and confirm progress. If it cannot see the connection or distinguish alternatives, it should ask for another view instead of inventing a confirmation.

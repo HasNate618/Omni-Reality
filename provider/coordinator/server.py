@@ -599,6 +599,13 @@ async def handle_connection(ws: Any, state: CoordinatorState) -> None:
         clear_jobs(state.jobs, state.artifact_root)
 
 
+def _has_api_key() -> bool:
+    """True when a live call could work. Layout mode degrades, never dies."""
+    import os
+
+    return bool(os.environ.get("YIBU_API_KEY", "").strip())
+
+
 def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if getattr(args, "voice_only", False) and args.planner != "yibu":
         parser.error("--voice-only requires --planner yibu")
@@ -636,6 +643,18 @@ def make_planner(
         return StubPlanner()
     if kind == "voice-stub":
         return VoiceStubPlanner(perception_qa=perception_qa)
+    if kind == "layout":
+        from coordinator.layout import LayoutPlanner
+
+        # Canned unless a key is present: the demo must survive the key dying.
+        complete_fn = None
+        if _has_api_key():
+            from coordinator.planner import make_live_complete_fn
+
+            holder = YibuPlanner(model=model or "qwen3.8-omni-flash", purpose="layout-turn")
+            complete_fn = make_live_complete_fn(holder)
+        return LayoutPlanner(complete_fn=complete_fn,
+                             **({"model": model} if model else {}))
     if perception_qa:
         from coordinator.perception import PerceptionQaPlanner
         return PerceptionQaPlanner(**({"model": model} if model else {}))
@@ -674,7 +693,20 @@ async def run_server(
         if sam2_url:
             from coordinator.sam2_bridge import Sam2Bridge
             state.tracking = Sam2Bridge(sam2_url, _turn_sender(ws, state))
-        if planner_kind == "voice-stub":
+        if planner_kind == "layout":
+            # macOS `say` on the laptop: ~750 ms, no key, no gateway. Cloud
+            # speech was measured at 8.8 s for the same fixed line, which made
+            # holding the key *worse* than not having it. Layout's lines are a
+            # short fixed set, so the nicer voice buys nothing and costs the
+            # demo. This also means the voice is identical before and after
+            # the key expires.
+            from voice.audio import say_to_pcm
+
+            async def _layout_synth(text: str) -> bytes | None:
+                return await asyncio.to_thread(say_to_pcm, text)
+
+            state.synthesizer = _layout_synth
+        elif planner_kind == "voice-stub":
             from voice.test_tone import make_test_tone
 
             async def _tone_synth(_text: str) -> bytes:
@@ -715,7 +747,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
         "--planner",
-        choices=["mark", "stub", "yibu", "voice-stub"],
+        choices=["mark", "stub", "yibu", "voice-stub", "layout"],
         default="mark",
         help=(
             "mark: slice-2 hardcoded mark (default); stub: offline voice turns; "

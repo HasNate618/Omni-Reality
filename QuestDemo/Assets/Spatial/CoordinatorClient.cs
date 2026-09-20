@@ -552,6 +552,17 @@ public class CoordinatorClient : MonoBehaviour
                 GeneratedMeshPlacer.TryHandle(this, this, op, _ipv4, _artifactPort, Cache);
                 return;
             }
+            if (op.Kind == "place_box")
+            {
+                if (!PrepareSceneOp(op))
+                    return;
+                bool placed = LayoutMode.Ensure().TryPlaceBox(op);
+                if (placed)
+                    EnqueueAck(op, "placed", op.OpId, null, "surface");
+                else
+                    EnqueueAck(op, "rejected", null, "invalid", null);
+                return;
+            }
             if (op.Kind == "label" || op.Kind == "ghost" || op.Kind == "connect")
             {
                 if (!PrepareSceneOp(op))

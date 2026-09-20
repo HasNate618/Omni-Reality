@@ -191,8 +191,22 @@ at 24 kHz and Quest needs 16 kHz. Without it the conversation is silent.
 | Button | Action |
 | --- | --- |
 | Right **A** (hold) | Push-to-talk: speak, release to select and track |
-| Right **B** | Toggle continuous conversation |
+| Right **side trigger** (hold) | Push-to-talk as well. This is Layout mode's summon. |
+| Right **index trigger** (hold) | Layout mode: move or resize a piece, or pick a menu card |
+| Right **B** | Toggle continuous conversation — or, in Layout, resize mode |
+| Right **A** | Layout mode only: open the furniture menu |
 | Left **X** | Stop the current selection/tracking |
+
+A and B change hands once Layout has placed something (`LayoutMode.IsArmed`):
+A becomes the furniture menu and B becomes resize. Until then, and in any run
+that never summons a layout, they are push-to-talk and conversation as before.
+The side trigger is always push-to-talk.
+
+The side trigger and A do the same thing on the headset before Layout is armed:
+record an utterance and send it. Which planner answers is the laptop's business, so Layout mode
+needs no separate headset build -- run `./start-demo.sh --layout` instead.
+The index trigger does nothing until layout boxes exist.
+See `docs/omni-layout-mode.md`.
 
 Only one component holds the microphone at a time; camera frames keep
 streaming in both modes, so a mask that is already tracking keeps tracking

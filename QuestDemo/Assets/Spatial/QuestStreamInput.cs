@@ -41,7 +41,7 @@ public class QuestStreamInput : MonoBehaviour
         if (!UnityEngine.Android.Permission.HasUserAuthorizedPermission(UnityEngine.Android.Permission.Microphone))
             UnityEngine.Android.Permission.RequestUserPermission(UnityEngine.Android.Permission.Microphone);
 #endif
-        Debug.Log("QUEST_STREAM enabled. Hold right A to talk (release to select). B toggles continuous conversation. Left X stops tracking.");
+        Debug.Log("QUEST_STREAM enabled. Hold right A or the right side trigger to talk (release to select). B toggles continuous conversation. Left X stops tracking. Index trigger drags layout boxes.");
     }
 
     void LateUpdate()
@@ -62,8 +62,14 @@ public class QuestStreamInput : MonoBehaviour
         if (_pca == null || !_pca.IsPlaying)
             return;
 
+        // Once Layout has placed anything, A is its furniture menu and B is
+        // its resize toggle. Leaving them wired to conversation here would
+        // mean every menu press also flipped the microphone away from A-mode.
+        bool layoutOwnsFaceButtons = LayoutMode.IsArmed;
+
         // B toggles continuous conversation; stop-tracking moved to left X.
-        if (OVRInput.GetDown(OVRInput.Button.Two, OVRInput.Controller.RTouch))
+        if (!layoutOwnsFaceButtons
+            && OVRInput.GetDown(OVRInput.Button.Two, OVRInput.Controller.RTouch))
         {
             AbortAudio();
             coordinator.SetLiveConversation(!coordinator.LiveConversation);
@@ -85,10 +91,17 @@ public class QuestStreamInput : MonoBehaviour
         }
         else
         {
-            if (OVRInput.GetDown(OVRInput.Button.One, OVRInput.Controller.RTouch)
-                && _recording == null && _pendingPcm == null)
+            // Layout mode summons with the side trigger ("fill my corner");
+            // A is the same push-to-talk. Which planner answers is the
+            // laptop's business, so the headset just sends the utterance.
+            bool aTalks = !layoutOwnsFaceButtons;
+            bool talkDown = OVRInput.GetDown(OVRInput.Button.PrimaryHandTrigger, OVRInput.Controller.RTouch)
+                || (aTalks && OVRInput.GetDown(OVRInput.Button.One, OVRInput.Controller.RTouch));
+            bool talkUp = OVRInput.GetUp(OVRInput.Button.PrimaryHandTrigger, OVRInput.Controller.RTouch)
+                || (aTalks && OVRInput.GetUp(OVRInput.Button.One, OVRInput.Controller.RTouch));
+            if (talkDown && _recording == null && _pendingPcm == null)
                 BeginAudio();
-            if (_recording != null && (OVRInput.GetUp(OVRInput.Button.One, OVRInput.Controller.RTouch)
+            if (_recording != null && (talkUp
                                       || Time.realtimeSinceStartup - _talkStarted >= MaxTalkSeconds - .25f))
                 EndAudio();
         }

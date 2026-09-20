@@ -50,6 +50,10 @@ Spawned meshes (known library first, generated later) are optional and off the l
 Non-goals for this version:
 
 - A specialist app (electrician trainer, kitchen coach, furniture placer). Those are uses of the same harness.
+  - **Amended 2026-09-20.** Layout mode (`docs/omni-layout-mode.md`) is exactly such a use, and it shipped.
+    It is built on this harness -- the same transport, scene ops, ACK barrier, and honesty discipline -- and
+    adds one op kind. The non-goal stands as written for the *harness*: this spec still does not describe a
+    furniture app. It no longer means no such mode may exist.
 - Photoreal text-to-3D on the critical path. A later illustrative mesh is allowed; it is not a caliper.
 - Object-following pins that track a moving mug or cable.
 - Always-on labels on every object.

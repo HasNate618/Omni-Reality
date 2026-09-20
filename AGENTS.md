@@ -11,6 +11,7 @@ Quest 3S spatial assistant for the Huawei OMNI Live track. Unity renders on-devi
 - `docs/omni-spatial-loop.md`: Quest-laptop drawing loop (slices 0-2).
 - `docs/quest-audio-setup.md`: Quest camera, push-to-talk audio, and voice-seeded SAM 2 setup.
 - `docs/omni-worker-tools.md`: Omni-track SAM2/generation tool loop.
+- `docs/omni-layout-mode.md`: true-size cart boxes in a room corner; the path that still runs with a dead key.
 - `docs/hackathon-collaboration.md`: fast lane-based collaboration rules (handoff contract).
 - Plans: `docs/superpowers/plans/`.
 

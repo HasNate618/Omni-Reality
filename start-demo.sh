@@ -3,6 +3,8 @@
 #
 #   ./start-demo.sh            live Huawei planner (needs provider/.env)
 #   ./start-demo.sh --stub     no model call, seeds the centre of the frame
+#   ./start-demo.sh --layout   Layout mode: cart boxes in your corner, no SAM 2
+#                              (works with a dead key: canned cart, local voice)
 #   ./start-demo.sh --no-app   don't relaunch the Quest app
 #   ./start-demo.sh --quiet    less logging (INFO instead of DEBUG)
 #   ./start-demo.sh --install  install QuestDemo/Builds/QuestDemo.apk first
@@ -22,6 +24,7 @@ COORD_PORT=8765
 SAM2_PORT=8766
 APP_ID=com.omni.questdemo
 STARTED_SAM2=0
+USE_SAM2=1
 INSTALL_APK=0
 WIFI=0
 SET_IP=""
@@ -32,12 +35,13 @@ PIDS=()
 for arg in "$@"; do
   case "$arg" in
     --stub) PLANNER=stub ;;
+    --layout) PLANNER=layout; USE_SAM2=0 ;;
     --no-app) LAUNCH_APP=0 ;;
     --quiet) LOG_LEVEL=INFO ;;
     --install) INSTALL_APK=1 ;;
     --wifi) WIFI=1 ;;
     --set-ip=*) SET_IP="${arg#*=}" ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg (try --help)"; exit 1 ;;
   esac
 done
@@ -87,7 +91,9 @@ fi
 
 # 1. SAM 2 server (slow to load, so reuse one that is already up)
 say "SAM 2 server (port $SAM2_PORT)"
-if [ -n "$(listening_pid $SAM2_PORT)" ]; then
+if [ "$USE_SAM2" = 0 ]; then
+  ok "skipped: Layout mode draws its own boxes and never seeds a tracker"
+elif [ -n "$(listening_pid $SAM2_PORT)" ]; then
   ok "already running (pid $(listening_pid $SAM2_PORT)), reusing it"
 else
   ( cd sam2 && . .venv/bin/activate && SAM2_WS_PORT=$SAM2_PORT exec python -u sam2_ws_server.py ) \
@@ -106,21 +112,32 @@ if [ -n "$old" ]; then
   kill "$old" 2>/dev/null; sleep 1
   ok "stopped leftover coordinator (pid $old)"
 fi
-if [ "$PLANNER" = yibu ] && [ -f provider/.env ]; then
+if { [ "$PLANNER" = yibu ] || [ "$PLANNER" = layout ]; } && [ -f provider/.env ]; then
   set -a; . ./provider/.env; set +a
 fi
 if [ "$PLANNER" = yibu ] && [ -z "${YIBU_API_KEY:-}" ]; then
   warn "no YIBU_API_KEY (provider/.env); falling back to --stub"
   PLANNER=stub
 fi
+sam2_arg=""
+[ "$USE_SAM2" = 1 ] && sam2_arg="--sam2-url ws://127.0.0.1:$SAM2_PORT"
+# shellcheck disable=SC2086
 ( cd provider && . .venv/bin/activate && exec python -u -m coordinator.server \
-    --planner "$PLANNER" --sam2-url ws://127.0.0.1:$SAM2_PORT --log-level $LOG_LEVEL ) > logs/coordinator.log 2>&1 &
+    --planner "$PLANNER" $sam2_arg --log-level $LOG_LEVEL ) > logs/coordinator.log 2>&1 &
 PIDS+=($!)
 wait_for logs/coordinator.log "coordinator listening" 30 "Coordinator" || exit 1
 ok "started (planner=$PLANNER, logs=$LOG_LEVEL)"
 if [ "$PLANNER" = stub ]; then
   warn "stub planner: seeds the centre of the frame, Huawei is not called"
   warn "B-mode conversation needs the live model, so it will not work with --stub"
+fi
+if [ "$PLANNER" = layout ]; then
+  if [ -n "${YIBU_API_KEY:-}" ]; then
+    ok "key present: the model picks the arrangement, cloud voice speaks it"
+  else
+    warn "no key: canned arrangement and macOS 'say' for the voice"
+    warn "this is the path the demo falls back to, and it is meant to work"
+  fi
 fi
 
 # 3. Headset: USB tunnel, so the app can use 127.0.0.1 and ignore Wi-Fi.
@@ -251,7 +268,42 @@ cat <<'STEPS'
         coord:   live tracking seed: turn N seeded ... <- only after a "track the ..."
         headset: QUEST_TRACKING first mask frame=...   <- overlay, conversation continues
 
+    ---- C: layout mode (./start-demo.sh --layout) -------------------
+      1. Stand facing an empty corner, a couple of metres back.
+      2. HOLD the right SIDE trigger, say "fill my corner", RELEASE.
+         Three true-size boxes land: sofa, armchair, side table.
+      3. Point at a piece on the floor and hold the INDEX trigger to slide it.
+         Let go; the clearance line updates.
+      4. Press A for the furniture menu: point at a card, pull the trigger.
+      5. Press B for resize: hold the trigger on a piece, move your hand
+         in and out. A resized piece is labelled "resized, not the listing".
+      6. Hold the side trigger again to re-summon and start over.
+
+      Checkpoints, in order:
+        headset: QUEST_STREAM utterance=... pcm_bytes= <- speech captured
+        coord:   utterance_end ...: mode=ptt audio=N   <- laptop got it
+        coord:   VoiceBootstrap ... mode=layout        <- layout planner ran
+        headset: QUEST_LAYOUT corner from walls at ... <- corner found
+                 ("fallback (no walls found)" still works, just less precise)
+        headset: QUEST_LAYOUT placed 2-seat sofa ...   <- one line per box
+        headset: QUEST_LAYOUT grabbed / dropped ...    <- dragging works
+        headset: QUEST_LAYOUT selector open           <- A opened the menu
+        headset: QUEST_LAYOUT added armchair ...      <- picked from the menu
+        headset: QUEST_LAYOUT resize mode ON          <- B toggled resize
+        headset: QUEST_LAYOUT resized sofa to 140% .. <- scaled, listing kept
+        headset: QUEST_LAYOUT fit Roughly -- about ... <- clearance, hedged
+
+      Layout mode needs no SAM 2 and no key. With a key the model picks the
+      arrangement and the cloud voice speaks; without one you get the canned
+      arrangement and macOS "say". Both are meant to work.
+
     If it stops, the LAST line you saw tells you where. Common causes:
+      C: no boxes at all       -> check "mode=layout": running without --layout
+      C: boxes but no voice    -> macOS 'say' is the fallback; check laptop volume
+      C: corner says fallback  -> walls too far or too dark; boxes still land ahead
+      C: cannot grab a box     -> point at the FLOOR where it stands, not at the air
+      C: A/B do nothing        -> summon once first; they are Layout's only after that
+      C: resize does nothing   -> press B first; the pointer turns amber in resize mode
       A: no "listening"        -> controller asleep, or headset off your face
       A: "too short"           -> held A under half a second
       A: no "calling qwen..."  -> snapshot missing: look at the object, speak again
