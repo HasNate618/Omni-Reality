@@ -222,3 +222,48 @@ class HandlePlaceItemTests(unittest.TestCase):
             prebaked={"oak side table": _ARTIFACT},
         ))
         self.assertAlmostEqual(result["run_length_m"], 0.55, places=6)
+
+    def test_boolean_axis_is_refused(self) -> None:
+        # isinstance(True, int) is True in Python, so a bool must be rejected
+        # explicitly rather than slipping through the numeric check.
+        args = self._good()
+        args["extent_m"] = [True, 0.40, 0.72]
+        result, op = self._call(args)
+        self.assertEqual(result["error"], "invalid")
+        self.assertIsNone(op)
+        self.assertEqual(self.memory.rows(), [])
+
+    def test_busy_refusal_leaves_no_trace(self) -> None:
+        # A worker is queued for the first item, so the second is refused.
+        # A refusal must not record a row or queue a worker.
+        calls = []
+
+        async def queue_fn(**kwargs):
+            calls.append(kwargs)
+            return {"status": "queued"}
+
+        first, _ = asyncio.run(handle_place_item(
+            self.store, listings=self.memory, args=self._good(),
+            current_frame_id=_FRAME, prebaked={}, queue_fn=queue_fn))
+        self.assertNotIn("error", first)
+        rows_after_first = len(self.memory.rows())
+
+        lamp = {"name": "floor lamp", "extent_m": [0.30, 0.30, 1.50], "target": _TARGET}
+        result, op = asyncio.run(handle_place_item(
+            self.store, listings=self.memory, args=lamp,
+            current_frame_id=_FRAME, prebaked={}, queue_fn=queue_fn))
+        self.assertEqual(result["error"], "busy")
+        self.assertIsNone(op)
+        self.assertEqual(
+            len(self.memory.rows()), rows_after_first,
+            "a refused placement must not record a row")
+        self.assertEqual(len(calls), 1, "a refused placement must not queue a worker")
+
+    def test_no_worker_bound_means_no_busy_check(self) -> None:
+        # With no worker there is nothing to serialize: the pre-baked and
+        # demo paths place several items back to back.
+        self._call(self._good())
+        lamp = {"name": "floor lamp", "extent_m": [0.30, 0.30, 1.50], "target": _TARGET}
+        result, op = self._call(lamp)
+        self.assertNotIn("error", result)
+        self.assertIsNotNone(op)

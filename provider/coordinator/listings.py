@@ -107,8 +107,9 @@ async def handle_place_item(
     """Validate one place_item call. Returns (tool_result, coordinator_op).
 
     The caller owns sending the op: this runs inside a tool round with no turn
-    id or stage epoch available. Refusals have no side effects: nothing is
-    recorded and no job is created unless the placement is accepted.
+    id or stage epoch available. A refusal returns {"error": "invalid"} or
+    {"error": "busy"} and leaves no trace: no row is recorded and no worker
+    is queued, so later pack offsets and the run length are unaffected.
     """
     name = _valid_name(args.get("name"))
     extents = _valid_extents(args.get("extent_m"))
@@ -122,8 +123,6 @@ async def handle_place_item(
     artifact_id = lookup(prebaked, name)
     if artifact_id is not None:
         # No worker is queued on this path, so the busy rule does not apply.
-        listings.record(name, extents, current_frame_id, "page")
-        offset_m = _offset_for(listings, name)
         store.jobs[artifact_id] = {
             "job_id": artifact_id,
             "frame_id": current_frame_id,
@@ -133,10 +132,7 @@ async def handle_place_item(
             "extent_m": extents,
             "planted": True,
         }
-        return (
-            _place_result(name, extents, artifact_id, listings),
-            _place_op(artifact_id, extents, target, offset_m),
-        )
+        return _place_result(listings, name, extents, target, current_frame_id, artifact_id)
 
     from workers.gen_client import BusyError
 
@@ -144,9 +140,6 @@ async def handle_place_item(
     # worker is actually bound. Nothing queued means nothing to serialize.
     if queue_fn is not None and session_generation_busy(store):
         return {"error": "busy"}, None
-
-    listings.record(name, extents, current_frame_id, "page")
-    offset_m = _offset_for(listings, name)
 
     job_id = new_ulid()
     store.jobs[job_id] = {
@@ -169,27 +162,38 @@ async def handle_place_item(
                 extent_m=extents,
             ))
         except BusyError:
+            # The worker refused, so no placement happened. No row was recorded
+            # yet, so there is nothing to roll back.
             store.jobs.pop(job_id, None)
             return {"error": "busy"}, None
-    return (
-        _place_result(name, extents, job_id, listings),
-        _place_op(job_id, extents, target, offset_m),
-    )
+
+    return _place_result(listings, name, extents, target, current_frame_id, job_id)
 
 
 def _place_result(
+    listings: "ListingMemory",
     name: str,
     extents: list[float],
+    target: dict,
+    current_frame_id: str | None,
     job_id: str,
-    listings: "ListingMemory",
-) -> dict[str, Any]:
-    """Tool result for an accepted placement, with the packed run length so far."""
-    return {
-        "listed": name,
-        "extent_m": extents,
-        "job_id": job_id,
-        "run_length_m": run_length([row["extent_m"] for row in listings.rows()]),
-    }
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Record the row and build (tool_result, coordinator_op) in one place.
+
+    Both success paths go through here so `run_length_m` and the offset can
+    never drift between them. Recording happens here, after every refusal
+    point, which is what keeps a refused placement side-effect free.
+    """
+    listings.record(name, extents, current_frame_id, "page")
+    return (
+        {
+            "listed": name,
+            "extent_m": extents,
+            "job_id": job_id,
+            "run_length_m": run_length([row["extent_m"] for row in listings.rows()]),
+        },
+        _place_op(job_id, extents, target, _offset_for(listings, name)),
+    )
 
 
 def _offset_for(listings: "ListingMemory", name: str) -> float:
