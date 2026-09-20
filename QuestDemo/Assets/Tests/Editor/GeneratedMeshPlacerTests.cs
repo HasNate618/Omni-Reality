@@ -93,18 +93,97 @@ public class GeneratedMeshPlacerTests
     }
 
     [Test]
-    public void NonZeroOffsetShiftsAlongTheWidthAxisOnly()
+    public void BoxYawFollowsTheCaptureViewDirection()
     {
+        // §6.2: width runs across the wearer's view and depth along it, so the
+        // object's front is turned toward the wearer. A floor hit's normal is
+        // gravity up and supplies no yaw at all, so the frame comes from the
+        // capture-time camera forward, flattened to the horizontal plane.
         var go = new GameObject("store");
         var store = go.AddComponent<DrawingStore>();
+        GameObject lookingForward = store.PlaceGenerated(
+            Vector3.zero, Vector3.up, "d-z", new Vector3(0.55f, 0.40f, 0.72f),
+            0f, new Vector3(0f, -0.6f, 1f));
+        GameObject lookingRight = store.PlaceGenerated(
+            Vector3.zero, Vector3.up, "d-x", new Vector3(0.55f, 0.40f, 0.72f),
+            0f, new Vector3(1f, 0f, 0f));
+        Assert.AreEqual(0f, Vector3.Angle(lookingForward.transform.forward, Vector3.forward), 1e-3f);
+        Assert.AreEqual(0f, Vector3.Angle(lookingRight.transform.forward, Vector3.right), 1e-3f);
+        // The tilt in the capture is flattened: the box stays upright, yaw only.
+        Assert.AreEqual(0f, Vector3.Angle(lookingForward.transform.up, Vector3.up), 1e-3f);
+        // Root and box share that yaw; only the root carries it.
+        Assert.AreEqual(0f, Quaternion.Angle(
+            lookingForward.transform.rotation, lookingForward.transform.GetChild(0).rotation), 1e-3f);
+        Object.DestroyImmediate(go);
+    }
+
+    [Test]
+    public void PackOffsetRunsAcrossTheCaptureViewAndNotAlongIt()
+    {
+        // §7.1: the row runs along the frame's width axis, which is across the
+        // wearer's view. The wearer faces the +X/+Z diagonal, so a world-axis
+        // row would show as an offset with a component along the view.
+        var go = new GameObject("store");
+        var store = go.AddComponent<DrawingStore>();
+        Vector3 captureForward = new Vector3(1f, 0f, 1f);
         GameObject placed = store.PlaceGenerated(
-            Vector3.zero, Vector3.up, "d0", new Vector3(0.55f, 0.40f, 0.72f), 1.15f);
-        // Facing flattens to +Z, so the width axis is +X. Height is the box's
-        // half-height, untouched by the offset.
-        Assert.AreEqual(1.15f, Mathf.Abs(placed.transform.position.x), 1e-4f);
-        Assert.AreEqual(0f, placed.transform.position.z, 1e-4f);
+            Vector3.zero, Vector3.up, "d-row", new Vector3(0.55f, 0.40f, 0.72f),
+            1.15f, captureForward);
+        Vector3 shift = new Vector3(
+            placed.transform.position.x, 0f, placed.transform.position.z);
+        Assert.AreEqual(1.15f, shift.magnitude, 1e-3f);
+        Assert.AreEqual(0f, Vector3.Dot(shift, captureForward.normalized), 1e-3f);
+        // Height is the box's half-height: an offset never lifts the box.
         Assert.AreEqual(0.36f, placed.transform.position.y, 1e-4f);
         Object.DestroyImmediate(go);
+    }
+
+    [Test]
+    public void UnusableCaptureFacingFallsBackInsteadOfRotatingFromZero()
+    {
+        // A capture pose that carries no horizontal forward -- the zero default
+        // -- must not become LookRotation(Vector3.zero). On a floor it falls
+        // back to +Z; with no capture facing offered at all the legacy
+        // normal-derived facing still applies.
+        var go = new GameObject("store");
+        var store = go.AddComponent<DrawingStore>();
+        GameObject floor = store.PlaceGenerated(
+            Vector3.zero, Vector3.up, "d-fallback-floor", new Vector3(0.55f, 0.40f, 0.72f),
+            1.15f, Vector3.zero);
+        Assert.IsFalse(float.IsNaN(floor.transform.rotation.x));
+        Assert.AreEqual(0f, Vector3.Angle(floor.transform.forward, Vector3.forward), 1e-3f);
+        Assert.AreEqual(1.15f, Mathf.Abs(floor.transform.position.x), 1e-4f);
+        GameObject wall = store.PlaceGenerated(
+            Vector3.zero, new Vector3(1f, 0f, 1f), "d-fallback-wall",
+            new Vector3(0.55f, 0.40f, 0.72f));
+        Assert.AreEqual(0f, Vector3.Angle(wall.transform.forward, new Vector3(-1f, 0f, -1f)), 1e-3f);
+        Object.DestroyImmediate(go);
+    }
+
+    [Test]
+    public void CaptureFacingFlattensTheCapturePoseForward()
+    {
+        // Capture-time, never the current head pose: this is the pose the hit
+        // point, the range, and the stale rules all came from.
+        var entry = new CaptureGeometryCache.Entry
+        {
+            CameraPose = new Pose(new Vector3(1f, 1.5f, 2f), Quaternion.Euler(35f, 90f, 0f)),
+        };
+        Vector3? facing = GeneratedMeshPlacer.CaptureFacing(entry);
+        Assert.IsTrue(facing.HasValue);
+        Assert.AreEqual(0f, Vector3.Angle(facing.Value, Vector3.right), 1e-3f);
+        Assert.AreEqual(0f, facing.Value.y, 1e-5f);
+    }
+
+    [Test]
+    public void CaptureFacingReportsAnUnusablePoseAsMissing()
+    {
+        Assert.IsNull(GeneratedMeshPlacer.CaptureFacing(null));
+        var straightDown = new CaptureGeometryCache.Entry
+        {
+            CameraPose = new Pose(Vector3.zero, Quaternion.LookRotation(Vector3.down, Vector3.forward)),
+        };
+        Assert.IsNull(GeneratedMeshPlacer.CaptureFacing(straightDown));
     }
 
     [Test]

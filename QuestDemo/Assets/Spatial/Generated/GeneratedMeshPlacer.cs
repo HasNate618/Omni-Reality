@@ -49,6 +49,24 @@ public static class GeneratedMeshPlacer
         return "http://" + laptopIpv4 + ":" + artifactPort + "/artifacts/" + jobId + ".glb";
     }
 
+    /// <summary>
+    /// The facing to plant a listed box with: the capture-time camera
+    /// forward, flattened (spec §6.2). Capture-time and not the current head
+    /// pose, because every other placement decision on this path -- the hit
+    /// point, the range, the stale rules -- is capture-time geometry too.
+    /// Null when the entry cannot supply a usable forward, so the store falls
+    /// back instead of rotating the box by a zero vector.
+    /// </summary>
+    public static Vector3? CaptureFacing(CaptureGeometryCache.Entry entry)
+    {
+        if (entry == null)
+            return null;
+        Vector3 flat = new Vector3(entry.CameraPose.forward.x, 0f, entry.CameraPose.forward.z);
+        if (flat.sqrMagnitude < 1e-6f)
+            return null;
+        return flat.normalized;
+    }
+
     public static bool TryHandle(
         CoordinatorClient client,
         MonoBehaviour host,
@@ -123,9 +141,11 @@ public static class GeneratedMeshPlacer
             client.EnqueueAck(op, "rejected", null, "invalid", null);
             yield break;
         }
+        // §6.2: the planted box takes its facing from the capture-time view.
+        // The hit normal cannot supply one -- on a floor it is gravity up.
         GameObject drawing = store.PlaceGenerated(
             result.Point, result.Normal, drawingId, extent,
-            op.HasOffsetM ? op.OffsetM : 0f);
+            op.HasOffsetM ? op.OffsetM : 0f, CaptureFacing(entry));
         if (drawing == null)
         {
             client.EnqueueAck(op, "rejected", null, "invalid", null);

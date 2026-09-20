@@ -206,8 +206,18 @@ public class DrawingStore : MonoBehaviour
     /// Frame-relative centre offset along the width axis (spec §7.1). The
     /// first item in a row is 0, so a lone placement lands on the hit.
     /// </param>
+    /// <param name="captureFacing">
+    /// The wearer's view direction at capture time -- the camera forward,
+    /// flattened to the horizontal plane by <see cref="ResolveFacing"/>. It is
+    /// what gives the box the yaw spec §6.2 asks for: width across the
+    /// wearer's view, depth along it. A floor or table-top hit normal is
+    /// gravity up and supplies no yaw at all, so this is the only usable
+    /// source. Null (a capture pose that cannot supply one) falls back to the
+    /// normal-derived facing rather than building a frame from zero.
+    /// </param>
     public GameObject PlaceGenerated(
-        Vector3 point, Vector3 normal, string drawingId, Vector3? extentM, float offsetM = 0f)
+        Vector3 point, Vector3 normal, string drawingId, Vector3? extentM, float offsetM = 0f,
+        Vector3? captureFacing = null)
     {
         if (!extentM.HasValue)
         {
@@ -223,17 +233,15 @@ public class DrawingStore : MonoBehaviour
         Prune();
         EvictIfNeeded();
         GameObject root = new GameObject("Drawing_" + drawingId);
-        Vector3 n = normal.sqrMagnitude < 1e-6f ? Vector3.up : normal.normalized;
-        Vector3 facing = -n;
+        Vector3 facing = ResolveFacing(normal, captureFacing);
         Vector3 boxSize = ListingBox.ToBoxSize(extentM.Value);
         Vector3 planted = point;
         if (Mathf.Abs(offsetM) > 1e-6f)
         {
-            Vector3 flat = new Vector3(facing.x, 0f, facing.z);
-            if (flat.sqrMagnitude < 1e-6f)
-                flat = Vector3.forward;
             // Right-hand width axis of the placement frame: rows run along it.
-            Vector3 widthAxis = Vector3.Cross(Vector3.up, flat.normalized);
+            // With the facing on the wearer's view, the axis is the wearer's
+            // right, so a growing offset_m grows the row to their right.
+            Vector3 widthAxis = Vector3.Cross(Vector3.up, facing);
             planted += widthAxis * offsetM;
         }
         GameObject box = ListingBox.Create(boxSize, planted, facing, drawingId);
@@ -271,6 +279,33 @@ public class DrawingStore : MonoBehaviour
         // coincide, so the locked height is simply the root's own Y.
         FloorPlaneGrab.Attach(root, root.transform.position.y);
         return root;
+    }
+
+    /// <summary>
+    /// The horizontal facing of the placement frame (spec §6.2): the wearer's
+    /// view direction when the frame was captured. It is the box's own forward
+    /// too, so the box's right -- the width axis rows run along, and the
+    /// wearer's right -- falls across the view rather than along it. The
+    /// capture pose is the only usable source: a floor or table-top hit normal
+    /// is gravity up. The normal-derived and +Z branches below exist for a
+    /// capture pose that is genuinely missing, and a degenerate facing must
+    /// never reach <c>LookRotation(Vector3.zero)</c>.
+    /// </summary>
+    static Vector3 ResolveFacing(Vector3 normal, Vector3? captureFacing)
+    {
+        Vector3 flat;
+        if (captureFacing.HasValue)
+            flat = Horizontal(captureFacing.Value);
+        else
+            flat = Horizontal(-normal);
+        if (flat.sqrMagnitude < 1e-6f)
+            flat = Vector3.forward;
+        return flat.normalized;
+    }
+
+    static Vector3 Horizontal(Vector3 v)
+    {
+        return new Vector3(v.x, 0f, v.z);
     }
 
     /// <summary>True when this drawing id is a generated placement.</summary>
