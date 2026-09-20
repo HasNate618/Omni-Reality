@@ -23,6 +23,12 @@ public static class GeneratedMeshPlacer
 
     public const float FetchRetrySeconds = 15f;
 
+    /// <summary>
+    /// Per-attempt timeout in seconds. Without one, an unreachable host can
+    /// outlive the whole retry budget on top of the 5 x 15 s waits.
+    /// </summary>
+    const int FetchAttemptTimeoutSeconds = 4;
+
     static readonly byte[] GltfMagic = { (byte)'g', (byte)'l', (byte)'T', (byte)'F' };
 
     public static string ArtifactUrl(string laptopIpv4, int artifactPort, string jobId)
@@ -101,31 +107,6 @@ public static class GeneratedMeshPlacer
             yield break;
         }
 
-        byte[] data = null;
-        for (int attempt = 0; attempt < MaxFetchAttempts && data == null; attempt++)
-        {
-            if (attempt > 0)
-                yield return new WaitForSeconds(FetchRetrySeconds);
-            using (UnityWebRequest req = UnityWebRequest.Get(url))
-            {
-                req.downloadHandler = new DownloadHandlerBuffer();
-                yield return req.SendWebRequest();
-#if UNITY_2020_2_OR_NEWER
-                bool ok = req.result == UnityWebRequest.Result.Success;
-#else
-                bool ok = !req.isNetworkError && !req.isHttpError;
-#endif
-                if (!ok)
-                    continue;
-                byte[] candidate = req.downloadHandler.data;
-                if (candidate == null || candidate.Length < 12 || candidate.Length > MaxGlbBytes)
-                    continue;
-                if (!StartsWithGltf(candidate))
-                    continue;
-                data = candidate;
-            }
-        }
-
         string drawingId = client.NewDrawingId != null
             ? client.NewDrawingId()
             : SpatialRuntime.NewFrameId();
@@ -143,15 +124,53 @@ public static class GeneratedMeshPlacer
             client.EnqueueAck(op, "rejected", null, "invalid", null);
             yield break;
         }
-        // The box is placed and real whether or not the mesh ever arrives.
-        // ACK now: placement_ack 'placed' needs drawing_id + pin only.
+        // Plant and ACK the box BEFORE the artifact fetch. The coordinator
+        // waits only ACK_TIMEOUT_S = 1.5 s before speaking SAY_UNCONFIRMED,
+        // and the artifact 404s until the job is ready, so an ACK below the
+        // retry loop would arrive up to ~75 s late and read as a failure
+        // while the box already exists. placement_ack 'placed' needs only
+        // drawing_id + pin, and the box is real without any mesh.
         client.EnqueueAck(op, "placed", drawingId, null, "surface");
         Debug.Log("GENERATED_BOX_PLACED op=" + op.OpId + " job=" + jobId + " drawing=" + drawingId);
 
+        byte[] data = null;
+        for (int attempt = 0; attempt < MaxFetchAttempts && data == null; attempt++)
+        {
+            if (attempt > 0)
+                yield return new WaitForSeconds(FetchRetrySeconds);
+            using (UnityWebRequest req = UnityWebRequest.Get(url))
+            {
+                req.downloadHandler = new DownloadHandlerBuffer();
+                req.timeout = FetchAttemptTimeoutSeconds;
+                yield return req.SendWebRequest();
+#if UNITY_2020_2_OR_NEWER
+                bool ok = req.result == UnityWebRequest.Result.Success;
+#else
+                bool ok = !req.isNetworkError && !req.isHttpError;
+#endif
+                if (!ok)
+                {
+                    // Only a 404 (artifact not baked yet -- the designed
+                    // case) or a transport error can improve by waiting. A
+                    // 403, a wrong host, or any other definitive status is
+                    // permanent, so stop rather than burn the retry budget.
+                    if (IsTransientFailure(req))
+                        continue;
+                    break;
+                }
+                byte[] candidate = req.downloadHandler.data;
+                if (candidate == null || candidate.Length < 12 || candidate.Length > MaxGlbBytes)
+                    break;
+                if (!StartsWithGltf(candidate))
+                    break;
+                data = candidate;
+            }
+        }
+
         if (data == null)
         {
-            Debug.LogWarning("GeneratedMeshPlacer: no artifact after "
-                + MaxFetchAttempts + " attempts; box stays at listed size job=" + jobId);
+            Debug.LogWarning("GeneratedMeshPlacer: no usable artifact; "
+                + "box stays at listed size job=" + jobId);
             client.NotifyMeshMissing(drawingId);
             yield break;
         }
@@ -221,6 +240,21 @@ public static class GeneratedMeshPlacer
         if (pending.Holder != null)
             Object.Destroy(pending.Holder);
         return null;
+    }
+
+    /// <summary>
+    /// True when a failed attempt is plausibly transient: the artifact is
+    /// not baked yet (HTTP 404) or the request never reached the server.
+    /// </summary>
+    static bool IsTransientFailure(UnityWebRequest req)
+    {
+        if (req.responseCode == 404)
+            return true;
+#if UNITY_2020_2_OR_NEWER
+        return req.result == UnityWebRequest.Result.ConnectionError;
+#else
+        return req.isNetworkError;
+#endif
     }
 
     static bool StartsWithGltf(byte[] data)
