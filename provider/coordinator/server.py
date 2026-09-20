@@ -212,6 +212,14 @@ async def _handle_frame(ws: Any, state: CoordinatorState, message: dict) -> None
             )
         except (TrackingError, binascii.Error, ValueError) as exc:
             logger.warning("Tracking frame rejected: %s", exc)
+        # A frame tagged with an utterance is the snapshot for a B-mode turn,
+        # not just tracker input: the live turn sends buf.jpeg to the model.
+        # Without this the tracker swallowed it and every conversation turn
+        # reported missing_image. Streamed A-mode frames carry no utterance_id
+        # and stop at the tracker, as before.
+        if state.planner is not None and (
+                message["payload"].get("utterance_id") or message["utterance_id"]):
+            _attach_frame_to_utterance(state, message, envelope)
         return
     _check_clock_skew(state, envelope.get("t_unix_ns"))
     if state.planner is not None:

@@ -77,7 +77,11 @@ public class QuestStreamInput : MonoBehaviour
         // frame streaming below keeps running, so a seeded mask keeps tracking.
         if (coordinator.LiveConversation)
         {
+            // A takes the microphone back. Without this, holding A in B-mode
+            // did nothing visible and the conversation loop answered instead.
             AbortAudio();
+            if (OVRInput.GetDown(OVRInput.Button.One, OVRInput.Controller.RTouch))
+                coordinator.SetLiveConversation(false);
         }
         else
         {

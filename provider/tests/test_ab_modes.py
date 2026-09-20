@@ -66,6 +66,63 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.utterances[UTT].selected_frame_id, "frame-7")
 
 
+class FramePinningTests(unittest.IsolatedAsyncioTestCase):
+    """A B-mode snapshot must reach the utterance buffer, not only the tracker."""
+
+    def setUp(self):
+        import base64, io as _io
+        from PIL import Image
+        from protocol.validate import load_fixture
+        from protocol.ids import new_ulid
+        out = _io.BytesIO()
+        Image.new("RGB", (640, 480), (90, 110, 130)).save(out, format="JPEG")
+        self.jpeg = out.getvalue()
+        env = load_fixture("valid", "capture_envelope.json")
+        env.update(frame_id=new_ulid(), sent_w=640, sent_h=480)
+        self.env = env
+        self.msg = msg("frame", {"envelope": env,
+                                 "utterance_id": UTT,
+                                 "jpeg_b64": base64.b64encode(self.jpeg).decode()}, UTT)
+
+    async def state_after_frame(self, tracking):
+        from coordinator.server import _handle_frame
+        state = CoordinatorState(planner=Planner())
+        state.latest_stage_epoch = 0
+        if tracking:
+            bridge = mock.AsyncMock()
+            bridge.epoch = self.env["stage_epoch"]
+            bridge.history = mock.Mock()
+            state.tracking = bridge
+        await _handle_frame(mock.Mock(), state, self.msg)
+        return state
+
+    async def test_snapshot_pinned_while_tracking_is_enabled(self):
+        state = await self.state_after_frame(tracking=True)
+        buf = state.utterances.get(UTT)
+        self.assertIsNotNone(buf, "frame must open/keep the utterance buffer")
+        self.assertEqual(buf.jpeg, self.jpeg)
+        # and it still reaches the tracker
+        state.tracking.history.add.assert_called_once()
+
+    async def test_snapshot_pinned_without_tracking(self):
+        state = await self.state_after_frame(tracking=False)
+        self.assertEqual(state.utterances[UTT].jpeg, self.jpeg)
+
+    async def test_streamed_frame_without_utterance_stays_with_the_tracker(self):
+        from coordinator.server import _handle_frame
+        import base64
+        state = CoordinatorState(planner=Planner())
+        bridge = mock.AsyncMock()
+        bridge.epoch = self.env["stage_epoch"]
+        bridge.history = mock.Mock()
+        state.tracking = bridge
+        streamed = msg("frame", {"envelope": self.env,
+                                 "jpeg_b64": base64.b64encode(self.jpeg).decode()}, None)
+        await _handle_frame(mock.Mock(), state, streamed)
+        self.assertEqual(state.utterances, {}, "A-mode stream must not open utterances")
+        bridge.history.add.assert_called_once()
+
+
 class TrackingIntentTests(unittest.TestCase):
     def test_tracking_phrases_trigger(self):
         for said in ["Track the laptop", "can you HIGHLIGHT the mug please",
