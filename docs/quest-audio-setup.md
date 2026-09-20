@@ -19,6 +19,16 @@ frame, buffering, and result contracts live in
 
 ## 1. Start the Python processes
 
+**Normally just run `./start-demo.sh` from the repository root.** It starts
+both processes in the right order, reuses a SAM 2 server that is already
+loaded, replaces any leftover coordinator, loads `provider/.env`, re-creates
+the ADB reverse tunnel, installs/launches the app with `--install`, and tails
+the checkpoint lines for both modes. The manual steps below are the same thing
+by hand, for reference or for Windows.
+
+Prerequisites: the two virtual environments below, and **`ffmpeg`**
+(`brew install ffmpeg`) for B-mode conversation audio. A-mode does not need it.
+
 Use two terminals and the existing **separate** virtual environments. If SAM 2
 is not already installed, follow its
 [platform setup instructions](omni-sam2-streaming.md#setup).
@@ -144,16 +154,48 @@ Changing the tracking settings asset requires rebuilding/reinstalling. Disable
 
 Grant **camera and microphone permissions** in the headset. Face the laptop.
 
+There are two modes in one session. The headset tags each utterance with
+`mode` (`"ptt"` or `"live"`) and the coordinator routes on that, so you can
+switch freely without restarting anything.
+
+### A — push to talk (tracking)
+
 1. **Hold A on the right controller.**
 2. Say **“Track the laptop.”**
 3. **Release A.**
 
 Speech must last **0.5–15 seconds**. Release selects a fresh snapshot and
 associates it with the recorded audio. The coordinator uses Huawei's point to
-seed SAM 2 on that exact snapshot, then feeds subsequent Quest frames.
+seed SAM 2 on that exact snapshot, then feeds subsequent Quest frames. The
+reply is spoken by Android text-to-speech on the headset, which costs no
+gateway credit.
 
-**B** stops the current selection/tracking. A later A-button utterance selects
-a new target. No object clicking is involved.
+### B — continuous conversation
+
+Press **B** once to hand the microphone to the conversation loop (the caption
+reads “Conversation on. Just speak.”). Then talk with **no button held**:
+speech onset opens a turn and a run of silence closes it. Replies stream back
+as cloud audio. Press **B** again to give the microphone back to A.
+
+Saying a tracking phrase mid-conversation — **“track the…”**,
+**“highlight the…”**, **“what’s that…”** — also drops an overlay on
+that object, using the frame already captured for that utterance. The
+conversation does not pause for it.
+
+B-mode needs `ffmpeg` on the laptop (`brew install ffmpeg`): the model replies
+at 24 kHz and Quest needs 16 kHz. Without it the conversation is silent.
+
+### Buttons
+
+| Button | Action |
+| --- | --- |
+| Right **A** (hold) | Push-to-talk: speak, release to select and track |
+| Right **B** | Toggle continuous conversation |
+| Left **X** | Stop the current selection/tracking |
+
+Only one component holds the microphone at a time; camera frames keep
+streaming in both modes, so a mask that is already tracking keeps tracking
+while you talk. No object clicking is involved in either mode.
 
 ## How to verify
 
@@ -207,5 +249,20 @@ Recorded test results and offline test commands are in
 - **`initializing` then error:** check SAM 2's startup completed, the correct
   8766 URL, and connectivity from the coordinator machine.
 - **Catch-up timeout:** reduce Stream FPS; one object is the integration target.
-- **First mask log but no visual:** connect the existing Unity visualization to
-  `TrackingResultReceived`; transport success alone does not draw a marker.
+- **First mask log but no visual:** check the `QUEST_OVERLAY` lines --
+  `TrackingMaskOverlay` creates itself and says why it did not draw. A plain
+  white quad means an older APK is installed: rebuild and `--install`.
+- **B does nothing:** look for `QUEST_MODE live conversation ON`. Without it
+  the press was not seen -- wake the controller and press again.
+- **B-mode replies are silent:** `ffmpeg` is missing on the laptop. The live
+  reply arrives at 24 kHz and cannot be resampled to the 16 kHz Quest plays.
+- **B-mode never answers:** it needs the live model, so it does not work with
+  `--planner stub` / `./start-demo.sh --stub`.
+- **B-mode `onset_dropped`:** the reply was still playing or the socket was
+  down; the logged reason says which.
+- **B-mode never seeds an overlay:** say one of the trigger phrases
+  ("track the...", "highlight the...", "what's that..."); ordinary questions
+  deliberately do not seed.
+- **Neither mode connects over USB:** the app must be built with
+  `Laptop IPv4 = 127.0.0.1`. Run `./start-demo.sh --set-ip=127.0.0.1`, rebuild
+  (**Omni -> Build Quest APK**), then `./start-demo.sh --install`.

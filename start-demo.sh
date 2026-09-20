@@ -7,6 +7,7 @@
 #   ./start-demo.sh --quiet    less logging (INFO instead of DEBUG)
 #   ./start-demo.sh --install  install QuestDemo/Builds/QuestDemo.apk first
 #   ./start-demo.sh --wifi     headset talks over Wi-Fi instead of the USB tunnel
+#                              (default is USB: plug in, app reaches 127.0.0.1)
 #   ./start-demo.sh --set-ip X point the app at address X (then rebuild in Unity)
 #
 # Ctrl+C stops everything this script started. Logs live in logs/.
@@ -36,7 +37,7 @@ for arg in "$@"; do
     --install) INSTALL_APK=1 ;;
     --wifi) WIFI=1 ;;
     --set-ip=*) SET_IP="${arg#*=}" ;;
-    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg (try --help)"; exit 1 ;;
   esac
 done
@@ -77,6 +78,13 @@ wait_for() { # file, marker, seconds, name
   return 1
 }
 
+# 0. Preflight: B-mode resamples the model's 24 kHz reply to 16 kHz for Quest.
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  say "Preflight"
+  warn "ffmpeg is NOT installed: A-mode is fine, B-mode conversation will be SILENT"
+  warn "fix: brew install ffmpeg"
+fi
+
 # 1. SAM 2 server (slow to load, so reuse one that is already up)
 say "SAM 2 server (port $SAM2_PORT)"
 if [ -n "$(listening_pid $SAM2_PORT)" ]; then
@@ -110,7 +118,10 @@ fi
 PIDS+=($!)
 wait_for logs/coordinator.log "coordinator listening" 30 "Coordinator" || exit 1
 ok "started (planner=$PLANNER, logs=$LOG_LEVEL)"
-[ "$PLANNER" = stub ] && warn "stub planner: seeds the centre of the frame, Huawei is not called"
+if [ "$PLANNER" = stub ]; then
+  warn "stub planner: seeds the centre of the frame, Huawei is not called"
+  warn "B-mode conversation needs the live model, so it will not work with --stub"
+fi
 
 # 3. Headset: USB tunnel, so the app can use 127.0.0.1 and ignore Wi-Fi.
 say "Headset"
@@ -131,7 +142,12 @@ if [ "$WIFI" = 1 ]; then
   echo "    macOS may also ask to allow incoming connections for python: say yes."
 elif [ "$adb_up" = 1 ]; then
   adb reverse tcp:$COORD_PORT tcp:$COORD_PORT >/dev/null && ok "USB tunnel ready (app connects to 127.0.0.1:$COORD_PORT)"
-  [ "$app_ip" = "127.0.0.1" ] || warn "the app is built to reach '$app_ip', not 127.0.0.1: run --set-ip=127.0.0.1, rebuild, --install"
+  if [ "$app_ip" != "127.0.0.1" ]; then
+    warn "USB mode, but the app is built to reach '$app_ip' -- it will NEVER connect."
+    warn "fix, in order:  ./start-demo.sh --set-ip=127.0.0.1"
+    warn "                rebuild in Unity (menu: Omni > Build Quest APK)"
+    warn "                ./start-demo.sh --install"
+  fi
 fi
 
 if [ "$adb_up" = 0 ] && [ "$INSTALL_APK" = 1 ]; then
@@ -174,43 +190,56 @@ fi
 
 say "Ready"
 cat <<'STEPS'
-    What to do, in order:
-      1. Put the headset ON (off your face = app suspended = nothing happens).
-      2. Look at the object you want to track.
-      3. Shake the right controller to wake it, then HOLD A.
-      4. While holding A, say e.g. "track the laptop". Speak > 0.5 s.
-      5. Release A.
+    Put the headset ON first. Off your face the app suspends: no frames,
+    no buttons, no mic. Shake the right controller to wake it.
 
-    Or hold a conversation instead (B-mode):
-      1. Press B once. The caption reads "Conversation on. Just speak."
-      2. Just talk -- no button held. Speech starts and ends the turn.
-      3. Say "track the mug" mid-conversation to drop an overlay on it.
-      4. Press B again to hand the microphone back to A push-to-talk.
-      (Left-hand X stops tracking; B no longer does.)
+    ---- A: push to talk (tracking) ----------------------------------
+      1. Look at the object.
+      2. HOLD A, say "track the laptop" (speak > 0.5 s), RELEASE A.
 
-    What you should see below, in this order (each line is a checkpoint):
-      headset: QUEST_STREAM listening (hold A)        <- A press registered, mic recording
-      headset: QUEST_STREAM utterance=... pcm_bytes=  <- speech captured and sent
-      coord:   utterance_end ...: audio=N bytes       <- laptop received the speech
-      coord:   turn N: snapshot found ...             <- the frame Huawei will look at
-      coord:   calling qwen3.8-omni-flash ...         <- request sent to Huawei
-      coord:   turn N: model replied ... target=...   <- Huawei's answer (u,v of the object)
-      coord:   SAM2 seed frame_id=... x=... y=...     <- point handed to SAM 2 as the click
-      coord:   SAM2 connected; seeding frame ...
-      headset: QUEST_TRACKING tracking: SAM 2 is running.
-      headset: QUEST_TRACKING first mask frame=...    <- masks arriving, overlay should show
+      Checkpoints, in order:
+        headset: QUEST_STREAM listening (hold A)       <- A registered, mic recording
+        headset: QUEST_STREAM utterance=... pcm_bytes= <- speech captured and sent
+        coord:   utterance_end ...: mode=ptt audio=N   <- laptop got it, A-mode route
+        coord:   turn N: snapshot found ...            <- the frame Huawei will look at
+        coord:   calling qwen3.8-omni-flash ...        <- request sent to Huawei
+        coord:   turn N: model replied ... target=...  <- Huawei's answer (u,v)
+        coord:   SAM2 seed frame_id=... x=... y=...    <- point handed to SAM 2
+        headset: QUEST_TRACKING first mask frame=...   <- masks arriving, overlay shows
+        headset: QUEST_SPEAK <the reply>               <- Android TTS speaks it
 
-    If it stops, the LAST line above tells you where. Common causes:
-      no "listening"          -> controller asleep, or headset off your face
-      "too short"             -> held A under half a second
-      no "calling qwen..."    -> snapshot missing: speak again while looking at the object
-      "call failed"           -> Huawei/network/key problem (the line names it)
-      B-mode silent           -> ffmpeg missing on the laptop (brew install ffmpeg);
-                                 the live reply is 24 kHz and needs resampling
-      "target=None"           -> Huawei could not pick one object; say it differently
-      "SAM2 ... failed"       -> SAM 2 server problem (see logs/sam2.log)
-      masks but nothing shown -> check headset: QUEST_OVERLAY lines (they say why)
-      white/blank square       -> old build still installed: rebuild in Unity, then --install
+    ---- B: continuous conversation ---------------------------------
+      1. Press B once. Caption: "Conversation on. Just speak."
+      2. Talk with NO button held. Silence ends the turn.
+      3. Mid-conversation say "track the mug" to drop an overlay on it.
+      4. Press B again to hand the mic back to A.
+      (Left-hand X stops tracking. B no longer does.)
+
+      Checkpoints, in order:
+        headset: QUEST_MODE live conversation ON       <- B registered, mic handed over
+        headset: VoiceBootstrap ... event=vad_opened   <- your speech opened a turn
+        headset: VoiceBootstrap ... event=vad_ended    <- silence closed it
+        coord:   utterance_end ...: mode=live audio=N  <- B-mode route taken
+        coord:   VoiceBootstrap ... mode=live_session  <- live turn started
+        headset: VoiceBootstrap ... playback_started   <- streaming reply playing
+        coord:   live tracking seed: turn N seeded ... <- only after a "track the ..."
+        headset: QUEST_TRACKING first mask frame=...   <- overlay, conversation continues
+
+    If it stops, the LAST line you saw tells you where. Common causes:
+      A: no "listening"        -> controller asleep, or headset off your face
+      A: "too short"           -> held A under half a second
+      A: no "calling qwen..."  -> snapshot missing: look at the object, speak again
+      A: "target=None"         -> Huawei could not pick one object; say it differently
+      A: "call failed"         -> Huawei/network/key problem (the line names it)
+      B: no "QUEST_MODE"       -> B press not seen; wake the controller and press again
+      B: "onset_dropped"       -> it was still speaking, or the socket is down
+      B: reply never audible   -> ffmpeg missing (brew install ffmpeg); the 24 kHz
+                                  live reply cannot be resampled for Quest
+      B: nothing at all        -> running with --stub; B needs the live model
+      B: seed never fires      -> say a trigger phrase ("track the", "highlight the")
+      masks but nothing shown  -> check headset: QUEST_OVERLAY lines (they say why)
+      white/blank square       -> old build installed: rebuild in Unity, then --install
+      neither mode connects    -> USB: app must be built for 127.0.0.1 (see above)
 
     Ctrl+C stops everything. Full logs: logs/coordinator.log, logs/sam2.log
 STEPS
@@ -226,7 +255,7 @@ PIDS+=($!)
 tail -f logs/sam2.log | grep --line-buffered -E "stats|Error|error|Traceback" | sed -u 's/^/sam2:    /' &
 PIDS+=($!)
 if [ -n "$(adb devices | sed -n '2p' | grep -w device)" ]; then
-  adb logcat -s Unity | grep --line-buffered -E "QUEST_TRACKING|QUEST_OVERLAY|QUEST_STREAM|CoordinatorClient" \
+  adb logcat -s Unity | grep --line-buffered -E "QUEST_TRACKING|QUEST_OVERLAY|QUEST_STREAM|QUEST_MODE|QUEST_SPEAK|VoiceBootstrap|CoordinatorClient" \
     | sed -u 's/^.*I Unity   : /headset: /' &
   PIDS+=($!)
 fi

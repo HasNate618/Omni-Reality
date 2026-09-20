@@ -13,7 +13,7 @@ MonoBehaviour:
   m_Name: QuestTrackingSettings
   m_EditorClassIdentifier: Omni.Spatial::QuestTrackingSettings
   enableTracking: 1
-  laptopIpv4: 10.37.113.178
+  laptopIpv4: 127.0.0.1
   streamFps: 3
   maxImageSide: 640
   jpegQuality: 70
