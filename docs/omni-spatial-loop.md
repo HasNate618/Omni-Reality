@@ -124,7 +124,9 @@ Coordinator events: `connection_open`, `connection_close`,
 - Quest renders `mark`, `label` (billboard card), `ghost` (rotate/slide),
   `connect`, `place_procedural` (local composition: arrow/pointer/panel/
   cube/sphere/cylinder, closed palette/sizes/materials), and
-  `revise_procedural` (enlarge/shrink/rotate/nudge/remove by drawing_id),
+  `revise_procedural` (enlarge/shrink/rotate/nudge/remove by drawing_id, plus
+  swap, which exchanges extents and mesh with the drawing named in
+  `target.drawing_id`),
   plus cloud-PCM `speak` playback with caption (`QuestDemo/Assets/Voice/`,
   `Spatial/Procedural/`). Generated GLBs import via glTFast into the
   listed-size box; when import never lands, the box stays at its stated size.

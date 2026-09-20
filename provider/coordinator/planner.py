@@ -182,8 +182,11 @@ Rules:
   "material": "solid"|"translucent"|"glow", optional "text" (panel/pointer
   only, max 40 chars)}]}. Revise a procedural drawing only by drawing_id:
   {"kind": "revise_procedural", "drawing_id": "...", "action":
-  "enlarge"|"shrink"|"rotate_cw"|"rotate_ccw"|"nudge"|"remove",
-  "direction": "left"|"right"|"up"|"down"|"forward"|"back" (nudge only)}."""
+  "enlarge"|"shrink"|"rotate_cw"|"rotate_ccw"|"nudge"|"remove"|"swap",
+  "direction": "left"|"right"|"up"|"down"|"forward"|"back" (nudge only),
+  "target": {"type": "drawing", "drawing_id": "..."} (swap only: ask for it
+  when the wearer wants one item to take on another item's size and shape; the
+  target names that other drawing)}."""
 
 VOICE_ONLY_SYSTEM_PROMPT = """You are a voice assistant on a mixed-reality headset.
 Listen to the user's speech and reply with one or two short spoken sentences in plain text.

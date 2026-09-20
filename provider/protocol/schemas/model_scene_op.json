@@ -25,7 +25,7 @@
       "maxItems": 6,
       "items": { "$ref": "#/$defs/procedural_element" }
     },
-    "action": { "enum": ["enlarge", "shrink", "rotate_cw", "rotate_ccw", "nudge", "remove"] },
+    "action": { "enum": ["enlarge", "shrink", "rotate_cw", "rotate_ccw", "nudge", "remove", "swap"] },
     "direction": { "enum": ["left", "right", "up", "down", "forward", "back"] },
     "text": { "type": "string", "maxLength": 48 },
     "asset_id": { "type": "string" },
@@ -47,6 +47,13 @@
     {
       "if": { "properties": { "kind": { "const": "revise_procedural" }, "action": { "const": "nudge" } }, "required": ["kind"] },
       "then": { "required": ["direction"] }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "revise_procedural" }, "action": { "const": "swap" } }, "required": ["kind"] },
+      "then": {
+        "required": ["target"],
+        "properties": { "target": { "properties": { "type": { "const": "drawing" } } } }
+      }
     },
     {
       "if": { "properties": { "kind": { "const": "label" } }, "required": ["kind"] },

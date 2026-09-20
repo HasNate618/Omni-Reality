@@ -343,6 +343,19 @@ class SchemaTests(unittest.TestCase):
                 "model_scene_op", load_fixture("invalid", "revise_missing_action.json")
             )
 
+    def test_procedural_revise_swap_names_the_other_drawing(self) -> None:
+        # The model's revise vocabulary includes swap, but only against another
+        # drawing: a swap with no target, or one aimed at a world point, has
+        # nothing to exchange with.
+        data = load_fixture("valid", "scene_op_procedural_revise_swap.json")
+        validate_instance("model_scene_op", data)
+        swap = {k: v for k, v in data.items() if k != "target"}
+        with self.subTest(missing="target"), self.assertRaises(ValidationError):
+            validate_instance("model_scene_op", swap)
+        world = load_fixture("invalid", "model_world_point.json")["target"]
+        with self.subTest(target="world_point"), self.assertRaises(ValidationError):
+            validate_instance("model_scene_op", {**swap, "target": world})
+
     def test_procedural_place_requires_target_and_elements(self) -> None:
         base = load_fixture("valid", "scene_op_procedural.json")
         for key in ("target", "elements"):
