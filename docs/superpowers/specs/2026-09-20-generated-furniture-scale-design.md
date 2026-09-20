@@ -233,9 +233,18 @@ The box is planted on the existing capture-time hit path — the same
 Because the anchored case is a floor or table top, the hit normal is
 approximately gravity up and cannot supply all three axes on its own. The box
 therefore takes **height along gravity up**, and both width and depth lie in
-the horizontal plane: width across the wearer's view direction, depth along
-it, so the object's front faces the wearer. The box rests on the surface at
-the hit point rather than centring on it. No world point is ever sent to the
+the horizontal plane, oriented by the **capture-time camera forward** flattened
+to the horizontal: width across the wearer's view, depth running away from
+them. The box rests on the surface at the hit point rather than centring on it.
+
+Note the direction convention, because it is easy to read backwards. The box's
+forward runs *along* the capture view — away from the wearer — not toward them.
+That is deliberate: it puts the object's width across the wearer's view and its
+depth away from them, which is what makes a non-uniform box read as furniture
+facing you, and it leaves the box's local right axis equal to the wearer's own
+right. Positive `offset_m` and "shift it right" are therefore both
+wearer-relative. Flipping the sign would invert left and right for the very
+interaction the demo uses. No world point is ever sent to the
 model; the frame exists only on Quest.
 
 ### 6.3 Mesh fit
