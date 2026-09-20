@@ -13,12 +13,9 @@ has to state sizes, so the honesty gate is unchanged.
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
 
 from coordinator.listings import normalize_name
-
-logger = logging.getLogger(__name__)
 
 Registry = dict[str, str]
 
@@ -33,7 +30,8 @@ def load_registry(path: Path) -> Registry:
         return {}
     registry: Registry = {}
     for key, value in raw.items():
-        if isinstance(key, str) and isinstance(value, str):
+        # JSON object keys are always strings, so only the value needs a guard.
+        if isinstance(value, str):
             registry[normalize_name(key)] = value
     return registry
 
