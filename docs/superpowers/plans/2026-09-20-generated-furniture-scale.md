@@ -4,7 +4,7 @@
 
 **Goal:** A size stated on a page becomes a life-size grabbable object in the room, with the generated mesh fitted inside that box instead of squeezed into a 1 m sphere.
 
-**Architecture:** The model states a listing's own dimensions through a new `place_listing` tool. The coordinator validates the metres, records the row, and authors a `place_generated` op carrying `extent_m`. Quest plants a listed-size AABB on the existing capture-time hit, ACKs `placed` immediately, then fetches the GLB with a bounded retry and fits it uniformly inside the box. Both the box and the mesh live under one `drawing_id` in `DrawingStore` so remove, undo, revise, and grab all address one object.
+**Architecture:** The model states a listing's own dimensions through a new `place_item` tool. The coordinator validates the metres, records the row, and authors a `place_generated` op carrying `extent_m`. Quest plants a listed-size AABB on the existing capture-time hit, ACKs `placed` immediately, then fetches the GLB with a bounded retry and fits it uniformly inside the box. Both the box and the mesh live under one `drawing_id` in `DrawingStore` so remove, undo, revise, and grab all address one object.
 
 **Tech Stack:** Python 3 (`unittest`, `jsonschema`), Unity 6 LTS `6000.6.2f1` (C#, NUnit EditMode, glTFast, XR Interaction Toolkit 3.6.1, Meta XR 205).
 
@@ -48,7 +48,7 @@ Three things the spec did not know, found while reading the seams. Each forces a
 
 | Path | Responsibility |
 |---|---|
-| `provider/coordinator/listings.py` | Listing memory (rows keyed by normalized name) and the `place_listing` handler |
+| `provider/coordinator/listings.py` | Listing memory (rows keyed by normalized name) and the `place_item` handler |
 | `provider/coordinator/layout.py` | Pure pack arithmetic: offsets and run length |
 | `provider/coordinator/prebaked.py` | Load and query the pre-baked artifact registry |
 | `provider/tests/test_listings.py` | Listing memory + handler tests |
@@ -67,8 +67,8 @@ Three things the spec did not know, found while reading the seams. Each forces a
 | `provider/protocol/schemas/scene_op.json` | Add `extent_m` |
 | `provider/coordinator/session.py` | `CoordinatorState.listings` |
 | `provider/coordinator/jobs.py` | Job record carries `extent_m` and `planted` |
-| `provider/omni/tools.py` | Declare `place_listing` |
-| `provider/coordinator/planner.py` | Dispatch `place_listing`, carry coordinator ops |
+| `provider/omni/tools.py` | Declare `place_item` |
+| `provider/coordinator/planner.py` | Dispatch `place_item`, carry coordinator ops |
 | `provider/coordinator/turn.py` | `build_place_generated` takes `extent_m`; skip terminal emit when planted |
 | `provider/coordinator/server.py` | Wire the job-ready poller to `on_job_terminal` |
 | `provider/tests/test_protocol.py` | `extent_m` schema tests |
@@ -608,7 +608,7 @@ git commit -m "Coordinator: pre-baked artifact registry"
 
 ---
 
-## Task 5: Declare the `place_listing` tool
+## Task 5: Declare the `place_item` tool
 
 **Files:**
 - Modify: `provider/omni/tools.py`
@@ -616,7 +616,7 @@ git commit -m "Coordinator: pre-baked artifact registry"
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: a `place_listing` entry in `TOOL_DEFINITIONS` requiring `name`, `extent_m`, `target`. Consumed by Task 6.
+- Produces: a `place_item` entry in `TOOL_DEFINITIONS` requiring `name`, `extent_m`, `target`. Consumed by Task 6.
 
 **Note:** `extent_m` is **required**. That is the honesty gate: the model cannot place a listing without stating sizes, so a listing it cannot size is a listing it must ask about.
 
@@ -625,12 +625,12 @@ git commit -m "Coordinator: pre-baked artifact registry"
 Open `provider/tests/test_omni_tools.py` and append:
 
 ```python
-class PlaceListingToolTests(unittest.TestCase):
+class PlaceItemToolTests(unittest.TestCase):
     def _tool(self) -> dict:
         for entry in TOOL_DEFINITIONS:
-            if entry["function"]["name"] == "place_listing":
+            if entry["function"]["name"] == "place_item":
                 return entry["function"]
-        self.fail("place_listing not declared")
+        self.fail("place_item not declared")
 
     def test_declared_with_required_arguments(self) -> None:
         tool = self._tool()
@@ -660,8 +660,8 @@ Confirm the file already imports `json` and `TOOL_DEFINITIONS`; if `json` is mis
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cd provider && . .venv/bin/activate && python -m unittest tests.test_omni_tools.PlaceListingToolTests -v`
-Expected: FAIL — `AssertionError: place_listing not declared`.
+Run: `cd provider && . .venv/bin/activate && python -m unittest tests.test_omni_tools.PlaceItemToolTests -v`
+Expected: FAIL — `AssertionError: place_item not declared`.
 
 - [ ] **Step 3: Declare the tool**
 
@@ -671,10 +671,10 @@ In `provider/omni/tools.py`, insert this entry into `TOOL_DEFINITIONS` after the
     {
         "type": "function",
         "function": {
-            "name": "place_listing",
+            "name": "place_item",
             "description": (
-                "Place a product you have sized onto a surface in the room. "
-                "State the sizes you read from the page; never guess them. "
+                "Place an item you have sized onto a surface in the room. "
+                "State the sizes you read or were given; never guess them. "
                 "If you do not have all three sizes, ask the wearer instead."
             ),
             "parameters": {
@@ -705,12 +705,12 @@ Expected: PASS, including every pre-existing tool test.
 
 ```bash
 git add provider/omni/tools.py provider/tests/test_omni_tools.py
-git commit -m "Omni tool: place_listing requires stated sizes"
+git commit -m "Omni tool: place_item requires stated sizes"
 ```
 
 ---
 
-## Task 6: `place_listing` handler and coordinator ops
+## Task 6: `place_item` handler and coordinator ops
 
 **Files:**
 - Modify: `provider/coordinator/listings.py`
@@ -720,8 +720,8 @@ git commit -m "Omni tool: place_listing requires stated sizes"
 - Test: `provider/tests/test_listings.py`
 
 **Interfaces:**
-- Consumes: `ListingMemory` (Task 2), `pack_offsets`/`run_length` (Task 3), `load_registry`/`lookup` (Task 4), the `place_listing` declaration (Task 5).
-- Produces: `handle_place_listing(store, *, listings, args, current_frame_id, prebaked, queue_fn=None) -> tuple[dict, dict | None]` returning `(tool_result, coordinator_op)`. `YibuPlanner.bind_tools` gains `listings` and `prebaked`. Consumed by Task 7.
+- Consumes: `ListingMemory` (Task 2), `pack_offsets`/`run_length` (Task 3), `load_registry`/`lookup` (Task 4), the `place_item` declaration (Task 5).
+- Produces: `handle_place_item(store, *, listings, args, current_frame_id, prebaked, queue_fn=None) -> tuple[dict, dict | None]` returning `(tool_result, coordinator_op)`. `YibuPlanner.bind_tools` gains `listings` and `prebaked`. Consumed by Task 7.
 
 **Why the op is carried, not sent:** `_dispatch_tool` runs inside `plan()` and has no turn id or stage epoch. It returns a partial op; `_run_turn` completes and sends it in Task 7.
 
@@ -733,20 +733,20 @@ Append to `provider/tests/test_listings.py`:
 import asyncio
 
 from coordinator.jobs import JobStore
-from coordinator.listings import handle_place_listing
+from coordinator.listings import handle_place_item
 
 _FRAME = "01k5j8g0008q3m7b2d6h9n4r5v"
 _TARGET = {"type": "capture_hint", "frame_id": _FRAME}
 _ARTIFACT = "01m2xbae3n81b4scq0k83teqjw"
 
 
-class HandlePlaceListingTests(unittest.TestCase):
+class HandlePlaceItemTests(unittest.TestCase):
     def setUp(self) -> None:
         self.store = JobStore()
         self.memory = ListingMemory()
 
     def _call(self, args, *, prebaked=None, current_frame_id=_FRAME):
-        return asyncio.run(handle_place_listing(
+        return asyncio.run(handle_place_item(
             self.store,
             listings=self.memory,
             args=args,
@@ -847,7 +847,7 @@ class HandlePlaceListingTests(unittest.TestCase):
             queued.append(kwargs)
             return {"status": "queued"}
 
-        result, op = asyncio.run(handle_place_listing(
+        result, op = asyncio.run(handle_place_item(
             self.store,
             listings=self.memory,
             args=self._good(),
@@ -893,7 +893,7 @@ class HandlePlaceListingTests(unittest.TestCase):
         self.assertAlmostEqual(result["run_length_m"], 0.55 + 0.30 + 0.05, places=6)
 
     def test_run_length_present_on_the_prebaked_path_too(self) -> None:
-        result, _ = asyncio.run(handle_place_listing(
+        result, _ = asyncio.run(handle_place_item(
             self.store,
             listings=self.memory,
             args=self._good(),
@@ -905,8 +905,8 @@ class HandlePlaceListingTests(unittest.TestCase):
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cd provider && . .venv/bin/activate && python -m unittest tests.test_listings.HandlePlaceListingTests -v`
-Expected: FAIL — `ImportError: cannot import name 'handle_place_listing'`.
+Run: `cd provider && . .venv/bin/activate && python -m unittest tests.test_listings.HandlePlaceItemTests -v`
+Expected: FAIL — `ImportError: cannot import name 'handle_place_item'`.
 
 - [ ] **Step 3: Write the handler**
 
@@ -962,7 +962,7 @@ def _valid_target(value: Any, current_frame_id: str | None) -> dict | None:
     return dict(value)
 
 
-async def handle_place_listing(
+async def handle_place_item(
     store: JobStore,
     *,
     listings: "ListingMemory",
@@ -971,7 +971,7 @@ async def handle_place_listing(
     prebaked: dict[str, str],
     queue_fn: Any | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """Validate one place_listing call. Returns (tool_result, coordinator_op).
+    """Validate one place_item call. Returns (tool_result, coordinator_op).
 
     The caller owns sending the op: this runs inside a tool round with no turn
     id or stage epoch available.
@@ -1136,7 +1136,7 @@ and in `clear_voice`, after `self.pending_ops.clear()`:
 
 - [ ] **Step 6: Write the failing planner test**
 
-Create `provider/tests/test_place_listing_turn.py`:
+Create `provider/tests/test_place_item_turn.py`:
 
 ```python
 from __future__ import annotations
@@ -1165,9 +1165,9 @@ class CoordinatorOpPlumbingTests(unittest.TestCase):
         )
         return planner
 
-    def test_place_listing_returns_result_and_records_op(self) -> None:
+    def test_place_item_returns_result_and_records_op(self) -> None:
         planner = self._planner()
-        result = asyncio.run(planner._dispatch_tool("place_listing", {
+        result = asyncio.run(planner._dispatch_tool("place_item", {
             "name": "oak side table",
             "extent_m": [0.55, 0.40, 0.72],
             "target": _TARGET,
@@ -1176,9 +1176,9 @@ class CoordinatorOpPlumbingTests(unittest.TestCase):
         self.assertEqual(len(planner._coordinator_ops), 1)
         self.assertEqual(planner._coordinator_ops[0]["kind"], "place_generated")
 
-    def test_refused_place_listing_records_no_op(self) -> None:
+    def test_refused_place_item_records_no_op(self) -> None:
         planner = self._planner()
-        result = asyncio.run(planner._dispatch_tool("place_listing", {
+        result = asyncio.run(planner._dispatch_tool("place_item", {
             "name": "oak side table", "target": _TARGET,
         }))
         self.assertEqual(result["error"], "invalid")
@@ -1201,7 +1201,7 @@ class CoordinatorOpPlumbingTests(unittest.TestCase):
 
 - [ ] **Step 7: Run it to verify it fails**
 
-Run: `cd provider && . .venv/bin/activate && python -m unittest tests.test_place_listing_turn -v`
+Run: `cd provider && . .venv/bin/activate && python -m unittest tests.test_place_item_turn -v`
 Expected: FAIL — `TypeError: bind_tools() got an unexpected keyword argument 'listings'`.
 
 - [ ] **Step 8: Wire the planner**
@@ -1242,10 +1242,10 @@ Change `bind_tools` to accept and reset them:
 In `_dispatch_tool`, add this branch after the `start_generation` branch:
 
 ```python
-        if name == "place_listing":
-            from coordinator.listings import handle_place_listing
+        if name == "place_item":
+            from coordinator.listings import handle_place_item
 
-            result, op = await handle_place_listing(
+            result, op = await handle_place_item(
                 self._jobs,
                 listings=self._listings,
                 args=dict(arguments),
@@ -1289,7 +1289,7 @@ and the legacy path line becomes:
 
 - [ ] **Step 9: Run the tests to verify they pass**
 
-Run: `cd provider && . .venv/bin/activate && python -m unittest tests.test_place_listing_turn tests.test_listings -v`
+Run: `cd provider && . .venv/bin/activate && python -m unittest tests.test_place_item_turn tests.test_listings -v`
 Expected: PASS, 31 tests.
 
 Then run the whole suite to catch regressions from the `bind_tools` signature change:
@@ -1300,8 +1300,8 @@ Expected: PASS. If a test double calls `bind_tools` positionally, fix the call t
 - [ ] **Step 10: Commit**
 
 ```bash
-git add provider/coordinator/listings.py provider/coordinator/planner.py provider/coordinator/session.py provider/tests/test_listings.py provider/tests/test_place_listing_turn.py
-git commit -m "Coordinator: place_listing handler, listing memory, coordinator ops"
+git add provider/coordinator/listings.py provider/coordinator/planner.py provider/coordinator/session.py provider/tests/test_listings.py provider/tests/test_place_item_turn.py
+git commit -m "Coordinator: place_item handler, listing memory, coordinator ops"
 ```
 
 ---
@@ -2795,7 +2795,7 @@ git commit -m "Quest: floor-plane grab with locked height and listed scale"
 In `docs/omni-worker-tools.md`, in the Contract list, add:
 
 ```markdown
-- `place_listing(name, extent_m, target)` is a model tool. `extent_m` is the
+- `place_item(name, extent_m, target)` is a model tool. `extent_m` is the
   listing's own `[width, depth, height]` in metres and is **required**: the
   model may not place a listing it cannot size. The coordinator validates the
   metres, records the row, and authors the `place_generated` op, which carries

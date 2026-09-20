@@ -53,7 +53,7 @@ The floor plan of the interaction:
 1. The wearer looks at a page that states a product and its dimensions.
 2. Omni reads name and W×D×H from that frame into listing memory.
 3. The wearer asks for it in the room ("fill that corner with these").
-4. Omni calls `place_listing` with the listing and the sizes it read.
+4. Omni calls `place_item` with the listing and the sizes it read.
 5. The coordinator validates the metres, authors `place_generated`, and Quest
    plants a listed-size box on the capture-time hit.
 6. The mesh arrives and fits inside the box, uniform scale, proportions kept.
@@ -133,29 +133,36 @@ placement frame is §6.2.
 The field is coordinator-authored. It is **not** added to
 `model_scene_op.json`: the model still cannot emit `place_generated`.
 
-### 5.2 New model tool `place_listing`
+### 5.2 New model tool `place_item`
 
 `provider/omni/tools.py` gains one tool:
 
 ```
-place_listing(name, extent_m, target)
+place_item(name, extent_m, target)
 ```
 
-- `name`: 1–40 chars, what the listing is ("oak side table"). Rows are keyed by
-  the normalized name so a repeat placement updates rather than duplicates.
+- `name`: 1–40 chars, what the item is ("oak side table", "warm floor
+  wash"). Rows are keyed by the normalized name so a repeat placement updates
+  rather than duplicates.
 - `extent_m`: **required** array of exactly 3 numbers, each 0.05–3.0 m. It is
-  required so that no listing can ever be placed without stated numbers: the
-  model must state what it read, or ask the wearer, or place nothing.
+  required so that nothing can ever be placed without stated numbers: the model
+  must state what it read, or ask the wearer, or place nothing.
 - `target` uses the existing target grammar (image-space only). No world point.
 - Refused when `extent_m` is missing, mistyped, or out of range, and refused
   when the turn has no capture frame to anchor to — the same condition every
   other frame-anchored op already has.
 
-There is no separate "record a listing" tool. Recording happens as a side
+The tool is deliberately named for the *act* of placing, not for where the
+sizes came from. A page-stated listing is one evidence source; a curated
+suggestion entry carrying its own size (§11) will be another. Both end in the
+same placement mechanics, so both call the same tool and only the evidence
+source differs. This slice implements the page-stated path only.
+
+There is no separate "record an item" tool. Recording happens as a side
 of placing, which removes a whole class of "unknown listing_id" failure and
 keeps the evidence attached to the act that needs it.
 
-The coordinator turns an accepted `place_listing` into a coordinator-authored
+The coordinator turns an accepted `place_item` into a coordinator-authored
 `place_generated` carrying `extent_m`, the job, and the target. Refusal
 reasons reuse the existing vocabulary rather than inventing strings.
 
@@ -330,10 +337,10 @@ Python, offline, no credit (`cd provider && . .venv/bin/activate && python -m un
 - `offset_m` is optional and bounded at ±3.0 m.
 - `place_generated` without `extent_m` still validates, so existing fixtures
   and the shop-to-life path are unchanged.
-- `place_listing` is refused with `extent_m` missing, with the wrong number
+- `place_item` is refused with `extent_m` missing, with the wrong number
   of axes, with a non-number, with a negative value, with any axis outside
   0.05–3.0 m, and with a turn that has no capture frame.
-- `place_listing` succeeds with valid extents, and the resulting
+- `place_item` succeeds with valid extents, and the resulting
   coordinator-authored `place_generated` carries `extent_m`.
 - Placing the same name twice updates one row rather than creating two.
 - An extents job emits exactly one `place_generated`: at accept, and not again
@@ -386,3 +393,20 @@ truth in every failure path above.
 - Multi-session listing memory, catalog sync, or price handling.
 - A Quest-side mesh-arrival report. Until one exists, §8.2 forbids asserting
   that a transfer completed.
+- **A curated suggestion inventory.** Injecting per-turn design taste
+  (layered lighting, textile warmth, greenery, cable concealment, wall
+  balance) with triggers and phrasing variants, so "I think something is
+  missing" gets a diagnosis instead of a recording. Its own slice. The rule
+  that slice must keep: the curated entry carries the **size**, so the model
+  reasons about *which* suggestion fits without inventing metres — the same
+  evidence discipline as §4. Note also that several such suggestions are light
+  rather than geometry, and are better served by an existing glow or ghost op
+  than by a generated mesh.
+- **Image-less generation (text→image→3D).** The worker today is image→3D only:
+  `workers/gen_client.queue_job` requires a `jpeg_b64`. The parent spec already
+  names the extension — "a later text-to-image then image-to-3D step. Not
+  text-to-3D by itself" — so this is a text-to-image model in front of TripoSR
+  at the worker layer. It is what would let an item be created with no
+  reference image at all. Note the sizing consequence: an item with no listing
+  and no measured surface (a textured wall is the obvious case) has no honest
+  size until the two-ray measurement above exists.
