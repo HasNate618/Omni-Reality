@@ -191,12 +191,40 @@ public class DrawingStore : MonoBehaviour
     sealed class GeneratedRecord
     {
         public GameObject Root;
-        public GameObject Mesh;
+        public GameObject Box;
+        public GeneratedMeshFit Fitted;
         public Vector3 BoxSize;
         public bool Approximate;
     }
 
+    /// <summary>
+    /// What one imported mesh says about itself, kept so a swap can fit it
+    /// into a different box. Every value is measured before any fit scaling:
+    /// re-fitting an already-fitted mesh would shrink it on every swap and
+    /// quietly break the listed-size claim (spec §6.3).
+    /// </summary>
+    sealed class GeneratedMeshFit
+    {
+        public GameObject Mesh;
+        public Vector3 UnitSize;
+        public Vector3 UnitScale;
+        public Vector3 CentreOffset;
+    }
+
     readonly Dictionary<string, GeneratedRecord> _generated = new Dictionary<string, GeneratedRecord>();
+
+    /// <summary>Box opacity once a fitted mesh matches the listing (§6.3).</summary>
+    const float FittedBoxAlpha = 0.12f;
+
+    /// <summary>Box opacity once a fitted mesh misses the listing past 25% (§8.1).</summary>
+    const float ApproximateBoxAlpha = 0.35f;
+
+    /// <summary>
+    /// Box opacity while the box holds no mesh. It matches the value
+    /// ListingBox.Create plants the box with, which is also the state a
+    /// swapped-away mesh leaves behind.
+    /// </summary>
+    const float UnfittedBoxAlpha = 0.25f;
 
     /// <summary>
     /// Register one generated placement as a normal drawing so remove, undo,
@@ -262,7 +290,8 @@ public class DrawingStore : MonoBehaviour
         _generated[drawingId] = new GeneratedRecord
         {
             Root = root,
-            Mesh = null,
+            Box = box,
+            Fitted = null,
             BoxSize = boxSize,
             Approximate = false,
         };
@@ -314,23 +343,22 @@ public class DrawingStore : MonoBehaviour
         return !string.IsNullOrEmpty(drawingId) && _generated.ContainsKey(drawingId);
     }
 
-    /// <summary>
-    /// Attach the imported mesh under the listed box and fit it uniformly.
-    /// The box stays as the size claim; only its opacity changes.
-    /// </summary>
-    public void MarkMeshFitted(string drawingId, bool approximate)
+    /// <summary>Record the fit verdict and show it on the box.</summary>
+    void SetMeshState(GeneratedRecord rec, bool approximate)
     {
-        GeneratedRecord rec = null;
-        if (string.IsNullOrEmpty(drawingId) || !_generated.TryGetValue(drawingId, out rec))
-            return;
         rec.Approximate = approximate;
-        if (rec.Root == null)
+        SetBoxAlpha(rec, approximate ? ApproximateBoxAlpha : FittedBoxAlpha);
+    }
+
+    void SetBoxAlpha(GeneratedRecord rec, float alpha)
+    {
+        if (rec.Box == null)
             return;
-        Renderer box = rec.Root.GetComponentInChildren<Renderer>();
+        Renderer box = rec.Box.GetComponent<Renderer>();
         if (box != null && box.sharedMaterial != null)
         {
             Color c = box.sharedMaterial.color;
-            c.a = approximate ? 0.35f : 0.12f;
+            c.a = alpha;
             box.sharedMaterial.color = c;
         }
     }
@@ -353,29 +381,64 @@ public class DrawingStore : MonoBehaviour
         for (int i = 1; i < renderers.Length; i++)
             bounds.Encapsulate(renderers[i].bounds);
         // The imported holder sits at the world origin, so its bounds centre
-        // is not its pivot. Capture both in the world frame before the
-        // reparent, which is the only frame where they are still meaningful.
-        Vector3 centreOffset = bounds.center - mesh.transform.position;
-        float scale = ListingBox.FitScale(bounds.size, rec.BoxSize);
-        mesh.transform.localScale = mesh.transform.localScale * scale;
-        // worldPositionStays: false, so the mesh keeps its local transform and
-        // would otherwise stay at the origin it was imported at. Uniform
-        // scaling leaves the centre offset parallel to itself, only scaled.
-        mesh.transform.SetParent(rec.Root.transform, false);
-        mesh.transform.position = rec.Root.transform.position - centreOffset * scale;
-        rec.Mesh = mesh;
-        approximate = ListingBox.IsApproximate(bounds.size, rec.BoxSize);
-        MarkMeshFitted(drawingId, approximate);
+        // is not its pivot. Capture that offset in the world frame before the
+        // reparent, which is the only frame where it is still meaningful, and
+        // capture size and scale unfitted: a swap re-fits from these, so they
+        // must describe the mesh as imported, not as last fitted.
+        rec.Fitted = new GeneratedMeshFit
+        {
+            Mesh = mesh,
+            UnitSize = bounds.size,
+            UnitScale = mesh.transform.localScale,
+            CentreOffset = bounds.center - mesh.transform.position,
+        };
+        FitIntoBox(rec);
+        approximate = rec.Approximate;
         return true;
     }
 
     /// <summary>
-    /// Revise one generated placement. Nudge, rotate, and remove apply;
+    /// Fit whatever mesh a record currently holds into the box it currently
+    /// lists, from the mesh's own import measurements (spec §6.3), and report
+    /// the honesty on the box. The import path and the swap path share it, so
+    /// a swapped mesh lands exactly as it would have on arrival.
+    /// </summary>
+    void FitIntoBox(GeneratedRecord rec)
+    {
+        GeneratedMeshFit fitted = rec.Fitted;
+        if (fitted == null || fitted.Mesh == null)
+        {
+            // No mesh in this box: the listed box stands alone, which is also
+            // the state a swapped-away mesh leaves behind.
+            rec.Fitted = null;
+            rec.Approximate = false;
+            SetBoxAlpha(rec, UnfittedBoxAlpha);
+            return;
+        }
+        float scale = ListingBox.FitScale(fitted.UnitSize, rec.BoxSize);
+        fitted.Mesh.transform.localScale = fitted.UnitScale * scale;
+        // worldPositionStays: false, so the mesh keeps its local transform and
+        // would otherwise stay at the origin it was imported at. The offset is
+        // world-measured but the mesh now carries the root's yaw, so it has to
+        // be rotated into the root's frame before it can centre anything.
+        fitted.Mesh.transform.SetParent(rec.Root.transform, false);
+        fitted.Mesh.transform.position = rec.Root.transform.position
+            - rec.Root.transform.rotation * (fitted.CentreOffset * scale);
+        SetMeshState(rec, ListingBox.IsApproximate(fitted.UnitSize, rec.BoxSize));
+    }
+
+    /// <summary>
+    /// Revise one generated placement. Nudge, rotate, remove, and swap apply;
     /// enlarge and shrink are refused because the listed size is the claim
     /// (spec §7.3) and voice must not quietly break it.
     /// </summary>
+    /// <param name="targetDrawingId">
+    /// The other drawing a swap exchanges with, taken from the op's target
+    /// (<c>{"type": "drawing", "drawing_id": ...}</c>). Null for every other
+    /// verb, which names no second drawing.
+    /// </param>
     public bool ApplyGeneratedRevision(
-        string drawingId, string action, string direction, out string error)
+        string drawingId, string action, string direction, string targetDrawingId, out string error)
     {
         error = null;
         GeneratedRecord rec = null;
@@ -395,6 +458,27 @@ public class DrawingStore : MonoBehaviour
             _generated.Remove(drawingId);
             _marks.Remove(rec.Root);
             DestroyMark(rec.Root);
+            return true;
+        }
+        if (action == "swap")
+        {
+            GeneratedRecord other = null;
+            // A swap that names no other drawing, names its own, or names one
+            // this store does not hold exchanges nothing: refuse it rather
+            // than apply a revision the wearer would hear as done.
+            if (string.IsNullOrEmpty(targetDrawingId) || targetDrawingId == drawingId ||
+                !_generated.TryGetValue(targetDrawingId, out other))
+            {
+                error = "invalid";
+                return false;
+            }
+            if (other.Root == null)
+            {
+                _generated.Remove(targetDrawingId);
+                error = "invalid";
+                return false;
+            }
+            SwapListings(rec, other);
             return true;
         }
         if (action == "enlarge" || action == "shrink")
@@ -435,6 +519,57 @@ public class DrawingStore : MonoBehaviour
         }
         error = "invalid";
         return false;
+    }
+
+    /// <summary>
+    /// Exchange what two generated drawings contain (spec §7.3): each box takes
+    /// the other's listed extents and its mesh, so the wearer changes what
+    /// stands in each slot without moving anything. Neither drawing moves: the
+    /// footprint and the surface contact stay where they are, and only the box
+    /// centre re-seats, because §6.2 rests the box on that surface and its
+    /// height has just changed.
+    /// </summary>
+    void SwapListings(GeneratedRecord one, GeneratedRecord other)
+    {
+        Vector3 oneSize = one.BoxSize;
+        Vector3 otherSize = other.BoxSize;
+        GeneratedMeshFit oneMesh = one.Fitted;
+        one.BoxSize = otherSize;
+        one.Fitted = other.Fitted;
+        other.BoxSize = oneSize;
+        other.Fitted = oneMesh;
+        Rebox(one, oneSize);
+        Rebox(other, otherSize);
+    }
+
+    /// <summary>
+    /// Re-lay one drawing in its newly listed box: the box child, the root
+    /// collider, the resting height, and the grab's locked height all follow
+    /// the new size, and the mesh is re-fitted into it. The footprint does not
+    /// move; the centre does, because the box rests on the surface and a
+    /// shorter item must not be left floating above it.
+    /// </summary>
+    void Rebox(GeneratedRecord rec, Vector3 previousBoxSize)
+    {
+        if (rec.Root == null)
+            return;
+        if (rec.Box != null)
+            rec.Box.transform.localScale = rec.BoxSize;
+        BoxCollider body = rec.Root.GetComponent<BoxCollider>();
+        if (body != null)
+        {
+            body.size = rec.BoxSize;
+            body.center = Vector3.zero;
+        }
+        Vector3 position = rec.Root.transform.position;
+        float surfaceY = position.y - previousBoxSize.y / 2f;
+        position.y = surfaceY + rec.BoxSize.y / 2f;
+        rec.Root.transform.position = position;
+        // The grab locks Y to the planted surface, which has just moved:
+        // Attach reuses the existing component and listeners and re-sets
+        // LockedY, so the drag cannot fight the new height.
+        FloorPlaneGrab.Attach(rec.Root, rec.Root.transform.position.y);
+        FitIntoBox(rec);
     }
 
     public GameObject PlaceProcedural(

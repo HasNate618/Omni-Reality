@@ -435,6 +435,8 @@ public static class ProtocolJson
         public float OffsetM;
         public string DrawingId;
         public string TargetFrameId;
+        public bool HasTargetDrawingId;
+        public string TargetDrawingId;
         public string FromTargetFrameId;
         public string ToTargetFrameId;
         public string Text;
@@ -542,6 +544,13 @@ public static class ProtocolJson
                 parsed.ElementsJson = arr;
         }
         TryGetTargetFrameId(payloadJson, "target", out parsed.TargetFrameId);
+        string targetDrawingId;
+        TryGetTargetDrawingId(payloadJson, "target", out targetDrawingId);
+        if (targetDrawingId != null)
+        {
+            parsed.HasTargetDrawingId = true;
+            parsed.TargetDrawingId = targetDrawingId;
+        }
         TryGetTargetFrameId(payloadJson, "from", out parsed.FromTargetFrameId);
         TryGetTargetFrameId(payloadJson, "to", out parsed.ToTargetFrameId);
         int motionAt = IndexOfKey(payloadJson, "motion", 0);
@@ -581,7 +590,23 @@ public static class ProtocolJson
 
     static void TryGetTargetFrameId(string payloadJson, string key, out string frameId)
     {
-        frameId = null;
+        TryGetTargetField(payloadJson, key, "frame_id", out frameId);
+    }
+
+    /// <summary>
+    /// The drawing id of a <c>{"type": "drawing", ...}</c> target. A swap op
+    /// names the drawing whose listed extent and mesh this one takes on
+    /// (spec §7.3), and every other target variant has none.
+    /// </summary>
+    static void TryGetTargetDrawingId(string payloadJson, string key, out string drawingId)
+    {
+        TryGetTargetField(payloadJson, key, "drawing_id", out drawingId);
+    }
+
+    /// <summary>One string field of a target object, null when absent.</summary>
+    static void TryGetTargetField(string payloadJson, string key, string field, out string value)
+    {
+        value = null;
         int keyAt = IndexOfKey(payloadJson, key, 0);
         if (keyAt < 0)
             return;
@@ -592,8 +617,8 @@ public static class ProtocolJson
             return;
         string parsed;
         bool found;
-        if (TryGetStringOrNull(targetJson, "frame_id", out parsed, out found) && found)
-            frameId = parsed;
+        if (TryGetStringOrNull(targetJson, field, out parsed, out found) && found)
+            value = parsed;
     }
 
     /// <summary>One streamed speech chunk (turn_id, seq, audio object).</summary>

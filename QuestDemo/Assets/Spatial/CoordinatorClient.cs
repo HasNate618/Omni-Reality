@@ -464,7 +464,10 @@ public class CoordinatorClient : MonoBehaviour
                 {
                     string genError;
                     bool genOk = Store.ApplyGeneratedRevision(
-                        op.DrawingId, op.Action, op.Direction, out genError);
+                        op.DrawingId, op.Action, op.Direction,
+                        // Swap is the one verb that names a second drawing: the
+                        // one whose listed extent and mesh this one takes on.
+                        op.HasTargetDrawingId ? op.TargetDrawingId : null, out genError);
                     // placement_ack requires a null drawing_id and a reason on a
                     // rejection: a non-null id fails validation, the ack is
                     // dropped, and the op never settles.

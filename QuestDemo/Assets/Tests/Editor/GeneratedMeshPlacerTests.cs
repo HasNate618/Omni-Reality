@@ -95,10 +95,10 @@ public class GeneratedMeshPlacerTests
     [Test]
     public void BoxYawFollowsTheCaptureViewDirection()
     {
-        // §6.2: width runs across the wearer's view and depth along it, so the
-        // object's front is turned toward the wearer. A floor hit's normal is
-        // gravity up and supplies no yaw at all, so the frame comes from the
-        // capture-time camera forward, flattened to the horizontal plane.
+        // §6.2: width runs across the wearer's view and depth along it, which
+        // needs a yaw. A floor hit's normal is gravity up and supplies none, so
+        // the frame comes from the capture-time camera forward, flattened to
+        // the horizontal plane.
         var go = new GameObject("store");
         var store = go.AddComponent<DrawingStore>();
         GameObject lookingForward = store.PlaceGenerated(
@@ -230,6 +230,37 @@ public class GeneratedMeshPlacerTests
         // A 0.6 cube in a 0.55 x 0.72 x 0.40 box misses by far more than 25%
         // on z, so the fit must report approximate (§8.1).
         Assert.IsTrue(approximate);
+        Object.DestroyImmediate(placed);
+        Object.DestroyImmediate(go);
+    }
+
+    [Test]
+    public void FittedMeshIsCentredOnItsBoxAtAnyYaw()
+    {
+        // The capture facing gives the root a yaw and the mesh inherits it, so
+        // the mesh's pivot-to-centre offset is no longer world-aligned:
+        // centring has to rotate that offset into the root's frame, not assume
+        // the box faces world +Z.
+        var go = new GameObject("store");
+        var store = go.AddComponent<DrawingStore>();
+        GameObject placed = store.PlaceGenerated(
+            new Vector3(1f, 0f, 2f), Vector3.up, "d-yaw", new Vector3(0.55f, 0.40f, 0.72f),
+            0f, new Vector3(1f, 0f, 0f));
+        Assert.Greater(Quaternion.Angle(Quaternion.identity, placed.transform.rotation), 5f);
+        var holder = new GameObject("Generated_job");
+        GameObject cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        cube.transform.SetParent(holder.transform, false);
+        cube.transform.localPosition = new Vector3(0.5f, 0.3f, -0.2f);
+        cube.transform.localScale = Vector3.one * 0.6f;
+
+        Assert.IsTrue(store.FitMeshIntoBox("d-yaw", holder, out bool approximate));
+        // A 0.6 m cube in the 0.40 m deep box still misses the 25% rule.
+        Assert.IsTrue(approximate);
+        Bounds bounds = cube.GetComponent<Renderer>().bounds;
+        Assert.AreEqual(placed.transform.position.x, bounds.center.x, 1e-3f);
+        Assert.AreEqual(placed.transform.position.y, bounds.center.y, 1e-3f);
+        Assert.AreEqual(placed.transform.position.z, bounds.center.z, 1e-3f);
+        Object.DestroyImmediate(holder);
         Object.DestroyImmediate(placed);
         Object.DestroyImmediate(go);
     }
