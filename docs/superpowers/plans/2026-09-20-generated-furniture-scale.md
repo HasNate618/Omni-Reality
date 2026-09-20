@@ -901,6 +901,41 @@ class HandlePlaceItemTests(unittest.TestCase):
             prebaked={"oak side table": _ARTIFACT},
         ))
         self.assertAlmostEqual(result["run_length_m"], 0.55, places=6)
+
+    def test_busy_refusal_leaves_no_trace(self) -> None:
+        # A worker is queued for the first item, so the second is refused.
+        # A refusal must not record a row or queue a worker.
+        calls = []
+
+        async def queue_fn(**kwargs):
+            calls.append(kwargs)
+            return {"status": "queued"}
+
+        first, _ = asyncio.run(handle_place_item(
+            self.store, listings=self.memory, args=self._good(),
+            current_frame_id=_FRAME, prebaked={}, queue_fn=queue_fn))
+        self.assertNotIn("error", first)
+        rows_after_first = len(self.memory.rows())
+
+        lamp = {"name": "floor lamp", "extent_m": [0.30, 0.30, 1.50], "target": _TARGET}
+        result, op = asyncio.run(handle_place_item(
+            self.store, listings=self.memory, args=lamp,
+            current_frame_id=_FRAME, prebaked={}, queue_fn=queue_fn))
+        self.assertEqual(result["error"], "busy")
+        self.assertIsNone(op)
+        self.assertEqual(
+            len(self.memory.rows()), rows_after_first,
+            "a refused placement must not record a row")
+        self.assertEqual(len(calls), 1, "a refused placement must not queue a worker")
+
+    def test_no_worker_bound_means_no_busy_check(self) -> None:
+        # With no worker there is nothing to serialize: the pre-baked and
+        # demo paths place several items back to back.
+        self._call(self._good())
+        lamp = {"name": "floor lamp", "extent_m": [0.30, 0.30, 1.50], "target": _TARGET}
+        result, op = self._call(lamp)
+        self.assertNotIn("error", result)
+        self.assertIsNotNone(op)
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -982,10 +1017,16 @@ async def handle_place_item(
     if name is None or extents is None or target is None:
         return {"error": "invalid"}, None
 
-    listings.record(name, extents, current_frame_id, "page")
-    offset_m = _offset_for(listings, name)
+    # The busy rule protects the worker, so it only applies when we are about
+    # to queue one. A refusal must leave no trace, so record() runs after it.
+    from workers.gen_client import BusyError
 
     artifact_id = lookup(prebaked, name)
+    if artifact_id is None and queue_fn is not None and session_generation_busy(store):
+        return {"error": "busy"}, None
+
+    listings.record(name, extents, current_frame_id, "page")
+    offset_m = _offset_for(listings, name)
     row_extents = [row["extent_m"] for row in listings.rows()]
     if artifact_id is not None:
         job_id = artifact_id
@@ -1007,11 +1048,6 @@ async def handle_place_item(
             },
             _place_op(job_id, extents, target, offset_m),
         )
-
-    from workers.gen_client import BusyError
-
-    if session_generation_busy(store):
-        return {"error": "busy"}, None
 
     job_id = new_ulid()
     store.jobs[job_id] = {
@@ -1251,7 +1287,7 @@ In `_dispatch_tool`, add this branch after the `start_generation` branch:
                 args=dict(arguments),
                 current_frame_id=self._frame_id,
                 prebaked=self._prebaked,
-                queue_fn=self._queue_fn,
+                queue_fn=self._queue_fn or _default_queue_fn,
             )
             if op is not None:
                 self._coordinator_ops.append(op)
@@ -1290,7 +1326,7 @@ and the legacy path line becomes:
 - [ ] **Step 9: Run the tests to verify they pass**
 
 Run: `cd provider && . .venv/bin/activate && python -m unittest tests.test_place_item_turn tests.test_listings -v`
-Expected: PASS, 31 tests.
+Expected: PASS, 33 tests.
 
 Then run the whole suite to catch regressions from the `bind_tools` signature change:
 

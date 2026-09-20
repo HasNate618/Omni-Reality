@@ -183,11 +183,20 @@ on whether extents are known:
   until the artifact is ready.
 
 Generation is serialized: `_session_generation_busy` refuses a second worker
-job while one is queued or running. A demonstration that places several
-listings therefore cannot generate them concurrently. This slice adds a
-**pre-baked artifact registry**: a listing name that maps to an existing
-artifact id is placed immediately without queueing a worker at all. Whether a
-listing is pre-baked is coordinator configuration, not a model input.
+job while one is queued or running. The rule protects the worker, so it applies
+**only when a worker is actually about to be queued** — the pre-baked path
+queues nothing and is not subject to it. A refusal must leave no trace: a
+refused placement records no row and shifts no pack offset. A demonstration
+that places several listings therefore cannot generate them concurrently. This
+slice adds a **pre-baked artifact registry**: a listing name that maps to an
+existing artifact id is placed immediately without queueing a worker at all.
+Whether a listing is pre-baked is coordinator configuration, not a model input.
+
+The consequence for the live path is deliberate: while one live generation is
+queued, a second live placement is refused `busy` rather than silently
+co-queued. The worker's own `BusyError` remains the backstop, so even a
+misconfigured coordinator that binds no queue function degrades to `busy`
+rather than double-queuing.
 
 ### 5.4 ACK vocabulary is unchanged
 
