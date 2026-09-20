@@ -73,6 +73,10 @@ public class SpatialRuntime : MonoBehaviour
         if (rightGO != null)
             _rightAim = rightGO.transform;
         SetupAimLine();
+        // Task 12's generated roots carry an XRGrabInteractable; without an
+        // interaction manager and a controller interactor nothing can select
+        // one, so the floor-plane grab would be unreachable on device.
+        GrabRig.Ensure();
         _laptopIpv4 = PlayerPrefs.GetString(CoordinatorClient.LaptopIpv4PrefKey, "");
     }
 
