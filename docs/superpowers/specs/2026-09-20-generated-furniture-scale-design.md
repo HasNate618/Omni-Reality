@@ -94,22 +94,24 @@ never emits world coordinates, poses, quaternions, or C#.
 **Listing memory** is coordinator-side working memory:
 
 ```
-{ listing_id, name, extent_m: [w, d, h], source_frame_id, source: "page" | "spoken" }
+{ name, extent_m: [w, d, h], source_frame_id, source: "page" | "spoken" }
 ```
 
 - Any frame that shows a product with dimensions may contribute rows: a cart
   page contributes several at once, a single product page contributes one.
 - The only frame source is the Quest camera. The laptop does not screenshot
   its own screen; there is one vision source, and it is what the wearer sees.
-- A row missing any axis is stored with the axes it has and is **not**
-  placeable. The model asks the wearer, and a spoken answer may fill the gap
-  (`source: "spoken"`).
+- Rows are **recorded when a listing is placed** (§5.2), keyed by normalized
+  name. The model states the sizes it read; the coordinator validates and
+  remembers them. Nothing else populates memory in this slice.
+- A listing with no stated sizes on any axis is **not** placeable. The model
+  asks the wearer instead. A spoken answer is a valid source.
 - Rows are session-scoped and cleared with the session, like inspect objects
   and jobs.
 
 Axis convention for `extent_m` is the listing's own frame, not world space:
-`w` across the front face, `d` front-to-back, `h` vertical. Mapping to the hit
-tangent frame is §6.2.
+`w` across the front face, `d` front-to-back, `h` vertical. Mapping to the
+placement frame is §6.2.
 
 ## 5. Protocol changes
 
@@ -131,26 +133,49 @@ The field is coordinator-authored. It is **not** added to
 `provider/omni/tools.py` gains one tool:
 
 ```
-place_listing(listing_id, target, extent_m?)
+place_listing(name, extent_m, target)
 ```
 
-- `listing_id` must exist in listing memory.
-- `extent_m` is optional and, when supplied, must match the stored row; it
-  exists so the model can state what it read rather than relying on a hidden
-  lookup. A mismatch or an unknown `listing_id` is refused.
+- `name`: 1–40 chars, what the listing is ("oak side table"). Rows are keyed by
+  the normalized name so a repeat placement updates rather than duplicates.
+- `extent_m`: **required** array of exactly 3 numbers, each 0.05–3.0 m. It is
+  required so that no listing can ever be placed without stated numbers: the
+  model must state what it read, or ask the wearer, or place nothing.
 - `target` uses the existing target grammar (image-space only). No world point.
-- The model cannot place a listing whose stored row is missing an axis.
+- Refused when `extent_m` is missing, mistyped, or out of range, and refused
+  when the turn has no capture frame to anchor to — the same condition every
+  other frame-anchored op already has.
+
+There is no separate "record a listing" tool. Recording happens as a side
+of placing, which removes a whole class of "unknown listing_id" failure and
+keeps the evidence attached to the act that needs it.
 
 The coordinator turns an accepted `place_listing` into a coordinator-authored
-`place_generated` carrying `extent_m`, the job, and the target. Nothing about
-refusal reasons is invented here; the refusal vocabulary stays as the schemas
-define.
+`place_generated` carrying `extent_m`, the job, and the target. Refusal
+reasons reuse the existing vocabulary rather than inventing strings.
 
-### 5.3 Job record carries extents
+### 5.3 Job record carries extents, and extents jobs plant early
 
-`provider/coordinator/jobs.py`: the job record gains `extent_m` when the
-request supplied one, so the coordinator can plant before the artifact exists
-and can reconstruct the box after a restart of a turn.
+`provider/coordinator/jobs.py`: the job record gains `extent_m` and
+`planted`.
+
+`place_generated` is emitted from two places, and which one applies depends
+on whether extents are known:
+
+- **Extents present (this slice's path).** The coordinator emits
+  `place_generated` as soon as the job is accepted and marks the job
+  `planted`. The wearer sees a stated-size box while the mesh is still
+  baking. When the job later reports ready, `on_job_terminal` must **not**
+  emit a second op for it — Quest is already fetching.
+- **No extents (existing path).** Behaviour is unchanged: nothing is emitted
+  until the artifact is ready.
+
+Generation is serialized: `_session_generation_busy` refuses a second worker
+job while one is queued or running. A demonstration that places several
+listings therefore cannot generate them concurrently. This slice adds a
+**pre-baked artifact registry**: a listing name that maps to an existing
+artifact id is placed immediately without queueing a worker at all. Whether a
+listing is pre-baked is coordinator configuration, not a model input.
 
 ### 5.4 ACK vocabulary is unchanged
 
@@ -182,10 +207,14 @@ Today they do not.
 ### 6.2 Placement frame
 
 The box is planted on the existing capture-time hit path — the same
-`CaptureGeometryCache` entry, same range, same stale rules as a `mark`. The hit
-tangent frame maps listing axes as: `w` along the surface tangent, `h` along
-gravity up, `d` along the surface normal away from the wearer. The box rests on
-the surface rather than centring on it. No world point is ever sent to the
+`CaptureGeometryCache` entry, same range, same stale rules as a `mark`.
+
+Because the anchored case is a floor or table top, the hit normal is
+approximately gravity up and cannot supply all three axes on its own. The box
+therefore takes **height along gravity up**, and both width and depth lie in
+the horizontal plane: width across the wearer's view direction, depth along
+it, so the object's front faces the wearer. The box rests on the surface at
+the hit point rather than centring on it. No world point is ever sent to the
 model; the frame exists only on Quest.
 
 ### 6.3 Mesh fit
@@ -213,9 +242,10 @@ placeholder cube is no longer the failure mode for `place_generated`.
 
 ### 7.1 Packing rule
 
-Items pack along the hit tangent's positive axis. The first item's box front is
-at the hit; each subsequent item offsets by the previous width plus a 0.05 m
-gap, sharing one floor height and one facing.
+Items pack along the horizontal width axis of the placement frame (§6.2), the
+direction the row of objects runs across the wearer's view. The first item's
+box front is at the hit; each subsequent item's centre offsets by the previous
+width plus a 0.05 m gap, sharing one floor height and one facing.
 
 The arithmetic is a pure function of the ordered listing extents, unit-tested
 without Unity. The coordinator owns it. The model speaks layout language
