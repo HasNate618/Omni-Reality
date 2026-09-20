@@ -29,9 +29,13 @@ IMAGE_TURN_PROMPT = ("Answer what I just asked about this image "
                      "in at most twenty-five words.")
 
 # B-mode can start an overlay mid-conversation. The Live session returns
-# speech, not coordinates, so the user's own transcript is the trigger and
-# A-mode's tracking planner picks the point from the frame already captured
-# for this utterance.
+# speech, not coordinates, and the gateway never sends inputTranscription --
+# we ask for it, but only outputTranscription ever arrives -- so there is no
+# transcript of the wearer to trigger on. Instead each conversation turn runs
+# A-mode's tracking planner in the background over the same audio and frame:
+# it answers track:null unless an object was actually asked for, which is a
+# better arbiter than phrase matching. OMNI_LIVE_TRACK=0 turns it off and
+# spends one model call per turn instead of two.
 TRACK_PHRASES = (
     "track the", "track that", "track my", "track this",
     "highlight the", "highlight that", "highlight this",
@@ -39,6 +43,13 @@ TRACK_PHRASES = (
     "follow the", "follow that",
     "what's that", "what is that", "whats that",
 )
+
+
+def live_tracking_enabled() -> bool:
+    """False when OMNI_LIVE_TRACK is set to 0/false/no."""
+    import os
+
+    return os.environ.get("OMNI_LIVE_TRACK", "1").strip().lower() not in ("0", "false", "no")
 
 
 def wants_tracking(text: str) -> bool:
@@ -164,6 +175,7 @@ async def start_live_turn(state: CoordinatorState, send: Any,
             await speak_recovery(state, send, turn_id, utterance_id, NO_IMAGE_RECOVERY)
             return turn_id
         await state.live.start_image_turn(bytes(buf.jpeg), bytes(buf.pcm), IMAGE_TURN_PROMPT)
+        _maybe_seed_tracking(state, turn)
         try:
             await asyncio.wait_for(turn.event.wait(), LIVE_TURN_TIMEOUT_S)
         except asyncio.TimeoutError:
@@ -232,20 +244,27 @@ async def _emit_chunk(turn: _Turn, window24k: bytes) -> None:
         pass
 
 
-def _on_heard(state: CoordinatorState, text: str) -> None:
-    """User transcript: collect it, and start an overlay if one was asked for."""
-    turn = _current(state)
-    if turn is None or not text:
+def _maybe_seed_tracking(state: CoordinatorState, turn: _Turn) -> None:
+    """Start one background tracking selection for this turn, at most once."""
+    if turn.seed_started or state.tracking is None or not turn.jpeg:
         return
-    turn.heard.append(text)
-    if turn.seed_started or state.tracking is None:
-        return
-    if not wants_tracking("".join(turn.heard)):
+    if not live_tracking_enabled():
         return
     turn.seed_started = True
     # Background: the conversation must never block on the seed.
     task = asyncio.create_task(_seed_tracking(state, turn))
     task.add_done_callback(_log_seed_done)
+
+
+def _on_heard(state: CoordinatorState, text: str) -> None:
+    """Wearer transcript, when the gateway sends one. Today it does not, so
+    the per-turn attempt in start_live_turn is what actually seeds."""
+    turn = _current(state)
+    if turn is None or not text:
+        return
+    turn.heard.append(text)
+    if wants_tracking("".join(turn.heard)):
+        _maybe_seed_tracking(state, turn)
 
 
 def _log_seed_done(task: asyncio.Task) -> None:

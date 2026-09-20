@@ -72,7 +72,19 @@ def _gemini_speech(text: str, purpose: str, timeout: float) -> bytes | None:
         if not out.exists():
             return None
         data = out.read_bytes()
-        return data or None
+        if not data:
+            return None
+        # The Live model speaks at 24 kHz. audio_block labels the payload
+        # SAMPLE_RATE (16 kHz), so handing the raw bytes over made Quest play
+        # them 1.5x too slow. The B-mode streaming path already resamples
+        # every chunk; do the same for the one-shot line.
+        from voice.resample import resample_24k_to_16k
+
+        try:
+            return resample_24k_to_16k(data) or None
+        except Exception as exc:
+            logger.info("speech resample failed exception_class=%s", type(exc).__name__)
+            return None
 
 
 def audio_block(pcm: bytes) -> dict:

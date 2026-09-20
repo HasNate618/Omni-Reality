@@ -151,19 +151,22 @@ Both reach yibuapi with the same `YIBU_API_KEY`; only the model differs.
 - **Buttons:** right **A** = push-to-talk, right **B** = conversation toggle,
   left **X** = stop tracking (moved off B).
 - **Overlays mid-conversation:** the Live session returns speech, not
-  coordinates, so the wearer's own transcript is the trigger
-  (`live_turn.wants_tracking`: "track the", "highlight the", "what's that",
-  ...). On a match, A-mode's `YibuPlanner(tracking=True)` runs against the
-  frame already captured for that utterance, `parse_tracking_reply` gives the
-  point, and `Sam2Bridge.seed` takes it unchanged. It runs in the background,
-  is fenced by `bridge.generation`, and stays silent on failure rather than
-  talking over a live reply.
+  coordinates, and the gateway **never sends `inputTranscription`** — the
+  setup asks for it, but only `outputTranscription` arrives — so there is no
+  transcript of the wearer to trigger on. Each conversation turn instead runs
+  A-mode's `YibuPlanner(tracking=True)` in the background over the same audio
+  and frame; it answers `track:null` unless an object was actually asked for,
+  which is a better arbiter than phrase matching. `parse_tracking_reply` gives
+  the point and `Sam2Bridge.seed` takes it unchanged. Fenced by
+  `bridge.generation`, silent on failure rather than talking over a live reply.
+  Costs a second model call per turn: `OMNI_LIVE_TRACK=0` disables it.
+  `wants_tracking` remains for the day the gateway does send a transcript.
 - **Prerequisite:** B-mode needs `ffmpeg` on the laptop (`brew install
   ffmpeg`) — model audio arrives at 24 kHz and is resampled to 16 kHz for
   Quest. Without it the conversation is silent and `test_resample` /
   `test_live_turn` / `test_perception` fail.
-- Not yet: the trigger is phrase-based, so an unusual phrasing is missed.
-  Tool-calling in the Live session would be the robust version.
+- Not yet: tool-calling in the Live session would let the model return the
+  point itself and save the second call.
 
 ## Running it (one command)
 

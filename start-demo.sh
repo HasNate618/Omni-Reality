@@ -253,7 +253,9 @@ cat <<'STEPS'
       B: reply never audible   -> ffmpeg missing (brew install ffmpeg); the 24 kHz
                                   live reply cannot be resampled for Quest
       B: nothing at all        -> running with --stub; B needs the live model
-      B: seed never fires      -> say a trigger phrase ("track the", "highlight the")
+      B: seed never fires      -> ask for an object plainly ("track the mug");
+                                  the planner answers track:null otherwise.
+                                  OMNI_LIVE_TRACK=0 disables B-mode seeding
       masks but nothing shown  -> check headset: QUEST_OVERLAY lines (they say why)
       white/blank square       -> old build installed: rebuild in Unity, then --install
       neither mode connects    -> USB: app must be built for 127.0.0.1 (see above)

@@ -144,6 +144,41 @@ class LiveSeedTests(unittest.IsolatedAsyncioTestCase):
         state._live_turn = turn
         return turn
 
+    async def test_every_turn_attempts_a_seed_without_a_transcript(self):
+        # The gateway never sends inputTranscription, so seeding cannot depend
+        # on one; the planner itself answers track:null when nothing was asked.
+        state = CoordinatorState(planner=Planner())
+        state.tracking = mock.Mock()
+        turn = self.make_turn(state)
+        with mock.patch.object(live_turn, "_seed_tracking", new=mock.AsyncMock()) as seed:
+            live_turn._maybe_seed_tracking(state, turn)
+            live_turn._maybe_seed_tracking(state, turn)   # idempotent
+            await asyncio.sleep(0)
+        self.assertTrue(turn.seed_started)
+        self.assertEqual(seed.await_count, 1)
+
+    async def test_seed_skipped_without_a_frame(self):
+        state = CoordinatorState(planner=Planner())
+        state.tracking = mock.Mock()
+        turn = self.make_turn(state)
+        turn.jpeg = None
+        with mock.patch.object(live_turn, "_seed_tracking", new=mock.AsyncMock()) as seed:
+            live_turn._maybe_seed_tracking(state, turn)
+            await asyncio.sleep(0)
+        seed.assert_not_awaited()
+
+    async def test_env_flag_disables_seeding(self):
+        import os
+        state = CoordinatorState(planner=Planner())
+        state.tracking = mock.Mock()
+        turn = self.make_turn(state)
+        with mock.patch.dict(os.environ, {"OMNI_LIVE_TRACK": "0"}), \
+             mock.patch.object(live_turn, "_seed_tracking", new=mock.AsyncMock()) as seed:
+            live_turn._maybe_seed_tracking(state, turn)
+            await asyncio.sleep(0)
+        seed.assert_not_awaited()
+        self.assertFalse(turn.seed_started)
+
     async def test_transcript_starts_one_seed(self):
         state = CoordinatorState(planner=Planner())
         state.tracking = mock.Mock()
