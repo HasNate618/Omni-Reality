@@ -41,7 +41,7 @@ public class QuestStreamInput : MonoBehaviour
         if (!UnityEngine.Android.Permission.HasUserAuthorizedPermission(UnityEngine.Android.Permission.Microphone))
             UnityEngine.Android.Permission.RequestUserPermission(UnityEngine.Android.Permission.Microphone);
 #endif
-        Debug.Log("QUEST_STREAM enabled. Hold right-controller A to talk; release to select. B stops tracking.");
+        Debug.Log("QUEST_STREAM enabled. Hold right A to talk (release to select). B toggles continuous conversation. Left X stops tracking.");
     }
 
     void LateUpdate()
@@ -62,17 +62,32 @@ public class QuestStreamInput : MonoBehaviour
         if (_pca == null || !_pca.IsPlaying)
             return;
 
+        // B toggles continuous conversation; stop-tracking moved to left X.
         if (OVRInput.GetDown(OVRInput.Button.Two, OVRInput.Controller.RTouch))
+        {
+            AbortAudio();
+            coordinator.SetLiveConversation(!coordinator.LiveConversation);
+        }
+        if (OVRInput.GetDown(OVRInput.Button.Three, OVRInput.Controller.LTouch))
         {
             AbortAudio();
             coordinator.StopTracking();
         }
-        if (OVRInput.GetDown(OVRInput.Button.One, OVRInput.Controller.RTouch)
-            && _recording == null && _pendingPcm == null)
-            BeginAudio();
-        if (_recording != null && (OVRInput.GetUp(OVRInput.Button.One, OVRInput.Controller.RTouch)
-                                  || Time.realtimeSinceStartup - _talkStarted >= MaxTalkSeconds - .25f))
-            EndAudio();
+        // The conversation loop owns the microphone while B-mode is on; only
+        // frame streaming below keeps running, so a seeded mask keeps tracking.
+        if (coordinator.LiveConversation)
+        {
+            AbortAudio();
+        }
+        else
+        {
+            if (OVRInput.GetDown(OVRInput.Button.One, OVRInput.Controller.RTouch)
+                && _recording == null && _pendingPcm == null)
+                BeginAudio();
+            if (_recording != null && (OVRInput.GetUp(OVRInput.Button.One, OVRInput.Controller.RTouch)
+                                      || Time.realtimeSinceStartup - _talkStarted >= MaxTalkSeconds - .25f))
+                EndAudio();
+        }
 
         bool selected = _pendingPcm != null;
         if (selected && Time.realtimeSinceStartup - _pendingStarted > 3f)

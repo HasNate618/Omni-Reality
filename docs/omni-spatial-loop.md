@@ -127,6 +127,44 @@ Coordinator events: `connection_open`, `connection_close`,
 Tracking uses status/result events rather than the placement-ACK speech path.
 Its Unity source does not implement speech playback or a new passthrough renderer.
 
+## Two modes: A push-to-talk, B conversation
+
+One coordinator session serves both. The route is picked **per utterance** from
+`payload.mode` on `utterance_end` (`"ptt"` or `"live"`), not from a startup
+flag; a payload without `mode` falls back to `--perception-qa` if set, else
+push-to-talk, so an older headset build still works.
+
+| | **A — push to talk** | **B — conversation** |
+| --- | --- | --- |
+| Mic | `QuestStreamInput` (hold A) | `MicUtterance`, continuous VAD |
+| Model | `qwen3.8-omni-flash` per turn | `gemini-3.1-flash-live-preview` Live session |
+| Speech out | Android TTS (`QuestSpeech`), no credit | cloud PCM `speak_chunk`/`speak_final` |
+| Overlay | seeds SAM 2 from the pinned frame | seeds on a tracking phrase (below) |
+
+Both reach yibuapi with the same `YIBU_API_KEY`; only the model differs.
+
+- **Mic ownership is exclusive, frame streaming is not.** B hands the
+  microphone to `MicUtterance` (`CoordinatorClient.SetLiveConversation`, which
+  toggles the component so `OnDisable` calls `Microphone.End`).
+  `QuestStreamInput` keeps streaming JPEGs in both modes, so a seeded mask
+  keeps tracking while you talk.
+- **Buttons:** right **A** = push-to-talk, right **B** = conversation toggle,
+  left **X** = stop tracking (moved off B).
+- **Overlays mid-conversation:** the Live session returns speech, not
+  coordinates, so the wearer's own transcript is the trigger
+  (`live_turn.wants_tracking`: "track the", "highlight the", "what's that",
+  ...). On a match, A-mode's `YibuPlanner(tracking=True)` runs against the
+  frame already captured for that utterance, `parse_tracking_reply` gives the
+  point, and `Sam2Bridge.seed` takes it unchanged. It runs in the background,
+  is fenced by `bridge.generation`, and stays silent on failure rather than
+  talking over a live reply.
+- **Prerequisite:** B-mode needs `ffmpeg` on the laptop (`brew install
+  ffmpeg`) — model audio arrives at 24 kHz and is resampled to 16 kHz for
+  Quest. Without it the conversation is silent and `test_resample` /
+  `test_live_turn` / `test_perception` fail.
+- Not yet: the trigger is phrase-based, so an unusual phrasing is missed.
+  Tool-calling in the Live session would be the robust version.
+
 ## Running it (one command)
 
 `./start-demo.sh` from the repo root starts the SAM 2 server (reusing a loaded

@@ -181,6 +181,13 @@ cat <<'STEPS'
       4. While holding A, say e.g. "track the laptop". Speak > 0.5 s.
       5. Release A.
 
+    Or hold a conversation instead (B-mode):
+      1. Press B once. The caption reads "Conversation on. Just speak."
+      2. Just talk -- no button held. Speech starts and ends the turn.
+      3. Say "track the mug" mid-conversation to drop an overlay on it.
+      4. Press B again to hand the microphone back to A push-to-talk.
+      (Left-hand X stops tracking; B no longer does.)
+
     What you should see below, in this order (each line is a checkpoint):
       headset: QUEST_STREAM listening (hold A)        <- A press registered, mic recording
       headset: QUEST_STREAM utterance=... pcm_bytes=  <- speech captured and sent
@@ -198,6 +205,8 @@ cat <<'STEPS'
       "too short"             -> held A under half a second
       no "calling qwen..."    -> snapshot missing: speak again while looking at the object
       "call failed"           -> Huawei/network/key problem (the line names it)
+      B-mode silent           -> ffmpeg missing on the laptop (brew install ffmpeg);
+                                 the live reply is 24 kHz and needs resampling
       "target=None"           -> Huawei could not pick one object; say it differently
       "SAM2 ... failed"       -> SAM 2 server problem (see logs/sam2.log)
       masks but nothing shown -> check headset: QUEST_OVERLAY lines (they say why)

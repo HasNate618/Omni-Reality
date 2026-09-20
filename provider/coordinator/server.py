@@ -307,7 +307,9 @@ async def _handle_utterance_end(ws: Any, state: CoordinatorState, message: dict)
     # headset builds omit `mode`; they mean push-to-talk.
     mode = message["payload"].get("mode")
     if mode not in ("ptt", "live"):
-        mode = "ptt"
+        # No mode: an older headset build, or one started in a fixed mode by
+        # --perception-qa. Otherwise push-to-talk.
+        mode = "live" if _live_mode(state) else "ptt"
 
     from voice.bootstrap_diagnostics import utterance_end_accepted
 
@@ -337,7 +339,7 @@ async def _handle_utterance_end(ws: Any, state: CoordinatorState, message: dict)
         return
     if buf is not None and _drop_phantom(state, _turn_sender(ws, state), utterance_id, buf):
         return
-    if mode == "live" or _live_mode(state):
+    if mode == "live":
         _start_live_utterance(state, _turn_sender(ws, state), utterance_id)
         return
     if state.tracking is not None:
@@ -359,12 +361,22 @@ def _start_live_utterance(state: CoordinatorState, send: Any, utterance_id: str)
     if len(buf.pcm) < MIN_UTTERANCE_S * BYTES_PER_SECOND:
         logger.info("utterance %s too short (%d bytes); no turn", utterance_id, len(buf.pcm))
         return
+    # B-mode is reached by the per-utterance `mode`, not a startup flag, so the
+    # session may not be warmed yet. Connect on first use; only report it down
+    # if that fails.
+    task = asyncio.create_task(_live_turn_or_down(state, send, utterance_id, buf))
+    task.add_done_callback(_log_live_task_done)
+
+
+async def _live_turn_or_down(state: CoordinatorState, send: Any,
+                             utterance_id: str, buf: Any) -> None:
+    from coordinator import live_turn as live_mod
     live = getattr(state, "live", None)
     if live is None or not live.is_open:
-        task = asyncio.create_task(_live_down(state, send, utterance_id))
-    else:
-        task = asyncio.create_task(live_mod.start_live_turn(state, send, utterance_id, buf))
-    task.add_done_callback(_log_live_task_done)
+        if not await live_mod.ensure_live_session(state):
+            await _live_down(state, send, utterance_id)
+            return
+    await live_mod.start_live_turn(state, send, utterance_id, buf)
 
 
 async def _live_down(state: CoordinatorState, send: Any, utterance_id: str) -> None:

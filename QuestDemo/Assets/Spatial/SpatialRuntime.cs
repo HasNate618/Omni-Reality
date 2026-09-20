@@ -172,6 +172,10 @@ public class SpatialRuntime : MonoBehaviour
             capture.Runtime = this;
             var mic = go.AddComponent<MicUtterance>();
             mic.Perception = capture;
+            // A-mode (QuestStreamInput push-to-talk) owns the microphone while
+            // tracking is on; B hands it to the conversation loop.
+            if (_trackingSettings != null && _trackingSettings.enableTracking)
+                mic.enabled = false;
             _coord.Cache = _cache;
             _coord.Store = _store;
             _coord.Chip = _chip;

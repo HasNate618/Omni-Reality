@@ -177,6 +177,10 @@ public class CoordinatorClient : MonoBehaviour
     float _replyStartedAt;
     public bool IsReady { get { return IsOpen && _sessionId != null; } }
     public bool PerceptionEnabled { get; private set; }
+    /// <summary>B-mode: the live conversation loop owns the microphone.</summary>
+    public bool LiveConversation { get; private set; }
+    /// <summary>True when an utterance should carry a camera frame.</summary>
+    public bool WantsCameraFrame { get { return PerceptionEnabled || LiveConversation; } }
     public string SessionId { get { return _sessionId; } }
     public bool AwaitingReply { get { return _pendingReplyId != null; } }
     public TrackingResult LatestTrackingResult { get; private set; }
@@ -185,6 +189,31 @@ public class CoordinatorClient : MonoBehaviour
 
     [Serializable]
     class HelloOptions { public bool perception_qa; }
+
+    /// <summary>
+    /// Hand the microphone between A-mode push-to-talk (QuestStreamInput) and
+    /// B-mode continuous conversation (MicUtterance). Exactly one holds the
+    /// device: MicUtterance.OnDisable calls Microphone.End when it loses it.
+    /// Frame streaming is unaffected and continues in both modes.
+    /// </summary>
+    internal void SetLiveConversation(bool on)
+    {
+        if (LiveConversation == on)
+            return;
+        LiveConversation = on;
+        var mic = GetComponent<MicUtterance>();
+        if (mic != null)
+            mic.enabled = on;
+        if (!on)
+        {
+            _pendingReplyId = null;
+            if (SpeakPlayer != null)
+                SpeakPlayer.StopPlayback();
+        }
+        Debug.Log("QUEST_MODE live conversation " + (on ? "ON (B held the mic)"
+                                                       : "OFF (A push-to-talk)"));
+        ShowVoiceFeedback(on ? "Conversation on. Just speak." : "Conversation off. Hold A to talk.");
+    }
 
     /// <summary>Queue a hello + start supervision. No socket work happens here.</summary>
     internal void Begin(string ipv4)
@@ -755,7 +784,7 @@ public class CoordinatorClient : MonoBehaviour
     /// <summary>Queue the final JPEG in the SAME FIFO lane as audio and end.</summary>
     public bool EnqueuePerceptionFrame(string utteranceId, CaptureEnvelope env, byte[] jpeg)
     {
-        if (!IsConnected || !PerceptionEnabled || OpenUtteranceId != utteranceId
+        if (!IsConnected || !WantsCameraFrame || OpenUtteranceId != utteranceId
             || env == null || jpeg == null || jpeg.Length == 0 || jpeg.Length > 65536)
             return false;
         _outbox.Enqueue(PriorityFrame,

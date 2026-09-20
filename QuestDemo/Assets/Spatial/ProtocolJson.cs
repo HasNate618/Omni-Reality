@@ -303,9 +303,10 @@ public static class ProtocolJson
             + Convert.ToBase64String(pcm, offset, count) + "\"}}", utteranceId);
     }
 
+    /// <summary>A-mode (push-to-talk): pinned snapshot, tracking turn.</summary>
     public static string BuildUtteranceEnd(string sessionId, string utteranceId, string frameId)
     {
-        var sb = new StringBuilder("{\"frame_id\":");
+        var sb = new StringBuilder("{\"mode\":\"ptt\",\"frame_id\":");
         AppendNullable(sb, frameId);
         sb.Append('}');
         return WrapMessage("utterance_end", sessionId, 0, sb.ToString(), utteranceId);
@@ -373,11 +374,12 @@ public static class ProtocolJson
         return WrapUtteranceMessage("audio_chunk", sessionId, utteranceId, sb.ToString());
     }
 
-    /// <summary>Close an utterance; the coordinator then runs the turn.</summary>
+    /// <summary>B-mode (live conversation): close an utterance; the
+    /// coordinator then runs the turn on the persistent Live session.</summary>
     public static string BuildUtteranceEnd(string sessionId, string utteranceId)
     {
-        var sb = new StringBuilder(64);
-        sb.Append("{\"utterance_id\":\"");
+        var sb = new StringBuilder(80);
+        sb.Append("{\"mode\":\"live\",\"utterance_id\":\"");
         AppendEscaped(sb, utteranceId);
         sb.Append("\"}");
         return WrapUtteranceMessage("utterance_end", sessionId, utteranceId, sb.ToString());

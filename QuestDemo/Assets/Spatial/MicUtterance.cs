@@ -149,7 +149,9 @@ public class MicUtterance : MonoBehaviour
     void Update()
     {
         TryEnsureAutoCapture();
-        PollPttButton();
+        bool live = _client != null && _client.LiveConversation;
+        if (!live)
+            PollPttButton();
         if (_client == null || !_client.IsConnected
             || (_utteranceId != null && _utteranceSessionId != _client.SessionId))
         {
@@ -163,10 +165,18 @@ public class MicUtterance : MonoBehaviour
         }
         if (_client.SpeakPlayer != null && _client.SpeakPlayer.IsPlaying)
         {
-            if (_manualCapture)
+            if (_manualCapture || live)
                 PumpMicBargeIn();
             else
                 DiscardMicWindow();
+            return;
+        }
+        // B-mode: the gate opens on speech onset (with pre-roll) and closes on
+        // a silence run, so no button is held. A-mode PTT is untouched below.
+        if (live)
+        {
+            if (_clip != null)
+                PumpMicVad();
             return;
         }
         if (_utteranceId != null && !_manualCapture)
@@ -269,7 +279,8 @@ public class MicUtterance : MonoBehaviour
     /// <summary>Held-A loud onset during playback interrupts.</summary>
     void PumpMicBargeIn()
     {
-        if (_clip == null || _utteranceId != null || !_manualCapture)
+        if (_clip == null || _utteranceId != null
+            || !(_manualCapture || (_client != null && _client.LiveConversation)))
             return;
         AppendMicSamples();
         while (_pending.Count >= ChunkSamples)
@@ -445,13 +456,13 @@ public class MicUtterance : MonoBehaviour
             _client.ShowVoiceFeedback("That was too short. Please ask again.");
             FinishUtterance(id, null, null, null, false);
         }
-        else if (_client.PerceptionEnabled && Perception != null)
+        else if (_client.WantsCameraFrame && Perception != null)
         {
             Perception.Capture((env, jpeg, reason) => FinishUtterance(id, env, jpeg, reason, true));
         }
         else
         {
-            FinishUtterance(id, null, null, _client.PerceptionEnabled ? "camera_down" : null, true);
+            FinishUtterance(id, null, null, _client.WantsCameraFrame ? "camera_down" : null, true);
         }
     }
 
