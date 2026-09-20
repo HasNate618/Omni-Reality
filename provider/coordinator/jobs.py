@@ -165,6 +165,12 @@ async def handle_start_generation(
     except BusyError:
         store.jobs.pop(job_id, None)
         return {"error": "busy"}
+    except BaseException:
+        # Never strand a job: a queued job left behind makes
+        # session_generation_busy true for the rest of the session, which
+        # refuses every later generation and placement.
+        store.jobs.pop(job_id, None)
+        raise
 
     return {"job_id": job_id, "status": "queued", "frame_id": current_frame_id}
 

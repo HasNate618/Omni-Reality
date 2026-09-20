@@ -100,6 +100,29 @@ class JobStoreTests(unittest.TestCase):
         self.assertEqual(busy["error"], "busy")
         self.assertEqual(len(queued), 1)
 
+    def test_queue_fn_failure_strands_no_job(self) -> None:
+        # A non-BusyError failure from the worker (httpx transport error, or
+        # queue_job's RuntimeError("queue_job non-object")) must not leave the
+        # job behind as queued: that makes session_generation_busy true for
+        # the rest of the session, refusing every later generation and
+        # placement. The failure must propagate, not be swallowed.
+        asyncio.run(handle_inspect(
+            self.store, frame_id=self.frame_id, jpeg_b64=self.jpeg,
+            target=self.target, phrase=None, current_frame_id=self.frame_id,
+            inspect_fn=lambda **k: {"objects": [{"u0": 0.3, "v0": 0.2, "u1": 0.7, "v1": 0.8, "score": 0.9}]},
+        ))
+        oid = next(iter(self.store.objects))
+
+        async def queue_fn(**kwargs):
+            raise RuntimeError("queue_job non-object")
+
+        with self.assertRaises(RuntimeError):
+            asyncio.run(handle_start_generation(
+                self.store, args={"object_id": oid, "prompt": "chair"},
+                current_frame_id=self.frame_id, jpeg_b64=self.jpeg, queue_fn=queue_fn,
+            ))
+        self.assertEqual(self.store.jobs, {}, "no job may survive a worker failure")
+
     def test_unknown_job_may_not_place(self) -> None:
         self.assertFalse(coordinator_may_place(self.store, new_ulid()))
 
