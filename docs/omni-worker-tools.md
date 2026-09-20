@@ -2,7 +2,8 @@
 
 What it is: the laptop-side Omni track for SAM2 inspect, async mesh generation,
 and bounded chat tool rounds. Quest still renders; workers run on loopback HTTP;
-the coordinator owns `place_generated` after a job is ready.
+the coordinator owns `place_generated`, authoring it at accept when the size
+is known and at ready otherwise.
 
 ## Contract
 

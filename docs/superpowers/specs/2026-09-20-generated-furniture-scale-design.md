@@ -27,8 +27,8 @@ protocol lets a stated product size reach the headset.
 - `GeneratedMeshPlacer` pins every import with `FitInsideUnitSphere`: a 0.55 m
   side table and a lamp both land inside a 1 m sphere, so the object is a
   guess, not the product.
-- A failed import falls back to a placeholder cube, which is a second, smaller
-  guess.
+- A failed import fell back to a placeholder cube, a second, smaller guess
+  (pre-slice state; §6.3 removes this fallback).
 - `place_generated` carries no extents, so no op can state a size.
 - `ghost` is a fixed 0.12 m marker (`GhostLabelConnect.GhostSizeM`); it is a
   pointer, not a footprint.

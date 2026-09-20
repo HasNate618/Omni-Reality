@@ -160,8 +160,8 @@ Coordinator events: `connection_open`, `connection_close`,
      release. Expect: ghost/label/procedural pin on the surface, then cloud
      speech playback with caption.
   6. Say "generate that as a mesh" (or trigger a `start_generation` turn);
-     when the job is ready expect auto `place_generated`, real GLB render
-     (glTFast; cube means import fell back), and a short announce line.
+     expect the listed-size box in the room immediately, the mesh filling
+     it once the GLB arrives (glTFast), and a short announce line.
   7. Check laptop logs: `voice_gate` is `passed` for the turn; any `failed`
      fails the voice-demo gate even if placement succeeded.
   8. Barge-in: press PTT during speech → `cancel` stops the turn, no late
