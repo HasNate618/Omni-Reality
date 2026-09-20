@@ -451,11 +451,13 @@ def pack_offsets(extents: list[list[float]], gap: float = GAP_M) -> list[float]:
     if not extents:
         return []
     offsets = [0.0]
-    cursor = float(extents[0][0])
+    # The first item is centred on the hit, so the running edge starts at half
+    # its width, not its full width.
+    cursor = float(extents[0][0]) / 2.0
     for extent in extents[1:]:
         width = float(extent[0])
         offsets.append(cursor + gap + width / 2.0)
-        cursor += width + gap
+        cursor += width / 2.0 + gap + width / 2.0
     return offsets
 
 
