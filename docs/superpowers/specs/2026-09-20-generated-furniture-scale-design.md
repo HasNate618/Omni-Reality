@@ -300,7 +300,7 @@ carries the XR packages but no scene currently uses a grab interactable.
 same `drawing_id`:
 
 | Verb | Generated furniture |
-|---|---|
+| --- | --- |
 | nudge / move | allowed, floor-plane offset |
 | rotate | allowed, yaw only |
 | remove | allowed; clears root, mesh, and job reference |

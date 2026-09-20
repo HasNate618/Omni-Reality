@@ -946,6 +946,24 @@ class HandlePlaceItemTests(unittest.TestCase):
         result, op = self._call(lamp)
         self.assertNotIn("error", result)
         self.assertIsNotNone(op)
+
+    def test_worker_busy_error_leaves_no_trace(self) -> None:
+        # The pre-check passes here (nothing is queued yet) and the worker
+        # itself refuses with BusyError. This is the path that a test driving
+        # only the pre-check cannot reach, and it is the one that used to
+        # leave a recorded row behind.
+        from workers.gen_client import BusyError
+
+        async def queue_fn(**kwargs):
+            raise BusyError("worker busy")
+
+        result, op = asyncio.run(handle_place_item(
+            self.store, listings=self.memory, args=self._good(),
+            current_frame_id=_FRAME, prebaked={}, queue_fn=queue_fn))
+        self.assertEqual(result["error"], "busy")
+        self.assertIsNone(op)
+        self.assertEqual(self.memory.rows(), [], "no row may be recorded")
+        self.assertEqual(self.store.jobs, {}, "no job may survive a refusal")
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1034,7 +1052,9 @@ async def handle_place_item(
 
     artifact_id = lookup(prebaked, name)
     if artifact_id is not None:
-        # No worker is queued, so there is nothing to serialize.
+        # No worker is queued, so there is nothing to serialize. Build the
+        # result BEFORE creating the job: if it raises, no job is left behind.
+        result = _place_result(listings, name, extents, target, current_frame_id, artifact_id)
         store.jobs[artifact_id] = {
             "job_id": artifact_id,
             "frame_id": current_frame_id,
@@ -1044,7 +1064,7 @@ async def handle_place_item(
             "extent_m": extents,
             "planted": True,
         }
-        return _place_result(listings, name, extents, target, current_frame_id, artifact_id)
+        return result
 
     if queue_fn is not None and session_generation_busy(store):
         return {"error": "busy"}, None
@@ -1059,8 +1079,11 @@ async def handle_place_item(
         "extent_m": extents,
         "planted": True,
     }
-    if queue_fn is not None:
-        try:
+    # Everything from job creation onward is guarded: a job left behind as
+    # queued makes session_generation_busy true for the rest of the session,
+    # which refuses every later placement.
+    try:
+        if queue_fn is not None:
             await _maybe_await(queue_fn(
                 job_id=job_id,
                 frame_id=current_frame_id,
@@ -1069,13 +1092,15 @@ async def handle_place_item(
                 mask_png_b64=None,
                 extent_m=extents,
             ))
-        except BusyError:
-            # The worker refused, so no placement happened. No row was
-            # recorded yet, so there is nothing to roll back.
-            store.jobs.pop(job_id, None)
-            return {"error": "busy"}, None
-
-    return _place_result(listings, name, extents, target, current_frame_id, job_id)
+        return _place_result(listings, name, extents, target, current_frame_id, job_id)
+    except BusyError:
+        # The worker refused, so no placement happened. No row was recorded
+        # yet, so there is nothing to roll back.
+        store.jobs.pop(job_id, None)
+        return {"error": "busy"}, None
+    except BaseException:
+        store.jobs.pop(job_id, None)
+        raise
 
 
 def _place_result(
@@ -1347,7 +1372,7 @@ and the legacy path line becomes:
 - [ ] **Step 9: Run the tests to verify they pass**
 
 Run: `cd provider && . .venv/bin/activate && python -m unittest tests.test_place_item_turn tests.test_listings -v`
-Expected: PASS, 34 tests.
+Expected: PASS, 35 tests.
 
 Then run the whole suite to catch regressions from the `bind_tools` signature change:
 
@@ -1418,6 +1443,57 @@ Append to `provider/tests/test_turn_tools.py`, inside `class PlaceGeneratedTests
         self.assertEqual(self.sent, [], "already planted; no second op")
         self.assertEqual(self.announced, [{"status": "ready", "planted": True}])
 
+    def test_planted_but_extentless_job_still_emits(self) -> None:
+        # The guard needs BOTH keys. With `or` instead of `and`, a job that was
+        # marked planted but never given extents would silently suppress its
+        # place_generated op.
+        job_id = new_ulid()
+        self.store.jobs[job_id] = {
+            "job_id": job_id,
+            "frame_id": self.target["frame_id"],
+            "target": self.target,
+            "status": "ready",
+            "stage_epoch": 1,
+            "planted": True,
+        }
+
+        async def send(op):
+            self.sent.append(op)
+            return {"status": "placed", "op_id": op["op_id"]}
+
+        async def complete_final_fn(ack):
+            self.announced.append(ack)
+
+        asyncio.run(on_job_terminal(self.state, job_id, send, complete_final_fn))
+        self.assertEqual(len(self.sent), 1, "no extents, so it must still emit")
+
+    def test_failed_planted_job_reports_failure(self) -> None:
+        # A planted job whose worker fails must still report failure: the box
+        # stays in the room, but the mesh never arrived and the coordinator has
+        # to be able to say so.
+        job_id = new_ulid()
+        self.store.jobs[job_id] = {
+            "job_id": job_id,
+            "frame_id": self.target["frame_id"],
+            "target": self.target,
+            "status": "queued",
+            "stage_epoch": 1,
+            "extent_m": [0.55, 0.40, 0.72],
+            "planted": True,
+        }
+        mark_failed(self.store, job_id)
+
+        async def send(op):
+            self.sent.append(op)
+            return {"status": "placed"}
+
+        async def complete_final_fn(ack):
+            self.announced.append(ack)
+
+        asyncio.run(on_job_terminal(self.state, job_id, send, complete_final_fn))
+        self.assertEqual(self.sent, [], "a failed job emits no op")
+        self.assertEqual(self.announced, [{"status": "failed"}])
+
     def test_unplanted_ready_job_still_emits(self) -> None:
         job_id = new_ulid()
         self.store.jobs[job_id] = {
@@ -1474,16 +1550,28 @@ def build_place_generated(
     return op
 ```
 
-In `on_job_terminal`, immediately after the `if status not in ("ready", "failed"):` guard and before the stage-epoch check, insert:
+In `on_job_terminal`, insert the planted guard **after** the stage-epoch fence
+and **after** the `status == "failed"` branch, immediately before the existing
+ready path:
 
 ```python
+    if status == "failed":
+        await complete_final_fn({"status": "failed"})
+        return
     if job.get("extent_m") and job.get("planted"):
-        # Planted when the listing was accepted, so a stated-size box has been
-        # in the room since before the mesh existed. Emitting again would
-        # place the same object twice. Quest is already fetching the artifact.
+        # Planted when the item was accepted, so a stated-size box has been in
+        # the room since before the mesh existed. Emitting again would place
+        # the same object twice. Quest is already fetching the artifact.
         await complete_final_fn({"status": "ready", "planted": True})
         return
 ```
+
+Ordering matters, and getting it wrong loses the failure signal. A planted job
+whose worker later fails must still report `failed` — the box stays in the room
+(that is the point of planting early), but the coordinator must be able to say
+the mesh never arrived. Putting the guard first would report
+`{"status": "ready", "planted": True}` for a job that failed. The stage-epoch
+fence must also stay ahead of it, so a superseded epoch stays silent.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1925,7 +2013,11 @@ public static class ListingBox
         Renderer rend = root.GetComponent<Renderer>();
         if (rend != null)
         {
-            rend.material = new Material(Shader.Find("Unlit/Color"));
+            // Unlit/Transparent, not Unlit/Color: Unlit/Color is an opaque pass
+            // whose fragment forces alpha to 1, so the alpha below would be
+            // inert and the box would render solid. TrackingMaskOverlay already
+            // uses Unlit/Transparent for the same reason.
+            rend.material = new Material(Shader.Find("Unlit/Transparent"));
             Color c = PulsingRing.RingColor;
             c.a = 0.25f;
             rend.material.color = c;
