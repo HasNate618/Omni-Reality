@@ -79,6 +79,47 @@ public class RealtimeVoiceTests
         finally { Object.DestroyImmediate(go); }
     }
 
+    static byte[] PcmBytes(short value, int samples)
+    {
+        var pcm = new byte[samples * 2];
+        for (int i = 0; i < samples; i++)
+        {
+            pcm[i * 2] = (byte)(value & 0xFF);
+            pcm[i * 2 + 1] = (byte)((value >> 8) & 0xFF);
+        }
+        return pcm;
+    }
+
+    [Test]
+    public void SecondTurnChunksAcceptedAfterFinal()
+    {
+        var go = new GameObject("StreamPlayer3");
+        try
+        {
+            var player = go.AddComponent<SpeakCloudPlayer>();
+            typeof(SpeakCloudPlayer).GetMethod("Awake", Private).Invoke(player, null);
+            Assert.IsTrue(player.AppendChunk(4, PcmBytes(1000, 1600)));
+            Assert.AreEqual(4, player.StreamingTurnId);
+            // Foreign turn while owned: rejected, stream untouched.
+            Assert.IsFalse(player.AppendChunk(5, PcmBytes(1000, 1600)));
+            Assert.AreEqual(4, player.StreamingTurnId);
+            // Final releases the turn; the audible tail keeps playing.
+            player.FinishTurn(4);
+            Assert.AreEqual(0, player.StreamingTurnId);
+            // Next turn writes from zero on the same reused clip.
+            Assert.IsTrue(player.AppendChunk(5, PcmBytes(2000, 1600)));
+            Assert.AreEqual(5, player.StreamingTurnId);
+            Assert.AreEqual(1600, player.StreamedSamples);
+            // Stale final for the old turn changes nothing.
+            player.FinishTurn(4);
+            Assert.AreEqual(5, player.StreamingTurnId);
+            player.StopPlayback();
+            Assert.AreEqual(0, player.StreamingTurnId);
+            Assert.AreEqual(0, player.StreamedSamples);
+        }
+        finally { Object.DestroyImmediate(go); }
+    }
+
     [Test]
     public void BargeInRequiresLoudOnsetDuringPlayback()
     {

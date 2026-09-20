@@ -154,6 +154,34 @@ public class MicUplinkTests
     }
 
     [Test]
+    public void PttPressArmsHoldReleaseDisarmsOffline()
+    {
+        var go = new GameObject("MicPttHold");
+        var client = go.AddComponent<CoordinatorClient>();
+        var mic = go.AddComponent<MicUtterance>();
+        RunAwake(mic);
+        var press = typeof(MicUtterance).GetMethod(
+            "PressPtt", BindingFlags.NonPublic | BindingFlags.Instance);
+        var release = typeof(MicUtterance).GetMethod(
+            "ReleasePtt", BindingFlags.NonPublic | BindingFlags.Instance);
+        var flag = typeof(MicUtterance).GetField(
+            "_manualCapture", BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.IsNotNull(press);
+        Assert.IsNotNull(release);
+        Assert.IsNotNull(flag);
+        // Offline: press arms the hold but opens nothing, release disarms.
+        press.Invoke(mic, null);
+        Assert.IsTrue((bool)flag.GetValue(mic));
+        Assert.IsNull(mic.UtteranceId);
+        release.Invoke(mic, null);
+        Assert.IsFalse((bool)flag.GetValue(mic));
+        Assert.IsNull(mic.UtteranceId);
+        Assert.AreEqual(0, OutboxCount(client));
+        Assert.AreEqual(MicUtterance.SampleRate * 2 * 15, MicUtterance.PttMaxPcmBytes);
+        Object.DestroyImmediate(go);
+    }
+
+    [Test]
     public void AudioChunkAndUtteranceEndDroppedWhileOffline()
     {
         var go = new GameObject("CoordOffline");

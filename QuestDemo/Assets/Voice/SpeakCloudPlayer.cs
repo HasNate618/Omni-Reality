@@ -47,19 +47,28 @@ public class SpeakCloudPlayer : MonoBehaviour
         _wasPlaying = playing;
     }
 
-    /// <summary>Stop playback for barge-in / stop_speak.</summary>
+    /// <summary>Stop playback for barge-in / stop_speak. Keeps the single
+    /// ring clip for reuse; only playback state resets.</summary>
     public void StopPlayback()
     {
         if (_wasPlaying && _activeTurnNumeric > 0)
             VoiceBootstrapLog.PlaybackFinished(_activeTurnNumeric);
+        if (_source != null && _source.isPlaying)
+            _source.Stop();
         _activeTurnId = null;
         _activeTurnNumeric = 0;
         _wasPlaying = false;
         _streamTurn = 0;
         _streamPos = 0;
-        _streamClip = null;
-        if (_source != null && _source.isPlaying)
-            _source.Stop();
+    }
+
+    /// <summary>Release a finished turn without cutting its audible tail.
+    /// Without this, the next turn's chunks are rejected as foreign and
+    /// the reply goes silent while the server believes it played.</summary>
+    public void FinishTurn(int turnId)
+    {
+        if (turnId != 0 && turnId == _streamTurn)
+            _streamTurn = 0;
     }
 
     /// <summary>
@@ -75,7 +84,9 @@ public class SpeakCloudPlayer : MonoBehaviour
         if (_streamTurn != 0 && turnId != _streamTurn)
             return false;
         int samples = pcmS16Le.Length / 2;
-        if (_streamPos + samples > StreamMaxSamples)
+        bool isNewTurn = _streamTurn == 0;
+        int writePos = isNewTurn ? 0 : _streamPos;
+        if (writePos + samples > StreamMaxSamples)
         {
             VoiceBootstrapLog.PlaybackRejected(turnId, pcmBytes, "stream_overflow");
             return false;
@@ -90,9 +101,9 @@ public class SpeakCloudPlayer : MonoBehaviour
         float[] floats;
         if (!TryConvertPcm(pcmS16Le, out floats))
             return false;
-        _streamClip.SetData(floats, _streamPos);
-        _streamPos += samples;
-        if (_streamTurn == 0)
+        _streamClip.SetData(floats, writePos);
+        _streamPos = writePos + samples;
+        if (isNewTurn)
         {
             _streamTurn = turnId;
             _activeTurnId = turnId.ToString();

@@ -1,13 +1,15 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.XR;
 
 /// <summary>
-/// Quest mic uplink: automatic VAD opens bounded websocket utterances via
-/// <see cref="VoiceActivityGate"/>; push-to-talk and keyword hooks remain
-/// debug fallbacks. Streams ~100 ms 16 kHz mono s16le PCM chunks tagged
-/// with <see cref="CoordinatorClient.OpenUtteranceId"/> and closes with
-/// utterance_end when the gate ends or PTT releases.
+/// Quest mic uplink: controller A is push-to-talk. Holding A opens a bounded
+/// websocket utterance; releasing A captures the camera frame and closes with
+/// utterance_end. Nothing transmits while A is up — no VAD auto-open, and
+/// barge-in only fires while held. Streams ~100 ms 16 kHz mono s16le PCM
+/// chunks tagged with <see cref="CoordinatorClient.OpenUtteranceId"/>;
+/// keyword hooks remain debug fallbacks.
 /// </summary>
 public class MicUtterance : MonoBehaviour
 {
@@ -82,9 +84,72 @@ public class MicUtterance : MonoBehaviour
         BeginUtterance();
     }
 
+    /// <summary>Maximum hold before the utterance auto-asks (15 s of s16le).</summary>
+    public const int PttMaxPcmBytes = SampleRate * 2 * 15;
+
+    /// <summary>Controller A press: arm the button and open if possible.
+    /// Held through playback, a loud onset barges in instead.</summary>
+    bool _pttWasHeld;
+
+    internal void PressPtt()
+    {
+        _manualCapture = true;
+        VoiceBootstrapLog.Log(VoiceBootstrapLog.ComponentMic, "ptt_press");
+        bool opened = _utteranceId != null || BeginUtterance();
+        if (_client != null)
+            _client.ShowVoiceFeedback(opened
+                ? "Listening\u2026 release A to ask."
+                : "Not ready \u2014 try again in a moment.");
+    }
+
+    /// <summary>Controller A release: flush, capture, close, ask.</summary>
+    internal void ReleasePtt()
+    {
+        _manualCapture = false;
+        VoiceBootstrapLog.Log(VoiceBootstrapLog.ComponentMic, "ptt_release");
+        EndUtterance();
+    }
+
+    /// <summary>Primary button held on either controller. OVRInput first,
+    /// OpenXR input devices as fallback (dead under some loaders).</summary>
+    internal static bool PttHeld()
+    {
+        try
+        {
+            if (OVRInput.Get(OVRInput.Button.One))
+                return true;
+        }
+        catch (Exception)
+        {
+        }
+        try
+        {
+            var dev = InputDevices.GetDeviceAtXRNode(XRNode.RightHand);
+            if (dev.TryGetFeatureValue(CommonUsages.primaryButton, out bool p) && p)
+                return true;
+            var left = InputDevices.GetDeviceAtXRNode(XRNode.LeftHand);
+            return left.TryGetFeatureValue(CommonUsages.primaryButton, out bool q) && q;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    void PollPttButton()
+    {
+        bool held = PttHeld();
+        if (held && !_pttWasHeld)
+            PressPtt();
+        else if (!held && _pttWasHeld)
+            ReleasePtt();
+        _pttWasHeld = held;
+    }
+
     void Update()
     {
         TryEnsureAutoCapture();
+        PollPttButton();
         if (_client == null || !_client.IsConnected
             || (_utteranceId != null && _utteranceSessionId != _client.SessionId))
         {
@@ -98,20 +163,31 @@ public class MicUtterance : MonoBehaviour
         }
         if (_client.SpeakPlayer != null && _client.SpeakPlayer.IsPlaying)
         {
-            PumpMicBargeIn();
+            if (_manualCapture)
+                PumpMicBargeIn();
+            else
+                DiscardMicWindow();
             return;
         }
-        if (_manualCapture)
+        if (_utteranceId != null && !_manualCapture)
         {
-            if (_utteranceId == null || _clip == null)
-                return;
-            PumpMicManual();
+            // Release edge missed: heal by closing, never strand.
+            EndUtterance();
             return;
         }
-
-        if (_clip == null)
+        if (!_manualCapture || _utteranceId == null || _clip == null)
+        {
+            if (!_manualCapture)
+                DiscardMicWindow();
             return;
-        PumpMicVad();
+        }
+        if (_utterancePcmBytes >= PttMaxPcmBytes)
+        {
+            _manualCapture = false;
+            CloseUtterance();
+            return;
+        }
+        PumpMicManual();
     }
 
     void DiscardMicWindow()
@@ -190,10 +266,10 @@ public class MicUtterance : MonoBehaviour
         VoiceBootstrapLog.MicPermission(granted);
     }
 
-    /// <summary>VAD stays open during playback: a loud onset interrupts.</summary>
+    /// <summary>Held-A loud onset during playback interrupts.</summary>
     void PumpMicBargeIn()
     {
-        if (_clip == null || _utteranceId != null)
+        if (_clip == null || _utteranceId != null || !_manualCapture)
             return;
         AppendMicSamples();
         while (_pending.Count >= ChunkSamples)

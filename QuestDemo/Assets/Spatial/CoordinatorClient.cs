@@ -519,6 +519,8 @@ public class CoordinatorClient : MonoBehaviour
                 return;
             _pendingReplyId = null;
             ShowVoiceFeedback(final.Text);
+            if (SpeakPlayer != null)
+                SpeakPlayer.FinishTurn(final.TurnId);
             return;
         }
         if (type == "turn_started")
