@@ -1,0 +1,345 @@
+# Generated furniture at listed scale: binding design
+
+Date: 2026-09-20.
+
+Status: binding for the next implementation slice on branch
+`spatial-model-unity-integration`. It narrows
+`docs/superpowers/specs/2026-09-19-spatial-omni-assistant-design.md` (parent
+spec) and `docs/superpowers/specs/2026-09-19-voice-spatial-omni-integration-design.md`
+(voice spec) to one question: how a page-stated product size becomes a
+life-size object in the room. Where this spec is silent, the parent spec,
+the voice spec, `docs/omni-provider-api.md`, `docs/omni-worker-tools.md`, and
+`docs/omni-spatial-loop.md` still bind. Where they conflict on generated
+furniture scale, this spec wins.
+
+The demo this serves is `demo.md` (untracked in this worktree): prerecorded,
+5:00 max, Layout Mode — fill an empty corner from a listing. That document is
+locked; this spec implements it and does not reopen its scenario.
+
+Hardware and live provider calls are unrun on this branch. §9 names what must
+still be proven on device.
+
+## 1. The problem
+
+Generated meshes do not currently arrive at a usable size, and nothing in the
+protocol lets a stated product size reach the headset.
+
+- `GeneratedMeshPlacer` pins every import with `FitInsideUnitSphere`: a 0.55 m
+  side table and a lamp both land inside a 1 m sphere, so the object is a
+  guess, not the product.
+- A failed import falls back to a placeholder cube, which is a second, smaller
+  guess.
+- `place_generated` carries no extents, so no op can state a size.
+- `ghost` is a fixed 0.12 m marker (`GhostLabelConnect.GhostSizeM`); it is a
+  pointer, not a footprint.
+- `place_procedural` is capped at 0.40 m per element inside a 1.0 m bounding
+  sphere and composes a row of diagram parts. It is not furniture.
+- Generated roots are not registered in `DrawingStore`, so `remove`, `undo`,
+  and the clutter cap do not see them.
+- The model may not emit `place_generated` or `place_known` at all
+  (`docs/omni-worker-tools.md`), and it may never emit world coordinates.
+
+The result is a demo that can put *something* in a corner, not the thing the
+wearer was about to buy.
+
+## 2. Product claim
+
+A size that a page states is the object's size in the room. The wearer sees a
+listed-size box where the product will stand, and the generated mesh fills that
+box rather than defining it.
+
+The floor plan of the interaction:
+
+1. The wearer looks at a page that states a product and its dimensions.
+2. Omni reads name and W×D×H from that frame into listing memory.
+3. The wearer asks for it in the room ("fill that corner with these").
+4. Omni calls `place_listing` with the listing and the sizes it read.
+5. The coordinator validates the metres, authors `place_generated`, and Quest
+   plants a listed-size box on the capture-time hit.
+6. The mesh arrives and fits inside the box, uniform scale, proportions kept.
+7. The wearer art-directs by voice and by moving objects on the floor.
+
+A listing whose sizes are unknown is never generated. The model asks instead.
+An approximate mesh that does not match the box is shown as approximate, and
+the box stays the claim.
+
+## 3. Decision: extend `place_generated` (option B)
+
+Three shapes were considered.
+
+**A — a new layout-slot object kind.** One Quest object per item holding a
+listed AABB plus an optional mesh child, with generation only swapping a mesh
+into an existing slot. Cleanest model of the product; adds an op kind, a
+lifetime, and a second placement vocabulary.
+
+**B — put extents on `place_generated`.** The existing generation op gains
+`extent_m`, fits into an AABB instead of a unit sphere, and its root becomes
+grabbable. Smaller protocol change, reuses the existing op, job, and ACK path.
+
+**C — stretch procedural cubes to metres.** Reuses `revise_procedural`, but the
+procedural factory is a closed 1 m grammar for diagrams. Furniture-sized cubes
+in it fight the clutter cap and the element grammar.
+
+**B is chosen.** The cost is accepted: there is no slot that survives a failed
+generation at full size unless the AABB itself is the fallback, which §6.3
+requires; and pack, grab, and revise all key off one `drawing_id` rather than a
+slot identity.
+
+## 4. Claimed sizes: listing memory and evidence
+
+The model may state metres only as an **object's own dimensions**, and only
+when it read them from a frame it saw or heard them from the wearer. It still
+never emits world coordinates, poses, quaternions, or C#.
+
+**Listing memory** is coordinator-side working memory:
+
+```
+{ listing_id, name, extent_m: [w, d, h], source_frame_id, source: "page" | "spoken" }
+```
+
+- Any frame that shows a product with dimensions may contribute rows: a cart
+  page contributes several at once, a single product page contributes one.
+- The only frame source is the Quest camera. The laptop does not screenshot
+  its own screen; there is one vision source, and it is what the wearer sees.
+- A row missing any axis is stored with the axes it has and is **not**
+  placeable. The model asks the wearer, and a spoken answer may fill the gap
+  (`source: "spoken"`).
+- Rows are session-scoped and cleared with the session, like inspect objects
+  and jobs.
+
+Axis convention for `extent_m` is the listing's own frame, not world space:
+`w` across the front face, `d` front-to-back, `h` vertical. Mapping to the hit
+tangent frame is §6.2.
+
+## 5. Protocol changes
+
+### 5.1 `place_generated` gains `extent_m`
+
+`provider/protocol/schemas/scene_op.json`:
+
+- New optional property `extent_m`: array of exactly 3 numbers, each ≥ 0.05 and
+  ≤ 3.0.
+- When present, it is authoritative for the planted object's box.
+- When absent, behaviour is unchanged (unit-sphere fit). This keeps existing
+  fixtures and the shop-to-life path working.
+
+The field is coordinator-authored. It is **not** added to
+`model_scene_op.json`: the model still cannot emit `place_generated`.
+
+### 5.2 New model tool `place_listing`
+
+`provider/omni/tools.py` gains one tool:
+
+```
+place_listing(listing_id, target, extent_m?)
+```
+
+- `listing_id` must exist in listing memory.
+- `extent_m` is optional and, when supplied, must match the stored row; it
+  exists so the model can state what it read rather than relying on a hidden
+  lookup. A mismatch or an unknown `listing_id` is refused.
+- `target` uses the existing target grammar (image-space only). No world point.
+- The model cannot place a listing whose stored row is missing an axis.
+
+The coordinator turns an accepted `place_listing` into a coordinator-authored
+`place_generated` carrying `extent_m`, the job, and the target. Nothing about
+refusal reasons is invented here; the refusal vocabulary stays as the schemas
+define.
+
+### 5.3 Job record carries extents
+
+`provider/coordinator/jobs.py`: the job record gains `extent_m` when the
+request supplied one, so the coordinator can plant before the artifact exists
+and can reconstruct the box after a restart of a turn.
+
+### 5.4 ACK vocabulary is unchanged
+
+Quest ACKs `placed` with `drawing_id` and `pin: "surface"` at box-plant time.
+`placement_ack.json` already requires exactly that for `placed`. Planting a box
+before its mesh exists therefore needs no new status, no new reason, and no new
+message type. The mesh arriving later is not an ACK event.
+
+This interacts with the existing rule that speech after generation waits for
+placement ACKs and must not claim the GLB is already placed. The honest
+sequence becomes: ACK the box, say the box is in the room at the stated size,
+and say the mesh is still baking until the job reports ready. §8.2 pins the
+wording obligation.
+
+## 6. Quest rendering
+
+### 6.1 One root per placement
+
+Each accepted `place_generated` creates one root GameObject owned by
+`DrawingStore` under its `drawing_id`, with:
+
+- a translucent **listed box** child at `extent_m`, and
+- a **mesh** child, empty until the GLB lands.
+
+Registering the root in `DrawingStore` is required, not optional: it is what
+makes `remove`, `undo`, the clutter cap, and `revise` see generated furniture.
+Today they do not.
+
+### 6.2 Placement frame
+
+The box is planted on the existing capture-time hit path — the same
+`CaptureGeometryCache` entry, same range, same stale rules as a `mark`. The hit
+tangent frame maps listing axes as: `w` along the surface tangent, `h` along
+gravity up, `d` along the surface normal away from the wearer. The box rests on
+the surface rather than centring on it. No world point is ever sent to the
+model; the frame exists only on Quest.
+
+### 6.3 Mesh fit
+
+When the GLB arrives, its bounds are fitted **uniformly** inside the listed
+box: one scale factor, `min(box_extent / mesh_extent)` per axis, never per-axis
+stretch. The mesh may therefore not fill the box.
+
+Stretching to fill is rejected. A stretched mesh would make a misproportioned
+generation *look* correct while being a lie about the object, which is the same
+failure as the unit-sphere fit in a different costume.
+
+If the mesh's aspect ratio differs from the listing box by more than 25% on any
+axis, the box stays visible and the honesty path in §8.1 speaks.
+
+The GLB fetch is bounded: six attempts at roughly 15 s spacing, aborting early
+on a terminal worker failure. This is the only window in which a mesh may
+arrive late.
+
+If the import fails, the retries exhaust, or the payload exceeds
+`MaxGlbBytes`, the **listed box remains at full stated size**. The 0.12 m
+placeholder cube is no longer the failure mode for `place_generated`.
+
+## 7. Packing and interaction
+
+### 7.1 Packing rule
+
+Items pack along the hit tangent's positive axis. The first item's box front is
+at the hit; each subsequent item offsets by the previous width plus a 0.05 m
+gap, sharing one floor height and one facing.
+
+The arithmetic is a pure function of the ordered listing extents, unit-tested
+without Unity. The coordinator owns it. The model speaks layout language
+("fill that corner", "shift it left") and never computes or receives world
+metres.
+
+If the packed run exceeds the wall, this slice does not claim otherwise. It
+reports the run length. A numeric fit verdict needs the two-ray measurement in
+§11.
+
+### 7.2 Grab
+
+Generated roots carry an XRGrabInteractable, constrained to translation on the
+floor plane:
+
+- X and Z follow the hand.
+- Y is locked to the planted surface height. Objects are not lifted.
+- Scale is locked. Grab cannot fight the listed size.
+- Rotation is voice-only in this slice; grab does not yaw.
+- Release keeps the final pose. The drawing stays world-locked.
+
+Interaction SDK wiring is new to this project: `QuestDemo/Packages/manifest.json`
+carries the XR packages but no scene currently uses a grab interactable.
+
+### 7.3 Voice revise
+
+`revise_procedural` gains generated drawings as valid targets, addressed by the
+same `drawing_id`:
+
+| Verb | Generated furniture |
+|---|---|
+| nudge / move | allowed, floor-plane offset |
+| rotate | allowed, yaw only |
+| remove | allowed; clears root, mesh, and job reference |
+| swap | allowed; re-targets the box to another listing's extents and mesh |
+| enlarge / shrink | **refused** — the listing is the truth |
+
+Refusal reasons reuse the existing vocabulary rather than adding new strings.
+
+## 8. Honesty obligations
+
+### 8.1 Approximate mesh
+
+When §6.3's 25% threshold trips, the box stays and the wearer is told the mesh
+is approximate. The existing honesty-chip surface carries this; it does not get
+a new screen-centre HUD.
+
+### 8.2 Speech ordering
+
+- The object may be spoken about as soon as its box ACK lands: a box at the
+  stated size, in the room.
+- The coordinator does not separately assert that the mesh downloaded. Quest
+  sends no arrival report in this slice (§11), so "the mesh is on your head"
+  would be unverifiable from the laptop. It describes the object; it does not
+  narrate a transfer it cannot see.
+- A mesh that never arrives is reported as a mesh that never arrived. The box
+  is still the answer to "will it fit".
+
+### 8.3 Never
+
+- Never a size the model did not read or hear. No guessed metres.
+- Never a claim of millimetre fit, structural load, or fastener size.
+- Never a stretched mesh presented as the product.
+- Never a world coordinate, pose, or quaternion leaving the laptop.
+- Never `YIBU_API_KEY` in Unity, logs, the repo, or a doc.
+- Never cost arithmetic in the tooling.
+
+## 9. Tests
+
+Python, offline, no credit (`cd provider && . .venv/bin/activate && python -m unittest discover -s tests -v`):
+
+- `extent_m` accepts a 3-number array in range; rejects missing length, 2 or 4
+  numbers, non-numbers, negatives, and values outside 0.05–3.0 m.
+- `place_generated` without `extent_m` still validates, so existing fixtures
+  and the shop-to-life path are unchanged.
+- `place_listing` is refused with an unknown `listing_id`, with a stored row
+  missing an axis, with `extent_m` disagreeing with memory, and with a target
+  that is not image-space.
+- `place_listing` succeeds with a complete row, and the resulting
+  coordinator-authored `place_generated` carries `extent_m`.
+- Listing memory: a multi-row page frame stores several rows; a spoken
+  answer fills a missing axis and marks the source.
+- Pack arithmetic: first item at the hit, widths plus 0.05 m gaps, stable
+  ordering, single floor height, and a run length that matches the inputs.
+- Job record retains `extent_m` across the queued → ready transition.
+
+Unity EditMode, no headset:
+
+- Uniform fit for a non-cubic box: a 0.55 × 0.40 × 0.72 m box and a
+  differently-proportioned mesh produce one scale factor, and the mesh's
+  proportions are unchanged after fitting (the anti-stretch assertion).
+- The 25% aspect threshold trips the approximate path, and just under it does
+  not.
+- A failed or oversized import leaves a listed-size box, not a 0.12 m cube.
+- The generated root is registered under its `drawing_id`, and `remove`,
+  `undo`, and the clutter cap then see it.
+- Grab contributes XZ motion only: Y and scale are unchanged, and release
+  preserves the pose.
+- `revise_procedural` on a generated `drawing_id` applies nudge, rotate,
+  remove, and swap, and refuses enlarge and shrink.
+
+Device gate (manual, not automated): plant a listed box from a real page, fit a
+real GLB at a measured size, grab it across the floor, and confirm the box and
+mesh do not drift while the wearer walks.
+
+## 10. Acceptance
+
+This slice is done when, on device, a page-stated size becomes a life-size box
+in the room, the mesh fills that box without stretching, the object can be
+moved on the floor by hand and revised by voice, and the wearer is told the
+truth in every failure path above.
+
+## 11. Out of scope
+
+- Two-ray corner measurement and a numeric fit verdict. This slice reports
+  packed run length only. The locked demo's fit-check beat stays open until a
+  follow-up slice, and that slice should own the wall measurement, the
+  tolerance chip, and the comparison copy.
+- Generating from a listing photo URL. The artifact source for this slice is
+  the existing worker; a listing photo is not yet a generation seed.
+- Hand-tracking grab. Controller grab only.
+- A first-class layout-slot object (option A). Revisit if generated furniture
+  needs a lifetime independent of its op, or if swap must preserve a slot
+  identity across failed generations.
+- Multi-session listing memory, catalog sync, or price handling.
+- A Quest-side mesh-arrival report. Until one exists, §8.2 forbids asserting
+  that a transfer completed.
