@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.Text;
+using UnityEngine;
 
 /// <summary>
 /// Explicit JSON serialization for the slice 1 capture envelope.
@@ -428,6 +429,10 @@ public static class ProtocolJson
         public int StageEpoch;
         public string Kind;
         public string JobId;
+        public bool HasExtentM;
+        public Vector3 ExtentM;
+        public bool HasOffsetM;
+        public float OffsetM;
         public string DrawingId;
         public string TargetFrameId;
         public string FromTargetFrameId;
@@ -495,6 +500,30 @@ public static class ProtocolJson
         parsed.Kind = s;
         if (TryGetStringOrNull(payloadJson, "job_id", out s, out found) && found)
             parsed.JobId = s;
+        int extentAt = IndexOfKey(payloadJson, "extent_m", 0);
+        if (extentAt >= 0)
+        {
+            int bracketAt = payloadJson.IndexOf('[', extentAt);
+            string arr;
+            int endAt;
+            if (bracketAt >= 0 && ExtractBracketed(payloadJson, bracketAt, out arr, out endAt))
+            {
+                double x, y, z;
+                if (TryGetIndexedDouble(arr, 0, out x) &&
+                    TryGetIndexedDouble(arr, 1, out y) &&
+                    TryGetIndexedDouble(arr, 2, out z))
+                {
+                    parsed.HasExtentM = true;
+                    parsed.ExtentM = new Vector3((float)x, (float)y, (float)z);
+                }
+            }
+        }
+        double offset;
+        if (TryGetDouble(payloadJson, "offset_m", out offset))
+        {
+            parsed.HasOffsetM = true;
+            parsed.OffsetM = (float)offset;
+        }
         if (TryGetStringOrNull(payloadJson, "drawing_id", out s, out found) && found)
             parsed.DrawingId = s;
         if (TryGetStringOrNull(payloadJson, "text", out s, out found) && found)
@@ -870,6 +899,24 @@ public static class ProtocolJson
         if (!any)
             return false;
         return double.TryParse(json.Substring(start, i - start),
+            NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+    }
+
+    /// <summary>Read one element of a bracketed numeric array by position.</summary>
+    static bool TryGetIndexedDouble(string arrayJson, int index, out double value)
+    {
+        value = 0;
+        if (string.IsNullOrEmpty(arrayJson) || index < 0)
+            return false;
+        string body = arrayJson.Trim();
+        if (body.StartsWith("["))
+            body = body.Substring(1);
+        if (body.EndsWith("]"))
+            body = body.Substring(0, body.Length - 1);
+        string[] parts = body.Split(',');
+        if (index >= parts.Length)
+            return false;
+        return double.TryParse(parts[index].Trim(),
             NumberStyles.Float, CultureInfo.InvariantCulture, out value);
     }
 
