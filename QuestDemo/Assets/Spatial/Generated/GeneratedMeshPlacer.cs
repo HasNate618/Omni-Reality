@@ -24,6 +24,13 @@ public static class GeneratedMeshPlacer
     public const float FetchRetrySeconds = 15f;
 
     /// <summary>
+    /// Honesty copy when the fitted mesh misses the listing by more than the
+    /// 25% aspect threshold (spec §8.1). The box stays the size claim.
+    /// </summary>
+    public const string ApproximateMeshText =
+        "That mesh is approximate; the box is the listed size.";
+
+    /// <summary>
     /// Per-attempt timeout in seconds. Without one, an unreachable host can
     /// outlive the whole retry budget on top of the 5 x 15 s waits.
     /// </summary>
@@ -189,8 +196,17 @@ public static class GeneratedMeshPlacer
             client.NotifyMeshMissing(drawingId);
             yield break;
         }
-        if (!store.FitMeshIntoBox(drawingId, mesh))
+        bool approximate;
+        if (!store.FitMeshIntoBox(drawingId, mesh, out approximate))
+        {
             Object.Destroy(mesh);
+        }
+        else if (approximate)
+        {
+            // The box stays and the wearer is told the mesh is approximate,
+            // carried by the existing honesty chip (spec §8.1).
+            client.ShowChipText(ApproximateMeshText);
+        }
     }
 
     sealed class PendingImport

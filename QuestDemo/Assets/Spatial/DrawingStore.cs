@@ -209,14 +209,23 @@ public class DrawingStore : MonoBehaviour
     public GameObject PlaceGenerated(
         Vector3 point, Vector3 normal, string drawingId, Vector3? extentM, float offsetM = 0f)
     {
+        if (!extentM.HasValue)
+        {
+            // Spec §1/§6.3: a size claim is impossible without a size, and the
+            // 0.12 m placeholder is no longer a failure mode. Refuse the op
+            // rather than invent a second, smaller guess; the placer ACKs
+            // `rejected`/`invalid`. No Prune/Evict runs, so a refusal is
+            // side-effect free.
+            Debug.LogWarning("DrawingStore.PlaceGenerated: no extent_m for drawing "
+                + drawingId + "; refusing rather than inventing a size");
+            return null;
+        }
         Prune();
         EvictIfNeeded();
         GameObject root = new GameObject("Drawing_" + drawingId);
         Vector3 n = normal.sqrMagnitude < 1e-6f ? Vector3.up : normal.normalized;
         Vector3 facing = -n;
-        Vector3 boxSize = extentM.HasValue
-            ? ListingBox.ToBoxSize(extentM.Value)
-            : Vector3.one * 0.12f;
+        Vector3 boxSize = ListingBox.ToBoxSize(extentM.Value);
         Vector3 planted = point;
         if (Mathf.Abs(offsetM) > 1e-6f)
         {
@@ -291,9 +300,13 @@ public class DrawingStore : MonoBehaviour
         }
     }
 
-    /// <summary>Fit an imported mesh object inside the recorded box.</summary>
-    public bool FitMeshIntoBox(string drawingId, GameObject mesh)
+    /// <summary>
+    /// Fit an imported mesh object inside the recorded box. <paramref name="approximate"/>
+    /// reports §6.3's 25% aspect miss so the caller can chip it (§8.1).
+    /// </summary>
+    public bool FitMeshIntoBox(string drawingId, GameObject mesh, out bool approximate)
     {
+        approximate = false;
         GeneratedRecord rec = null;
         if (mesh == null || string.IsNullOrEmpty(drawingId) ||
             !_generated.TryGetValue(drawingId, out rec) || rec.Root == null)
@@ -316,7 +329,8 @@ public class DrawingStore : MonoBehaviour
         mesh.transform.SetParent(rec.Root.transform, false);
         mesh.transform.position = rec.Root.transform.position - centreOffset * scale;
         rec.Mesh = mesh;
-        MarkMeshFitted(drawingId, ListingBox.IsApproximate(bounds.size, rec.BoxSize));
+        approximate = ListingBox.IsApproximate(bounds.size, rec.BoxSize);
+        MarkMeshFitted(drawingId, approximate);
         return true;
     }
 

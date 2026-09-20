@@ -59,8 +59,24 @@ public class GeneratedMeshPlacerTests
         var go = new GameObject("store");
         var store = go.AddComponent<DrawingStore>();
         for (int i = 0; i < DrawingStore.MaxDrawings; i++)
-            store.PlaceGenerated(Vector3.zero, Vector3.up, "drawing-" + i, null);
+            store.PlaceGenerated(
+                Vector3.zero, Vector3.up, "drawing-" + i, new Vector3(0.55f, 0.40f, 0.72f));
         Assert.AreEqual(DrawingStore.MaxDrawings, store.Count);
+        Object.DestroyImmediate(go);
+    }
+
+    [Test]
+    public void NullExtentIsRefusedRatherThanInventingASize()
+    {
+        // Spec §1 / §6.3: a size claim needs a size. With no extent the op is
+        // refused instead of falling back to a 0.12 m placeholder box.
+        var go = new GameObject("store");
+        var store = go.AddComponent<DrawingStore>();
+        GameObject placed = store.PlaceGenerated(
+            Vector3.zero, Vector3.up, "d-noextent", null);
+        Assert.IsNull(placed);
+        Assert.IsFalse(store.HasGenerated("d-noextent"));
+        Assert.AreEqual(0, store.Count);
         Object.DestroyImmediate(go);
     }
 
@@ -120,7 +136,7 @@ public class GeneratedMeshPlacerTests
         cube.transform.localPosition = new Vector3(0.5f, 0.3f, -0.2f);
         cube.transform.localScale = Vector3.one * 0.6f;
 
-        Assert.IsTrue(store.FitMeshIntoBox("d-fit", holder));
+        Assert.IsTrue(store.FitMeshIntoBox("d-fit", holder, out bool approximate));
         Assert.AreEqual(placed.transform, holder.transform.parent);
 
         // Box is 0.55 x 0.72 x 0.40 at (1, 0.36, 2); the 0.6 cube is too big on
@@ -132,7 +148,40 @@ public class GeneratedMeshPlacerTests
         Assert.LessOrEqual(bounds.size.x, 0.55f + 1e-3f);
         Assert.LessOrEqual(bounds.size.y, 0.72f + 1e-3f);
         Assert.LessOrEqual(bounds.size.z, 0.40f + 1e-3f);
+        // A 0.6 cube in a 0.55 x 0.72 x 0.40 box misses by far more than 25%
+        // on z, so the fit must report approximate (§8.1).
+        Assert.IsTrue(approximate);
         Object.DestroyImmediate(placed);
+        Object.DestroyImmediate(go);
+    }
+
+    [Test]
+    public void FitReportsApproximateOnlyPastTheAspectThreshold()
+    {
+        // §8.1: the 25% aspect miss must be surfaced from the fit path so the
+        // placer can chip it; a mesh that matches the listing must not trip it.
+        var go = new GameObject("store");
+        var store = go.AddComponent<DrawingStore>();
+        Vector3 listing = new Vector3(0.55f, 0.40f, 0.72f); // wire (w, d, h)
+
+        GameObject exact = store.PlaceGenerated(Vector3.zero, Vector3.up, "d-exact", listing);
+        var holderExact = new GameObject("Generated_exact");
+        GameObject cubeExact = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        cubeExact.transform.SetParent(holderExact.transform, false);
+        cubeExact.transform.localScale = new Vector3(0.55f, 0.72f, 0.40f); // Unity (w, h, d)
+        Assert.IsTrue(store.FitMeshIntoBox("d-exact", holderExact, out bool approximateExact));
+        Assert.IsFalse(approximateExact);
+
+        GameObject skewed = store.PlaceGenerated(Vector3.zero, Vector3.up, "d-skew", listing);
+        var holderSkew = new GameObject("Generated_skew");
+        GameObject cubeSkew = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        cubeSkew.transform.SetParent(holderSkew.transform, false);
+        cubeSkew.transform.localScale = Vector3.one * 0.6f; // 0.6/0.40 = 1.5 on z
+        Assert.IsTrue(store.FitMeshIntoBox("d-skew", holderSkew, out bool approximateSkew));
+        Assert.IsTrue(approximateSkew);
+
+        Object.DestroyImmediate(exact);
+        Object.DestroyImmediate(skewed);
         Object.DestroyImmediate(go);
     }
 
@@ -161,7 +210,8 @@ public class GeneratedMeshPlacerTests
         var go = new GameObject("store");
         var store = go.AddComponent<DrawingStore>();
         for (int i = 0; i <= DrawingStore.MaxDrawings; i++)
-            store.PlaceGenerated(Vector3.zero, Vector3.up, "drawing-" + i, null);
+            store.PlaceGenerated(
+                Vector3.zero, Vector3.up, "drawing-" + i, new Vector3(0.55f, 0.40f, 0.72f));
         Assert.AreEqual(DrawingStore.MaxDrawings, store.Count);
         Assert.IsFalse(store.HasGenerated("drawing-0"));
         Assert.IsTrue(store.HasGenerated("drawing-" + DrawingStore.MaxDrawings));
