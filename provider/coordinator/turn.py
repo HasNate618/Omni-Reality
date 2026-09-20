@@ -288,11 +288,19 @@ async def _run_tracking_turn(state, turn_id, utterance_id, buf):
         if target is None:
             raise TrackingError("I couldn't identify one target. Look at it and try again.")
         await bridge.seed(frame, target, generation)
-        # The headset speaks this with Android TTS. Said only after seeding,
-        # so we never claim to be tracking something SAM 2 has not accepted.
+        # Said only after seeding, so we never claim to be tracking something
+        # SAM 2 has not accepted. The mask is already on screen by now, so the
+        # synthesis below delays only the voice.
+        #
+        # Quest ships no Android text-to-speech engine (TTS_SERVICE resolves to
+        # nothing), so QuestSpeech can never make sound on this device. Cloud
+        # speech is the only audible path; when it is unavailable the headset
+        # still shows the caption.
+        line = plan.text or SAY_TRACKING_DEFAULT
+        audio, _voice_gate = await _speak_audio(state, line, turn_id)
         await bridge.send(
             "speak", turn_id,
-            {"turn_id": turn_id, "text": plan.text or SAY_TRACKING_DEFAULT, "audio": None},
+            {"turn_id": turn_id, "text": line, "audio": audio},
             utterance_id,
         )
     except asyncio.CancelledError:
