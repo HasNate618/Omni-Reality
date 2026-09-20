@@ -336,13 +336,19 @@ public class FurnitureTests
             try
             {
                 Assert.That(box, Is.Not.Null, e.Kind);
-                var renderers = box.GetComponentsInChildren<MeshRenderer>();
-                Assert.That(renderers.Length, Is.GreaterThan(1), e.Kind + " built no parts");
+                // The name plate is text and legitimately overhangs a narrow
+                // piece, so measure the furniture itself.
+                var renderers = new List<Renderer>();
+                foreach (MeshRenderer r in box.GetComponentsInChildren<MeshRenderer>())
+                {
+                    if (r.GetComponent<TextMesh>() == null && r.GetComponent<LineRenderer>() == null)
+                        renderers.Add(r);
+                }
+                Assert.That(renderers.Count, Is.GreaterThan(1), e.Kind + " built no parts");
 
                 Bounds b = renderers[0].bounds;
-                for (int i = 1; i < renderers.Length; i++)
+                for (int i = 1; i < renderers.Count; i++)
                     b.Encapsulate(renderers[i].bounds);
-                // A little slack for the label, which sits above the piece.
                 Assert.That(b.size.x, Is.LessThanOrEqualTo(e.SizeM.x + 0.02f), e.Kind + " too wide");
                 Assert.That(b.size.z, Is.LessThanOrEqualTo(e.SizeM.z + 0.02f), e.Kind + " too deep");
             }
@@ -412,20 +418,140 @@ public class FurnitureTests
     }
 
     [Test]
-    public void AResizedPieceStopsClaimingTheListingSize()
+    public void LabelAlwaysShowsThePieceLiveSize()
     {
         FurnitureCatalog.Entry e = FurnitureCatalog.Find(FurnitureCatalog.Sofa);
         LayoutBox box = LayoutBox.Create(e.Label, e.SizeM, e.Tint, e.Kind);
         try
         {
-            Assert.That(box.IsResized, Is.False);
-            Assert.That(box.SizeCaption(), Does.Not.Contain("resized"));
+            Assert.That(box.SizeCaption(), Does.Contain("180"));
+            box.ApplyScale(1.5f);
+            // The caption follows the piece, and stays just name plus size.
+            Assert.That(box.SizeCaption(), Does.Contain("270"));
+            Assert.That(box.SizeCaption(), Does.Not.Contain("listing"));
+            // Still remembered internally: scaling anchors to it.
+            Assert.That(box.ListingSizeM, Is.EqualTo(e.SizeM));
+        }
+        finally
+        {
+            Object.DestroyImmediate(box.gameObject);
+        }
+    }
 
-            box.ApplyScale(1.4f);
+    [Test]
+    public void DoubleTapNeedsTwoQuickTapsOnTheSamePiece()
+    {
+        Assert.That(LayoutMode.IsDoubleTap(10f, 10.2f, true), Is.True);
+        // Too slow.
+        Assert.That(LayoutMode.IsDoubleTap(10f, 11.0f, true), Is.False);
+        // Second tap landed on a different piece.
+        Assert.That(LayoutMode.IsDoubleTap(10f, 10.2f, false), Is.False);
+        // No first tap recorded.
+        Assert.That(LayoutMode.IsDoubleTap(-1f, 10.2f, true), Is.False);
+    }
 
-            Assert.That(box.IsResized, Is.True);
-            Assert.That(box.SizeCaption(), Does.Contain("resized, not the listing"));
-            Assert.That(box.ListingSizeM, Is.EqualTo(e.SizeM), "listing size must be remembered");
+    [Test]
+    public void RotateMenuTurnsThePieceAndKeepsTheMenuOpen()
+    {
+        FurnitureCatalog.Entry e = FurnitureCatalog.Find(FurnitureCatalog.Sofa);
+        LayoutBox box = LayoutBox.Create(e.Label, e.SizeM, e.Tint, e.Kind);
+        var go = new GameObject("Rotate");
+        var menu = go.AddComponent<RotateMenu>();
+        try
+        {
+            menu.Open(box);
+            Assert.That(menu.IsOpen, Is.True);
+            float before = box.transform.eulerAngles.y;
+
+            int ninety = System.Array.IndexOf(RotateMenu.Steps, 90f);
+            Assert.That(menu.Apply(ninety), Is.True, "a rotate card keeps the menu open");
+            Assert.That(Mathf.DeltaAngle(before, box.transform.eulerAngles.y),
+                        Is.EqualTo(90f).Within(0.01f));
+
+            int done = System.Array.IndexOf(RotateMenu.Steps, 0f);
+            Assert.That(menu.Apply(done), Is.False, "done must report that it closes");
+        }
+        finally
+        {
+            Object.DestroyImmediate(go);
+            Object.DestroyImmediate(box.gameObject);
+        }
+    }
+
+    [Test]
+    public void RotateCardsDoNotOverlap()
+    {
+        for (int i = 1; i < RotateMenu.Count; i++)
+        {
+            float gap = RotateMenu.CellX(i) - RotateMenu.CellX(i - 1);
+            Assert.That(gap, Is.GreaterThan(RotateMenu.CardW), "rotate cards touch");
+        }
+    }
+
+    [Test]
+    public void SelectorCardsAreSpacedAndGridded()
+    {
+        // The row layout ran labels into each other; a grid with real gutters
+        // is what fixed it, and it has to stay inside the field of view.
+        Assert.That(FurnitureSelector.Rows, Is.GreaterThan(1));
+        float widest = 0f;
+        for (int i = 0; i < FurnitureCatalog.Count; i++)
+        {
+            for (int j = i + 1; j < FurnitureCatalog.Count; j++)
+            {
+                Vector2 a = FurnitureSelector.CellCentre(i);
+                Vector2 b = FurnitureSelector.CellCentre(j);
+                bool apart = Mathf.Abs(a.x - b.x) >= FurnitureSelector.CardW + 0.01f
+                          || Mathf.Abs(a.y - b.y) >= FurnitureSelector.CardH + 0.01f;
+                Assert.That(apart, Is.True, "cards " + i + " and " + j + " overlap");
+            }
+            widest = Mathf.Max(widest, Mathf.Abs(FurnitureSelector.CellCentre(i).x));
+        }
+        float totalWidth = (widest * 2f) + FurnitureSelector.CardW;
+        Assert.That(totalWidth, Is.LessThan(1.6f), "menu is wider than the view");
+    }
+
+    [Test]
+    public void LockOnPicksThePieceTheRayPassesThrough()
+    {
+        FurnitureCatalog.Entry e = FurnitureCatalog.Find(FurnitureCatalog.Sofa);
+        LayoutBox box = LayoutBox.Create(e.Label, e.SizeM, e.Tint, e.Kind);
+        box.transform.position = new Vector3(0f, e.SizeM.y * 0.5f, 3f);
+        var boxes = new List<LayoutBox> { box };
+        try
+        {
+            // Aimed level at the body, never touching the floor.
+            var level = new Ray(new Vector3(0f, e.SizeM.y * 0.5f, 0f), Vector3.forward);
+            Assert.That(LayoutDrag.PickByRay(boxes, level, false, Vector2.zero),
+                        Is.SameAs(box), "pointing at the furniture must select it");
+
+            var away = new Ray(new Vector3(0f, e.SizeM.y * 0.5f, 0f), Vector3.back);
+            Assert.That(LayoutDrag.PickByRay(boxes, away, false, Vector2.zero), Is.Null);
+        }
+        finally
+        {
+            Object.DestroyImmediate(box.gameObject);
+        }
+    }
+
+    [Test]
+    public void LockOnSnapsToANearMissOnTheFloor()
+    {
+        FurnitureCatalog.Entry e = FurnitureCatalog.Find(FurnitureCatalog.SideTable);
+        LayoutBox box = LayoutBox.Create(e.Label, e.SizeM, e.Tint, e.Kind);
+        box.transform.position = new Vector3(0f, e.SizeM.y * 0.5f, 0f);
+        var boxes = new List<LayoutBox> { box };
+        try
+        {
+            // Just outside the footprint but well within the snap radius.
+            var near = new Vector2(0.45f, 0f);
+            Assert.That(LayoutDrag.PickAt(boxes, near), Is.Null, "outside the footprint");
+            Assert.That(LayoutDrag.EdgeDistance(box, near),
+                        Is.LessThan(LayoutDrag.SnapRadiusM));
+            Assert.That(LayoutDrag.NearestWithin(boxes, near, LayoutDrag.SnapRadiusM),
+                        Is.SameAs(box), "a near miss should still lock on");
+            Assert.That(LayoutDrag.NearestWithin(boxes, new Vector2(3f, 0f),
+                        LayoutDrag.SnapRadiusM), Is.Null, "but not from across the room");
         }
         finally
         {

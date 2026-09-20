@@ -62,10 +62,20 @@ public sealed class LayoutLabel : MonoBehaviour
             _text.text = text ?? "";
     }
 
+    float _scale = 1f;
+
+    /// <summary>Base size multiplier, for labels that must fit something.</summary>
+    public void SetScale(float scale)
+    {
+        _scale = Mathf.Clamp(scale, 0.3f, 3f);
+        if (_text != null)
+            _text.characterSize = CharacterSize * _scale;
+    }
+
     public void SetEmphasis(bool on)
     {
         if (_text != null)
-            _text.characterSize = on ? CharacterSize * 1.25f : CharacterSize;
+            _text.characterSize = CharacterSize * _scale * (on ? 1.25f : 1f);
     }
 
     public void SetVisible(bool on)

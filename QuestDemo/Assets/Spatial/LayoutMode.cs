@@ -28,6 +28,9 @@ public sealed class LayoutMode : MonoBehaviour
     LayoutResize _resize;
     LayoutPointer _pointer;
     FurnitureSelector _selector;
+    RotateMenu _rotate;
+    float _lastTapAt = -1f;
+    LayoutBox _lastTapBox;
     LayoutRoom.CornerFrame _corner;
     bool _hasCorner;
     int _cornerTurn = -1;
@@ -40,6 +43,15 @@ public sealed class LayoutMode : MonoBehaviour
     public int BoxCount { get { return _boxes.Count; } }
     public IList<LayoutBox> Boxes { get { return _boxes; } }
     public bool ResizeMode { get { return _resizeMode; } }
+
+    /// <summary>Two taps closer together than this open the rotate menu.</summary>
+    public const float DoubleTapSeconds = 0.35f;
+
+    /// <summary>Pure so the gesture can be tested without a controller.</summary>
+    public static bool IsDoubleTap(float previousTapAt, float now, bool sameTarget)
+    {
+        return sameTarget && previousTapAt > 0f && (now - previousTapAt) <= DoubleTapSeconds;
+    }
 
     /// <summary>
     /// True once a layout turn has placed anything this session. A and B are
@@ -77,6 +89,9 @@ public sealed class LayoutMode : MonoBehaviour
         var menu = new GameObject("FurnitureSelector");
         menu.transform.SetParent(null, true);
         _selector = menu.AddComponent<FurnitureSelector>();
+        var rotateGO = new GameObject("RotateMenu");
+        rotateGO.transform.SetParent(null, true);
+        _rotate = rotateGO.AddComponent<RotateMenu>();
         var centerGO = GameObject.Find("CenterEyeAnchor");
         if (centerGO != null)
             _centerEye = centerGO.transform;
@@ -94,11 +109,12 @@ public sealed class LayoutMode : MonoBehaviour
         if (!_armed)
             return;
 
-        // A opens the furniture menu; B toggles resize. Both only once Layout
-        // owns them, so a normal A/B run is untouched.
-        if (OVRInput.GetDown(OVRInput.Button.One, OVRInput.Controller.RTouch))
-            ToggleSelector();
+        // A opens the furniture menu; B toggles resize. Button.Two is the one
+        // that reads as A on this headset -- measured on device, not assumed.
+        // Both only once Layout owns them, so a normal A/B run is untouched.
         if (OVRInput.GetDown(OVRInput.Button.Two, OVRInput.Controller.RTouch))
+            ToggleSelector();
+        if (OVRInput.GetDown(OVRInput.Button.One, OVRInput.Controller.RTouch))
             ToggleResizeMode();
 
         if (_pointer == null || !_pointer.HasAim)
@@ -110,13 +126,39 @@ public sealed class LayoutMode : MonoBehaviour
             TickSelector(ray);
             return;
         }
+        if (_rotate != null && _rotate.IsOpen)
+        {
+            TickRotate(ray);
+            return;
+        }
 
         Vector3 floorPoint;
         bool onFloor = LayoutDrag.TryFloorPoint(ray, _hasCorner ? _corner.Origin.y : 0f,
                                                 out floorPoint);
-        LayoutBox aimed = onFloor
-            ? LayoutDrag.PickAt(_boxes, new Vector2(floorPoint.x, floorPoint.z))
-            : null;
+        LayoutBox aimed = LayoutDrag.PickByRay(
+            _boxes, ray, onFloor, new Vector2(floorPoint.x, floorPoint.z));
+
+        // Double tap on a piece opens rotate. Checked before drag and resize
+        // consume the press, and only on a piece, so a tap at empty floor
+        // never opens a menu attached to nothing.
+        if (OVRInput.GetDown(OVRInput.Button.PrimaryIndexTrigger, OVRInput.Controller.RTouch))
+        {
+            float now = Time.realtimeSinceStartup;
+            if (aimed != null && IsDoubleTap(_lastTapAt, now, ReferenceEquals(aimed, _lastTapBox)))
+            {
+                _lastTapAt = -1f;
+                _lastTapBox = null;
+                if (_drag != null)
+                    _drag.Release();
+                if (_resize != null)
+                    _resize.Release();
+                _rotate.Open(aimed);
+                ShowStatus("Rotate " + aimed.ItemLabel + ". Pick an angle, or done.", 6f);
+                return;
+            }
+            _lastTapAt = now;
+            _lastTapBox = aimed;
+        }
 
         if (onFloor)
             _pointer.Draw(aimed != null ? aimed.transform.position : floorPoint,
@@ -161,12 +203,34 @@ public sealed class LayoutMode : MonoBehaviour
         }
     }
 
+    void TickRotate(Ray ray)
+    {
+        _rotate.Reposition();
+        Vector3 hit;
+        int index = _rotate.IndexUnderRay(ray, out hit);
+        _rotate.SetHover(index);
+        if (index >= 0)
+            _pointer.Draw(hit, true, false);
+        else
+            _pointer.DrawMiss();
+        if (index < 0 || !OVRInput.GetDown(
+                OVRInput.Button.PrimaryIndexTrigger, OVRInput.Controller.RTouch))
+            return;
+        if (!_rotate.Apply(index))
+        {
+            _rotate.Close();
+            AnnounceFit();
+        }
+    }
+
     void ToggleSelector()
     {
         if (_selector == null)
             return;
         if (_resizeMode && !_selector.IsOpen)
             SetResizeMode(false);
+        if (_rotate != null && _rotate.IsOpen)
+            _rotate.Close();
         _selector.Toggle();
         ShowStatus(_selector.IsOpen
             ? "Pick a piece. Point and pull the trigger."
@@ -189,6 +253,8 @@ public sealed class LayoutMode : MonoBehaviour
             _drag.Release();
         if (on && _selector != null && _selector.IsOpen)
             _selector.Close();
+        if (on && _rotate != null && _rotate.IsOpen)
+            _rotate.Close();
         Debug.Log("QUEST_LAYOUT resize mode " + (on ? "ON" : "OFF"));
         ShowStatus(on
             ? "Resize: hold the trigger on a piece, move your hand in and out."
@@ -300,7 +366,7 @@ public sealed class LayoutMode : MonoBehaviour
         _boxes.Add(box);
         _armed = true;
         Debug.Log("QUEST_LAYOUT placed " + box.SizeCaption().Replace("\n", " "));
-        ShowStatus(HonestyCopy + "   A: add furniture   B: resize", 8f);
+        ShowStatus("A: add furniture    B: resize    double-tap: rotate\n" + HonestyCopy, 8f);
         return true;
     }
 
@@ -321,6 +387,9 @@ public sealed class LayoutMode : MonoBehaviour
             _drag.Release();
         if (_resize != null)
             _resize.Release();
+        if (_rotate != null)
+            _rotate.Close();
+        _lastTapBox = null;
         for (int i = 0; i < _boxes.Count; i++)
         {
             if (_boxes[i] != null)
@@ -433,9 +502,10 @@ public sealed class LayoutMode : MonoBehaviour
         forward.y = 0f;
         if (forward.sqrMagnitude < 1e-6f)
             return;
-        // Below the eyeline and far enough out to read comfortably.
+        // High and far: tips sitting in front of the furniture block the very
+        // thing they describe, so this rides near the top of the view instead.
         _status.transform.position = _centerEye.position
-                                     + (forward.normalized * 1.6f)
-                                     + (Vector3.down * 0.55f);
+                                     + (forward.normalized * 2.0f)
+                                     + (Vector3.up * 0.62f);
     }
 }

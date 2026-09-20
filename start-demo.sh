@@ -276,8 +276,9 @@ cat <<'STEPS'
          Let go; the clearance line updates.
       4. Press A for the furniture menu: point at a card, pull the trigger.
       5. Press B for resize: hold the trigger on a piece, move your hand
-         in and out. A resized piece is labelled "resized, not the listing".
-      6. Hold the side trigger again to re-summon and start over.
+         in and out.
+      6. Double-tap the trigger on a piece to rotate it.
+      7. Hold the side trigger again to re-summon and start over.
 
       Checkpoints, in order:
         headset: QUEST_STREAM utterance=... pcm_bytes= <- speech captured
@@ -291,6 +292,8 @@ cat <<'STEPS'
         headset: QUEST_LAYOUT added armchair ...      <- picked from the menu
         headset: QUEST_LAYOUT resize mode ON          <- B toggled resize
         headset: QUEST_LAYOUT resized sofa to 140% .. <- scaled, listing kept
+        headset: QUEST_LAYOUT rotate menu open for .. <- double tap registered
+        headset: QUEST_LAYOUT rotated sofa by 90 deg  <- angle applied
         headset: QUEST_LAYOUT fit Roughly -- about ... <- clearance, hedged
 
       Layout mode needs no SAM 2 and no key. With a key the model picks the

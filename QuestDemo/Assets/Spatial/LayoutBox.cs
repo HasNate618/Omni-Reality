@@ -9,9 +9,9 @@ using UnityEngine;
 /// A bright rectangle on the floor is the part that actually answers "will it
 /// fit"; the furniture on top of it is there so the corner reads as a room.
 ///
-/// Resizing is allowed, and the moment it happens this stops being the
-/// listing's size. `IsResized` says so and the label says so out loud -- a
-/// resized piece must never be read as a manufacturer's dimension.
+/// Resizing is allowed. `ListingSizeM` keeps the original so scaling stays
+/// anchored to it and repeated grabs cannot drift; the label always shows the
+/// piece's live size.
 /// </summary>
 public sealed class LayoutBox : MonoBehaviour
 {
@@ -203,17 +203,13 @@ public sealed class LayoutBox : MonoBehaviour
         return new Vector2((hw * c) + (hd * s), (hw * s) + (hd * c));
     }
 
-    /// <summary>
-    /// Label copy. A resized piece says so: once the wearer scales it, the
-    /// number is theirs, not the manufacturer's, and must not read as one.
-    /// </summary>
+    /// <summary>Name and current size. Always the live numbers, resized or not.</summary>
     public string SizeCaption()
     {
-        string line = string.Format(
+        return string.Format(
             "{0}\n{1:0} x {2:0} x {3:0} cm",
             string.IsNullOrEmpty(ItemLabel) ? "item" : ItemLabel,
             SizeM.x * 100f, SizeM.z * 100f, SizeM.y * 100f);
-        return IsResized ? line + "\nresized, not the listing" : line;
     }
 
     void OnDestroy()

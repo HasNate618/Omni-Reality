@@ -104,6 +104,122 @@ public sealed class LayoutDrag : MonoBehaviour
         return true;
     }
 
+    /// <summary>How far past a footprint edge a near-miss still locks on.</summary>
+    public const float SnapRadiusM = 0.45f;
+
+    /// <summary>
+    /// What the wearer is aiming at, in the order a person would expect:
+    /// the piece the ray actually passes through, else the piece standing on
+    /// the floor point, else the nearest piece within arm's reach of it.
+    ///
+    /// Footprint-only picking meant you had to aim at the floor and ignore the
+    /// sofa in front of you, which is why lock-on felt fussy.
+    /// </summary>
+    public static LayoutBox PickByRay(
+        List<LayoutBox> boxes, Ray ray, bool onFloor, Vector2 floorXz)
+    {
+        if (boxes == null)
+            return null;
+
+        LayoutBox best = null;
+        float bestT = float.MaxValue;
+        for (int i = 0; i < boxes.Count; i++)
+        {
+            float t;
+            if (boxes[i] == null || !RayHitsBody(boxes[i], ray, out t))
+                continue;
+            if (t < bestT)
+            {
+                bestT = t;
+                best = boxes[i];
+            }
+        }
+        if (best != null)
+            return best;
+        if (!onFloor)
+            return null;
+
+        LayoutBox onFoot = PickAt(boxes, floorXz);
+        if (onFoot != null)
+            return onFoot;
+        return NearestWithin(boxes, floorXz, SnapRadiusM);
+    }
+
+    /// <summary>Ray against the piece's own box, in the piece's local frame.</summary>
+    public static bool RayHitsBody(LayoutBox box, Ray ray, out float distance)
+    {
+        distance = 0f;
+        Transform t = box.transform;
+        Vector3 o = t.InverseTransformPoint(ray.origin);
+        Vector3 d = t.InverseTransformDirection(ray.direction);
+        Vector3 half = box.SizeM * 0.5f;
+
+        float near = 0f;
+        float far = MaxReachM;
+        for (int axis = 0; axis < 3; axis++)
+        {
+            float origin = axis == 0 ? o.x : (axis == 1 ? o.y : o.z);
+            float dir = axis == 0 ? d.x : (axis == 1 ? d.y : d.z);
+            float h = axis == 0 ? half.x : (axis == 1 ? half.y : half.z);
+            if (Mathf.Abs(dir) < 1e-6f)
+            {
+                if (origin < -h || origin > h)
+                    return false;
+                continue;
+            }
+            float t1 = (-h - origin) / dir;
+            float t2 = (h - origin) / dir;
+            if (t1 > t2)
+            {
+                float swap = t1;
+                t1 = t2;
+                t2 = swap;
+            }
+            near = Mathf.Max(near, t1);
+            far = Mathf.Min(far, t2);
+            if (near > far)
+                return false;
+        }
+        distance = near;
+        return true;
+    }
+
+    /// <summary>
+    /// Closest piece whose footprint *edge* is within `radius` of the point.
+    ///
+    /// Measuring to the centre instead would mean a 1.8 m sofa refused to lock
+    /// on while you pointed right beside it, because its centre is nearly a
+    /// metre away. Edge distance is what "near the sofa" actually means.
+    /// </summary>
+    public static LayoutBox NearestWithin(List<LayoutBox> boxes, Vector2 floorXz, float radius)
+    {
+        LayoutBox best = null;
+        float bestDist = radius;
+        for (int i = 0; i < boxes.Count; i++)
+        {
+            if (boxes[i] == null)
+                continue;
+            float d = EdgeDistance(boxes[i], floorXz);
+            if (d <= bestDist)
+            {
+                bestDist = d;
+                best = boxes[i];
+            }
+        }
+        return best;
+    }
+
+    /// <summary>Metres from a point to the footprint, 0 when inside it.</summary>
+    public static float EdgeDistance(LayoutBox box, Vector2 floorXz)
+    {
+        Vector2 c = box.FootprintCentre();
+        Vector2 h = box.FootprintHalfExtents();
+        float dx = Mathf.Max(0f, Mathf.Abs(c.x - floorXz.x) - h.x);
+        float dz = Mathf.Max(0f, Mathf.Abs(c.y - floorXz.y) - h.y);
+        return Mathf.Sqrt((dx * dx) + (dz * dz));
+    }
+
+    /// <summary>Topmost box whose footprint contains the point; nearest centre wins ties.</summary>
     /// <summary>Topmost box whose footprint contains the point; nearest centre wins ties.</summary>
     public static LayoutBox PickAt(List<LayoutBox> boxes, Vector2 floorXz)
     {

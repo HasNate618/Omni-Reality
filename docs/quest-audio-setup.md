@@ -193,6 +193,7 @@ at 24 kHz and Quest needs 16 kHz. Without it the conversation is silent.
 | Right **A** (hold) | Push-to-talk: speak, release to select and track |
 | Right **side trigger** (hold) | Push-to-talk as well. This is Layout mode's summon. |
 | Right **index trigger** (hold) | Layout mode: move or resize a piece, or pick a menu card |
+| Right **index trigger**, double tap | Layout mode: rotate menu for that piece |
 | Right **B** | Toggle continuous conversation — or, in Layout, resize mode |
 | Right **A** | Layout mode only: open the furniture menu |
 | Left **X** | Stop the current selection/tracking |

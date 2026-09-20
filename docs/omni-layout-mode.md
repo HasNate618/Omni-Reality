@@ -59,7 +59,8 @@ depth-sensed floor, which is none of those. So:
 - A caption reads **"Approximate. Sizes from the listing, room from depth
   sensing."** whenever boxes are placed. It is a `LayoutLabel` at more than
   three times `VoiceCaption`'s character size, because it has to be readable
-  while walking around the corner.
+  while walking around the corner, and it rides near the top of the view --
+  tips sitting in front of the furniture obscure the thing they describe.
 - Each piece carries its own name plate with the size in centimetres, so the
   claim is visible rather than implied.
 - Every clearance line starts with "Roughly" and never states a bare figure.
@@ -126,6 +127,12 @@ place boxes either way.
 | Right **A** | Open/close the furniture menu |
 | Right **B** | Toggle resize mode |
 | Right **index trigger** (hold) | Move a piece, resize it, or pick a menu card |
+| Right **index trigger**, double tap on a piece | Rotate menu |
+
+Note the binding in `LayoutMode`: `OVRInput.Button.Two` opens the selector and
+`Button.One` toggles resize. That looks inverted against the enum names and it
+is deliberate — on this headset those are what read as A and B. Measured on
+device; do not "fix" it without a controller in your hands.
 
 A and B only belong to Layout once `LayoutMode.IsArmed` — that is, after a
 layout turn has placed something. Before that they are still push-to-talk and
@@ -134,6 +141,12 @@ reads that flag; without it every menu press would also flip the microphone.
 
 A pointer ray comes out of the right controller: cyan when it is on the floor,
 green over a piece or a menu card, amber in resize mode.
+
+Lock-on tries three things in the order a person expects: the piece the ray
+passes through (`RayHitsBody`, an exact ray/box test in the piece's own frame),
+then the piece standing on the floor point, then the nearest piece within 45 cm
+of a **footprint edge**. Edge distance matters -- measured to the centre, a
+1.8 m sofa refused to lock on while you pointed right beside it.
 
 Furniture carries no colliders — nothing in this project does — so picking is
 the aim ray against the floor plane, tested against each footprint rectangle.
@@ -150,17 +163,20 @@ model arrives at an arbitrary scale — the one thing this demo cannot afford,
 since the footprint is the answer. Building them means true size is structural
 rather than something to verify.
 
-## Resizing
+## Resizing and rotating
 
 B toggles resize; hold the trigger on a piece and move your hand out to grow it,
-back to shrink. Scale is uniform, anchored to the **listing** size rather than
-the current size, so repeated grabs cannot drift. Clamped to 0.35x–2.5x.
+back to shrink. Scale is uniform and anchored to the **listing** size rather
+than the current size, so repeated grabs cannot drift. Clamped to 0.35x-2.5x.
 
-**A resized piece stops claiming the listing's dimensions.** `IsResized` goes
-true and its label gains a third line, `resized, not the listing`. This matters:
-the whole honesty case rests on the numbers coming from a seller, and once the
-wearer scales a piece by hand that is no longer true of it. Enforced by
-`FurnitureTests.AResizedPieceStopsClaimingTheListingSize`.
+Double-tapping the trigger on a piece opens the rotate menu above it: -90, -45,
++45, +90, done. It stays open between turns, because getting an angle right
+takes several nudges. A double tap is the one gesture left that drag and resize
+cannot swallow.
+
+Each name plate shows the piece's live size, resized or not. `ListingSizeM` is
+kept internally for the scaling anchor. The approximate-sizes caption covers the
+honesty case for the scene as a whole.
 
 ## Running it
 
