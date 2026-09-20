@@ -21,6 +21,8 @@ public class TrackingObject
 {
     public int obj_id;
     public string mask_b64;
+    /// <summary>What the model called this object, when it named one.</summary>
+    public string label;
 }
 
 /// <summary>Assistant reply for the headset to speak (payload of `speak`).</summary>

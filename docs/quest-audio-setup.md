@@ -12,8 +12,9 @@ Exact selected snapshot + point → SAM 2 → subsequent Quest frames
 Tracking masks → Unity result handoff
 ```
 
-Quest supplies the video; Huawei selects the object once per request; SAM 2
-segments and tracks it. This setup supports one active object. The detailed
+Quest supplies the video; Huawei selects the objects once per request; SAM 2
+segments and tracks them. Up to 3 objects are tracked at once, each drawn in its
+own colour at its own depth. The detailed
 frame, buffering, and result contracts live in
 [SAM 2 streaming](omni-sam2-streaming.md#quest--voice-automatic-initialization).
 
@@ -215,8 +216,10 @@ Look for:
 - `QUEST_TRACKING selecting`, `initializing`, then `tracking`.
 - `QUEST_TRACKING first mask frame=...`: a SAM 2 result reached Unity.
 
-The coordinator logs `SAM2 seed frame_id=... x=... y=... obj_id=1`. Its frame ID
-must match the selected snapshot, not the latest live frame.
+The coordinator logs `SAM2 seed frame_id=... objects=2 [1:laptop@(19.5,44.5)
+2:mug@(39.5,29.5)]`, one entry per selected object. Its frame ID must match the
+selected snapshot, not the latest live frame. Unity then logs one
+`QUEST_OVERLAY drawn obj=...` line per mask it placed.
 
 The existing Unity visualization consumes `CoordinatorClient.TrackingResultReceived`.
 See the [result handoff](omni-sam2-streaming.md#unity-result-handoff) for fields
@@ -248,7 +251,9 @@ Recorded test results and offline test commands are in
   key expiry, visible target, and the gateway audit ledger.
 - **`initializing` then error:** check SAM 2's startup completed, the correct
   8766 URL, and connectivity from the coordinator machine.
-- **Catch-up timeout:** reduce Stream FPS; one object is the integration target.
+- **Catch-up timeout:** reduce Stream FPS. Each tracked object costs roughly
+  +70 ms per frame, so three objects need most of the 333 ms budget that the
+  default 3 fps allows.
 - **First mask log but no visual:** check the `QUEST_OVERLAY` lines --
   `TrackingMaskOverlay` creates itself and says why it did not draw. A plain
   white quad means an older APK is installed: rebuild and `--install`.

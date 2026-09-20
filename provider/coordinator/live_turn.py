@@ -297,13 +297,13 @@ async def _seed_tracking(state: CoordinatorState, turn: _Turn) -> None:
                               envelope=turn.envelope, context=[])
     if turn.tombstoned or generation != bridge.generation:
         return
-    if plan.tracking_target is None:
+    if not plan.tracking_targets:
         logger.info("live tracking seed: no target for turn %d", turn.turn_id)
         return
     frame = await bridge.history.wait_for(turn.envelope.get("frame_id"))
-    await bridge.seed(frame, plan.tracking_target, generation)
-    logger.info("live tracking seed: turn %d seeded from frame %s",
-                turn.turn_id, turn.envelope.get("frame_id"))
+    await bridge.seed(frame, plan.tracking_targets, generation)
+    logger.info("live tracking seed: turn %d seeded %d objects from frame %s",
+                turn.turn_id, len(plan.tracking_targets), turn.envelope.get("frame_id"))
 
 
 def _on_said(state: CoordinatorState, text: str) -> None:

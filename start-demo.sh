@@ -219,8 +219,8 @@ cat <<'STEPS'
     no buttons, no mic. Shake the right controller to wake it.
 
     ---- A: push to talk (tracking) ----------------------------------
-      1. Look at the object.
-      2. HOLD A, say "track the laptop" (speak > 0.5 s), RELEASE A.
+      1. Look at the object, or at up to 3 of them.
+      2. HOLD A, say "track the laptop and the mug" (speak > 0.5 s), RELEASE A.
 
       Checkpoints, in order:
         headset: QUEST_STREAM listening (hold A)       <- A registered, mic recording
@@ -228,9 +228,10 @@ cat <<'STEPS'
         coord:   utterance_end ...: mode=ptt audio=N   <- laptop got it, A-mode route
         coord:   turn N: snapshot found ...            <- the frame Huawei will look at
         coord:   calling qwen3.8-omni-flash ...        <- request sent to Huawei
-        coord:   turn N: model replied ... target=...  <- Huawei's answer (u,v)
-        coord:   SAM2 seed frame_id=... x=... y=...    <- point handed to SAM 2
+        coord:   turn N: model replied ... targets=... <- Huawei's answer, one point each
+        coord:   SAM2 seed ... objects=2 [1:laptop@..  <- points handed to SAM 2
         headset: QUEST_TRACKING first mask frame=...   <- masks arriving, overlay shows
+        headset: QUEST_OVERLAY drawn obj=1 ...         <- one line per mask placed
         headset: QUEST_SPEAK <the reply>               <- Android TTS speaks it
 
     ---- B: continuous conversation ---------------------------------
@@ -254,7 +255,8 @@ cat <<'STEPS'
       A: no "listening"        -> controller asleep, or headset off your face
       A: "too short"           -> held A under half a second
       A: no "calling qwen..."  -> snapshot missing: look at the object, speak again
-      A: "target=None"         -> Huawei could not pick one object; say it differently
+      A: "targets=[]"          -> Huawei could not pick an object; say it differently
+      A: "did not initialize"  -> a point missed its object; ask again, name them plainly
       A: "call failed"         -> Huawei/network/key problem (the line names it)
       B: no "QUEST_MODE"       -> B press not seen; wake the controller and press again
       B: "onset_dropped"       -> it was still speaking, or the socket is down
@@ -265,6 +267,8 @@ cat <<'STEPS'
                                   the planner answers track:null otherwise.
                                   OMNI_LIVE_TRACK=0 disables B-mode seeding
       masks but nothing shown  -> check headset: QUEST_OVERLAY lines (they say why)
+      one mask for 2 objects   -> old build installed: the previous renderer merged
+                                  every mask into one cyan shape. Rebuild, --install
       white/blank square       -> old build installed: rebuild in Unity, then --install
       neither mode connects    -> USB: app must be built for 127.0.0.1 (see above)
 

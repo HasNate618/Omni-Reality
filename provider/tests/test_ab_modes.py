@@ -220,17 +220,18 @@ class LiveSeedTests(unittest.IsolatedAsyncioTestCase):
         state.tracking = bridge
         turn = self.make_turn(state)
 
+        targets = [{"type": "image_point", "u": 0.4, "v": 0.6, "label": "laptop"},
+                   {"type": "image_point", "u": 0.1, "v": 0.2, "label": "mug"}]
         planner = mock.AsyncMock()
-        planner.plan.return_value = mock.Mock(
-            tracking_target={"type": "image_point", "u": 0.4, "v": 0.6})
+        planner.plan.return_value = mock.Mock(tracking_targets=targets)
         with mock.patch("coordinator.planner.YibuPlanner", return_value=planner):
             await live_turn._seed_tracking(state, turn)
 
         self.assertEqual(planner.plan.await_args.kwargs["jpeg"], b"jpeg-bytes")
         self.assertEqual(planner.plan.await_args.kwargs["pcm"], b"\x00\x00")
         bridge.history.wait_for.assert_awaited_once_with("frame-1")
-        bridge.seed.assert_awaited_once_with(
-            frame, {"type": "image_point", "u": 0.4, "v": 0.6}, 3)
+        # B-mode seeds every object the model picked, in one call.
+        bridge.seed.assert_awaited_once_with(frame, targets, 3)
 
     async def test_stale_generation_never_seeds(self):
         state = CoordinatorState(planner=Planner())
@@ -240,7 +241,8 @@ class LiveSeedTests(unittest.IsolatedAsyncioTestCase):
         state.tracking = bridge
         turn = self.make_turn(state)
         planner = mock.AsyncMock()
-        planner.plan.return_value = mock.Mock(tracking_target={"u": 0.1, "v": 0.1})
+        planner.plan.return_value = mock.Mock(
+            tracking_targets=[{"type": "image_point", "u": 0.1, "v": 0.1, "label": None}])
         with mock.patch("coordinator.planner.YibuPlanner", return_value=planner):
             await live_turn._seed_tracking(state, turn)
         bridge.seed.assert_not_awaited()

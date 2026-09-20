@@ -36,6 +36,7 @@ SAY_MODEL_ERROR = "Sorry, I couldn't reach the model. Try again."
 SAY_NO_TARGET = "I couldn't work out where to put that. Point at it or look closer."
 SAY_PLACED_DEFAULT = "There it is."
 SAY_TRACKING_DEFAULT = "Tracking that now."
+SAY_TRACKING_MANY = "Tracking those now."
 
 # PlacementAck reason → spoken honesty copy (spec §9).
 REJECT_COPY = {
@@ -82,7 +83,8 @@ def start_turn(state: CoordinatorState, send: Send, utterance_id: str) -> asynci
     state.turn_id += 1
     turn_id = state.turn_id
     if state.tracking is not None:
-        # Single-target mode: newest utterance replaces a pending selection.
+        # Newest utterance replaces the whole pending selection, not just one
+        # object of it: a new request re-picks everything to track.
         for old_id in list(state.turn_tasks):
             cancel_turn(state, old_id)
     task = asyncio.create_task(_run_turn(state, send, turn_id, utterance_id, buf))
@@ -281,13 +283,13 @@ async def _run_tracking_turn(state, turn_id, utterance_id, buf):
         ), bridge.history.seconds)
         if turn_id in state.cancelled_turns or generation != bridge.generation:
             return
+        targets = plan.tracking_targets
         logger.info(
-            "turn %d: model replied in %d ms; heard=%r target=%s say=%r",
-            turn_id, plan.latency_ms, plan.heard, plan.tracking_target, plan.text,
+            "turn %d: model replied in %d ms; heard=%r targets=%s say=%r",
+            turn_id, plan.latency_ms, plan.heard, targets, plan.text,
         )
-        target = plan.tracking_target
-        if target is None:
-            raise TrackingError("I couldn't identify one target. Look at it and try again.")
+        if not targets:
+            raise TrackingError("I couldn't identify what to track. Look at it and try again.")
         # Seed first, and strictly: SAM 2's exact-frame handoff depends on no
         # other task interleaving here, so synthesis must not overlap it.
         # Said only after seeding, so we never claim to be tracking something
@@ -300,9 +302,9 @@ async def _run_tracking_turn(state, turn_id, utterance_id, buf):
         # mask and the voice is closed by the speech cache: canned lines are
         # warmed at startup and come back without a network call.
         seeded_at = time.monotonic()
-        await bridge.seed(frame, target, generation)
+        await bridge.seed(frame, targets, generation)
         seeded_ms = int((time.monotonic() - seeded_at) * 1000)
-        line = plan.text or SAY_TRACKING_DEFAULT
+        line = plan.text or (SAY_TRACKING_MANY if len(targets) > 1 else SAY_TRACKING_DEFAULT)
         audio, _voice_gate = await _speak_audio(state, line, turn_id)
         logger.info(
             "turn %d: seed %d ms, then speech in %d ms (%s)",

@@ -82,17 +82,32 @@ Takeaways:
 - With no image the model may invent one. The planner adds no ops when no JPEG was sent, whatever the model says.
 - The model said "I've marked…" despite the prompt. The coordinator only speaks that line after an ACK `placed`, so the claim stays honest.
 
-### Single-object tracking selection
+### Object tracking selection
 
 With coordinator `--sam2-url`, `YibuPlanner(tracking=True)` reuses the same
 audited audio + JPEG HTTP call, with purpose `track-object`. The tracking prompt
-requests `{"heard":"...","say":"...","track":{"type":"image_point","u":0.5,"v":0.5}}`
-or `track:null`. It asks for one point inside the visible foreground object;
-coordinates are normalized top-left in the exact submitted JPEG. The parser
+requests `{"heard":"...","say":"...","track":[{"label":"laptop","type":"image_point","u":0.5,"v":0.5}]}`
+or `track:[]`. It asks for one point inside each visible foreground object the
+wearer named, one point per distinct object; coordinates are normalized top-left
+in the exact submitted JPEG. The parser
 rejects nonfinite, boolean, out-of-range, and non-point coordinates, strips
 model-supplied frame IDs, and accepts no target without an image and envelope.
+
+`PlanResult.tracking_targets` is a list. An unusable entry is dropped rather
+than failing the whole reply, so one bad point does not cost the objects listed
+beside it. A point within `MIN_TARGET_SEPARATION` (0.05 normalized) of an
+already-accepted one is the same object named twice and is dropped. The list is
+capped at `MAX_TRACKED_OBJECTS` (3), which is a SAM 2 frame-budget limit rather
+than a model one — see
+[object count sets the frame budget](omni-sam2-streaming.md#object-count-sets-the-frame-budget).
+A bare `track` object (the older single-object reply) is still accepted, and
+`PlanResult.tracking_target` still returns the first point for callers that
+handle only one. Each point's `label` is carried through to the headset so a
+mask can be named; it is never used to pick pixels.
+
 The coordinator owns snapshot identity and converts UVs to the existing SAM 2
-pixel-click protocol. Selection is called once per utterance, not per tracked
+pixel-click protocol, assigning `obj_id` 1..N and clicking all of them on the
+one selected frame. Selection is called once per utterance, not per tracked
 frame. This path emits tracking status/masks, not placement ACKs or success
 speech. Defaults remain `qwen3.8-omni-flash`, 256 requested output tokens, and
 the same env-only key/audit handling. See [Quest camera + push-to-talk setup](quest-audio-setup.md).

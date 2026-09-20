@@ -47,10 +47,10 @@ ops over LAN; Unity renders and ACKs. No model calls in these slices.
 ## Voice turn (slice 3, laptop side)
 
 **Tracking integration:** `--sam2-url ws://127.0.0.1:8766` with `--planner
-stub|yibu` opts into a separate single-object tracking turn. Quest's
+stub|yibu` opts into a separate object-tracking turn. Quest's
 `QuestStreamInput` sends real JPEGs and A-button push-to-talk PCM. The selected
-frame and Huawei point seed the existing SAM 2 click protocol; results return
-as `tracking_result` instead of spatial `scene_op`s. Follow
+frame and Huawei's points (up to 3) seed the existing SAM 2 click protocol;
+results return as `tracking_result` instead of spatial `scene_op`s. Follow
 [Quest camera + push-to-talk setup](quest-audio-setup.md); the frame contract
 lives in [omni-sam2-streaming.md](omni-sam2-streaming.md#quest--voice-automatic-initialization).
 The existing placement/ACK turn below remains the default without that flag.
@@ -184,14 +184,23 @@ restarts or the cable is unplugged, so re-run the script.
 ## Seeing the masks in the headset
 
 `QuestDemo/Assets/Spatial/TrackingMaskOverlay.cs` is the renderer that
-`TrackingResult.cs` expects. It creates itself at startup (no scene wiring),
-subscribes to `CoordinatorClient.TrackingResultReceived`, tints each
-`mask_b64` into one RGBA texture, and draws it on a quad built from the
-capture frame's intrinsics and pose, 1.5 m down the capture rays. The quad is
-world-locked to the capture pose, so it holds still while the wearer moves; it
-is a flat projection, exact along the capture ray and approximate off-axis.
-It hides itself on `tracking_status` `stopped`/`error` or after 2 s with no
-result. Without this component the masks arrive and are only logged
+`TrackingResult.cs` expects. It creates itself at startup (no scene wiring) and
+subscribes to `CoordinatorClient.TrackingResultReceived`.
+
+Each tracked object gets its own layer, keyed by `obj_id`: its `mask_b64` is
+tinted into its own RGBA texture and drawn on its own quad, built from the
+capture frame's intrinsics and pose. Colours come from `Palette` in the same
+order as `COLORS` in `sam2/sam2_ws_client.py`, so the webcam demo and the
+headset give one object the same colour. Depth is measured per object from that
+mask's own centroid, which is why the layers are separate: a laptop at 0.8 m and
+a poster at 3 m cannot share one plane. The model's `label`, when it gave one,
+floats over the mask.
+
+Each quad is world-locked to the capture pose, so it holds still while the
+wearer moves; it is a flat projection, exact along the capture ray and
+approximate off-axis. A layer hides when its object stops coming back, and all
+of them hide on `tracking_status` `stopped`/`error` or after 2 s with no result.
+Without this component the masks arrive and are only logged
 (`QUEST_TRACKING first mask ...`), which is what "nothing renders" looked like.
 
 ## How to verify

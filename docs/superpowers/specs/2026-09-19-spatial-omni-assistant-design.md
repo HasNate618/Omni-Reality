@@ -22,6 +22,19 @@ limit and object-tracking non-goal below. It uses tracking status/results
 instead of pretending a segmentation initialization is a world-placement ACK.
 The original spatial-mark mode retains its contract. Tracking wire rules,
 limits, and verification results live in `docs/omni-sam2-streaming.md`.
+
+### Amendment: multi-object targeting (2026-09-20)
+
+The tracking mode above is no longer single-object. One utterance selects up to
+3 objects, all clicked on the one selected frame so a single SAM 2 session holds
+them together, and each is drawn in the headset with its own colour, its own
+measured depth, and the model's name for it. The cap is a frame-budget limit,
+not a model limit: each object costs roughly +70 ms per tracked frame, so three
+fit the 333 ms that the default 3 fps stream allows and four do not. Everything
+else above stands — one Huawei call per utterance, the immutable selected JPEG,
+the bounded history and replay, and status/result events rather than placement
+ACKs. A new utterance replaces the whole selection, not one object of it.
+Measured timings and the wire contract stay in `docs/omni-sam2-streaming.md`.
 The setup walkthrough lives in `docs/quest-audio-setup.md`.
 
 ## 1. Product

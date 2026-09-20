@@ -2,7 +2,7 @@
 
 One bridge belongs to one Quest connection. A pinned seed and a bounded CPU
 JPEG history bridge the cloud latency; SAM 2 still sees ordinary ordered
-frames, with a single positive click on the first one.
+frames, with one positive click per selected object on the first one.
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ class VideoFrame:
         return self.envelope["sent_w"], self.envelope["sent_h"]
 
 
-def point_click(target: dict, frame: VideoFrame) -> dict:
+def point_click(target: dict, frame: VideoFrame, obj_id: int = 1) -> dict:
     if not isinstance(target, dict) or target.get("type") != "image_point":
         raise TrackingError("No unambiguous image point was selected. Look at the object and try again.")
     uv = [target.get("u"), target.get("v")]
@@ -56,7 +56,7 @@ def point_click(target: dict, frame: VideoFrame) -> dict:
     x, y = spec_uv_to_pixel_center(*uv, *frame.size)
     w, h = frame.size
     # Normalized edge coordinates map to half-pixels; clamp only those edges.
-    return {"x": max(0.0, min(w - 1.0, x)), "y": max(0.0, min(h - 1.0, y)), "obj_id": 1}
+    return {"x": max(0.0, min(w - 1.0, x)), "y": max(0.0, min(h - 1.0, y)), "obj_id": obj_id}
 
 
 class FrameHistory:
@@ -132,6 +132,7 @@ class Sam2Bridge:
         self.turn_id = 0
         self.utterance_id = None
         self.epoch = None
+        self.labels: dict[int, str | None] = {}
 
     async def stop(self):
         self.generation += 1
@@ -155,19 +156,27 @@ class Sam2Bridge:
         await self.status("selecting", "Selecting the requested object…")
         return self.generation
 
-    async def seed(self, frame: VideoFrame, target: dict, generation: int):
+    async def seed(self, frame: VideoFrame, targets: list[dict], generation: int):
         if generation != self.generation:
             return
-        click = point_click(target, frame)
+        if not targets:
+            raise TrackingError("No object was selected. Look at it and try again.")
+        # obj_id 1..N in the model's own order, all clicked on this one frame.
+        clicks = [point_click(target, frame, obj_id)
+                  for obj_id, target in enumerate(targets, start=1)]
         if time.monotonic() - frame.received > self.history.seconds:
             raise TrackingError("The selected camera frame expired. Try again.")
         if self.epoch != frame.envelope["stage_epoch"]:
             raise TrackingError("Tracking origin changed. Look at the object and try again.")
         self.history.successors(frame.sequence)  # fail before opening the GPU session
-        logger.info("SAM2 seed frame_id=%s x=%.1f y=%.1f obj_id=1", frame.id, click["x"], click["y"])
-        self.task = asyncio.create_task(self._run(frame, click, generation))
+        self.labels = {click["obj_id"]: target.get("label")
+                       for click, target in zip(clicks, targets)}
+        logger.info("SAM2 seed frame_id=%s objects=%d [%s]", frame.id, len(clicks), " ".join(
+            "%d:%s@(%.1f,%.1f)" % (c["obj_id"], self.labels.get(c["obj_id"]) or "?", c["x"], c["y"])
+            for c in clicks))
+        self.task = asyncio.create_task(self._run(frame, clicks, generation))
 
-    async def _run(self, seed: VideoFrame, click: dict, generation: int):
+    async def _run(self, seed: VideoFrame, clicks: list, generation: int):
         import websockets
 
         connect = self.connector or websockets.connect
@@ -180,7 +189,7 @@ class Sam2Bridge:
                 catching_up = True
                 started = time.monotonic()
                 while generation == self.generation:
-                    response = await self._exchange(ws, frame, [click] if frame is seed else [])
+                    response = await self._exchange(ws, frame, clicks if frame is seed else [])
                     if generation != self.generation:
                         return
                     if frame is seed:
@@ -221,11 +230,15 @@ class Sam2Bridge:
 
     async def _send_result(self, frame: VideoFrame, seed: VideoFrame,
                            response: dict, generation: int) -> None:
+        # SAM 2 knows obj_ids, not names; re-attach what the model called each
+        # one so the headset can label the mask it draws.
+        objects = [{**obj, "label": self.labels.get(obj.get("obj_id"))}
+                   for obj in response["objects"]]
         await self.send("tracking_result", self.turn_id, {
             "frame_id": frame.id, "seed_frame_id": seed.id,
             "generation": generation, "stage_epoch": frame.envelope["stage_epoch"],
             "width": frame.size[0], "height": frame.size[1],
-            "objects": response["objects"], "envelope": frame.envelope,
+            "objects": objects, "envelope": frame.envelope,
         }, self.utterance_id)
 
     async def _exchange(self, ws, frame: VideoFrame, clicks: list) -> dict:
@@ -246,6 +259,10 @@ class Sam2Bridge:
         # unambiguous correlation, retaining compatibility with the webcam demo.
         if response.get("frame_id", frame.id) != frame.id:
             raise TrackingError("SAM 2 returned a result for the wrong frame.")
-        if clicks and not any(obj.get("obj_id") == 1 and obj.get("mask_b64") for obj in response["objects"]):
-            raise TrackingError("SAM 2 did not initialize the selected object.")
+        if clicks:
+            started_ids = {obj.get("obj_id") for obj in response["objects"] if obj.get("mask_b64")}
+            missing = [c["obj_id"] for c in clicks if c["obj_id"] not in started_ids]
+            if missing:
+                raise TrackingError("SAM 2 did not initialize %d of the %d selected objects."
+                                    % (len(missing), len(clicks)))
         return response

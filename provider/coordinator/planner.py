@@ -10,8 +10,9 @@ turn loop never sees prompts or raw model output, only a PlanResult.
   ops is Member A's lane; when `spatial_ops.parse_model_reply(text) ->
   (say, heard, ops)` exists it is used, otherwise a minimal JSON extractor stands in.
 
-YibuPlanner(tracking=True) instead requests one interior image point in
-PlanResult.tracking_target; frame identity remains owned by the coordinator.
+YibuPlanner(tracking=True) instead requests one interior image point per object
+the wearer named (up to MAX_TRACKED_OBJECTS) in PlanResult.tracking_targets;
+frame identity remains owned by the coordinator.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ import logging
 import math
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from jsonschema import ValidationError
@@ -36,6 +37,15 @@ logger = logging.getLogger(__name__)
 MAX_OPS_PER_TURN = 3
 _FRAME_TARGETS = {"capture_hint", "pointing", "image_point", "image_box"}
 
+# SAM 2 pays memory attention per object, so each extra tracked object costs
+# roughly +70 ms per frame (measured; docs/omni-sam2-streaming.md). Three fit the
+# 333 ms budget at the default 3 fps stream; four do not, and past the budget the
+# post-seed catch-up starts failing.
+MAX_TRACKED_OBJECTS = 3
+# Two requested points closer than this (normalised distance) are the same
+# object named twice, which would waste a whole tracker slot on a duplicate.
+MIN_TARGET_SEPARATION = 0.05
+
 
 @dataclass
 class PlanResult:
@@ -45,7 +55,12 @@ class PlanResult:
     heard: str | None = None
     audit_id: str | None = None
     proposed_op_count: int = 0  # before validation/capping
-    tracking_target: dict | None = None
+    tracking_targets: list[dict] = field(default_factory=list)
+
+    @property
+    def tracking_target(self) -> dict | None:
+        """First selected point, for callers that only handle one object."""
+        return self.tracking_targets[0] if self.tracking_targets else None
 
 
 class Planner(Protocol):
@@ -196,54 +211,80 @@ Do not use JSON, markdown, drawing instructions, or spatial operations."""
 
 
 TRACKING_PROMPT = """You hear a user's recorded request and see one Quest camera image.
-Select the single visible object the user asks to track/find. Reply ONLY with:
+Select every visible object the user asks to track/find, at most 3. Reply ONLY with:
 {"heard":"the user's words", "say":"short clarification if needed",
- "label":"the object you picked, two words",
- "track":{"type":"image_point","u":0.5,"v":0.5}}
+ "track":[{"label":"the object, two words","type":"image_point","u":0.5,"v":0.5}]}
 u is left-to-right and v is top-to-bottom, given as FRACTIONS of the image
 between 0 and 1 (e.g. the centre is u=0.5, v=0.5). Never answer in pixels:
 "u":320 is wrong, "u":0.5 is right.
 Choose a point INSIDE the object's visible solid surface, not background,
 a hole, a shadow, or merely the centre of its bounding box. For a laptop,
-prefer the middle of its screen or keyboard. Return "track":null if no image
-is provided, the object is absent, the request isn't to select an object,
+prefer the middle of its screen or keyboard. Return "track":[] if no image
+is provided, the objects are absent, the request isn't to select an object,
 or you cannot determine which instance is meant. Do not invent a target.
-Return one point only, not a box, world coordinates, or drawing ops.
+Give ONE point per distinct object and never two points on the same object.
+Return points only, not boxes, world coordinates, or drawing ops.
 Never claim tracking or rendering has started; the application does that later."""
 
 
 def parse_tracking_reply(
     text: str, width: int | None = None, height: int | None = None
-) -> tuple[str, str | None, dict | None]:
-    """(say, heard, target). The point may come back as 0..1 fractions or as
-    pixels of the image we sent; the model uses both despite the prompt, and a
-    rejected point means no tracking at all."""
+) -> tuple[str, str | None, list[dict]]:
+    """(say, heard, targets). One entry per object the model selected, capped at
+    MAX_TRACKED_OBJECTS. An unusable entry is dropped rather than failing the
+    whole reply, so one bad point does not cost the objects beside it."""
     obj = _extract_json_object(text) or {}
     say = obj.get("say") if isinstance(obj.get("say"), str) else ""
     heard = obj.get("heard") if isinstance(obj.get("heard"), str) else None
-    label = obj.get("label") if isinstance(obj.get("label"), str) else None
-    if label:
+    raw = obj.get("track")
+    # A bare object is the older single-object reply shape; still accepted.
+    entries = raw if isinstance(raw, list) else [raw]
+    # A top-level "label" belongs to the single-object shape.
+    fallback_label = obj.get("label") if isinstance(obj.get("label"), str) else None
+    targets: list[dict] = []
+    for entry in entries:
+        point = _one_point(entry, width, height, fallback_label)
+        if point is None:
+            continue
+        if any(math.dist((point["u"], point["v"]), (kept["u"], kept["v"]))
+               < MIN_TARGET_SEPARATION for kept in targets):
+            logger.info("dropping duplicate point at (%.3f, %.3f)", point["u"], point["v"])
+            continue
+        targets.append(point)
+        if len(targets) == MAX_TRACKED_OBJECTS:
+            break
+    if targets:
         # Names what the model believes it selected. A mask on the wrong thing
         # is then either its mistake (wrong label) or SAM 2's (right label).
-        logger.info("model selected %r", label[:40])
-    target = obj.get("track")
-    if not isinstance(target, dict) or target.get("type") != "image_point":
-        return say, heard, None
-    coords = [target.get("u"), target.get("v")]
+        logger.info("model selected %s", ", ".join(
+            "%r at (%.2f, %.2f)" % ((t["label"] or "?")[:40], t["u"], t["v"]) for t in targets))
+    return say, heard, targets
+
+
+def _one_point(
+    entry: object, width: int | None, height: int | None, fallback_label: str | None = None
+) -> dict | None:
+    """Validate one requested point. The coordinates may come back as 0..1
+    fractions or as pixels of the image we sent; the model uses both despite
+    the prompt, and a rejected point means that object is not tracked."""
+    if not isinstance(entry, dict) or entry.get("type") != "image_point":
+        return None
+    coords = [entry.get("u"), entry.get("v")]
     if any(isinstance(n, bool) or not isinstance(n, (int, float)) or not math.isfinite(n)
            or n < 0 for n in coords):
-        return say, heard, None
+        return None
     u, v = float(coords[0]), float(coords[1])
     if u > 1 or v > 1:
         if not width or not height:
             logger.info("model returned pixels (%s, %s) but the image size is unknown", u, v)
-            return say, heard, None
+            return None
         if u > width or v > height:
             logger.info("model point (%s, %s) is outside the %dx%d image", u, v, width, height)
-            return say, heard, None
+            return None
         logger.info("model returned pixels (%.0f, %.0f); normalised to the %dx%d image", u, v, width, height)
         u, v = u / width, v / height
-    return say, heard, {"type": "image_point", "u": u, "v": v}
+    label = entry.get("label") if isinstance(entry.get("label"), str) else fallback_label
+    return {"type": "image_point", "u": u, "v": v, "label": label}
 
 
 def _extract_json_object(text: str) -> dict | None:
@@ -381,7 +422,7 @@ class YibuPlanner:
         if history:
             prompt += "\nRecent turns:\n" + history
         if jpeg is None:
-            prompt += "\nNo camera image this turn: " + ("return track:null." if self.tracking else "add no ops.")
+            prompt += "\nNo camera image this turn: " + ("return track:[]." if self.tracking else "add no ops.")
         messages = build_voice_messages(
             prompt,
             wav=pcm_to_wav_bytes(pcm),
@@ -403,14 +444,14 @@ class YibuPlanner:
                 raise
             latency_ms = int((time.monotonic() - started) * 1000)
             logger.debug("%s raw reply: %s", self.model, text[:400].replace("\n", " "))
-            say, heard, target = parse_tracking_reply(
+            say, heard, targets = parse_tracking_reply(
                 text,
                 envelope.get("sent_w") if envelope else None,
                 envelope.get("sent_h") if envelope else None,
             )
             return PlanResult(ops=[], text=say, heard=heard, latency_ms=latency_ms,
                               audit_id=record.get("call_id"),
-                              tracking_target=target if jpeg is not None and envelope else None)
+                              tracking_targets=targets if jpeg is not None and envelope else [])
         frame_id = envelope["frame_id"] if envelope and jpeg is not None else None
         if self._execute_fn is None and self._jobs is None:
             # Legacy single-call path: no tool context bound (offline/tests).

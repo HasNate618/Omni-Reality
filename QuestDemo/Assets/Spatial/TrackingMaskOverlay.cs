@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Meta.XR;
 using UnityEngine;
 
@@ -8,38 +9,51 @@ using UnityEngine;
 /// tracking payload was waiting for) and paints each mask onto a quad placed
 /// in the capture camera's frustum, using that frame's pose and intrinsics.
 ///
-/// The quad is world-locked at <see cref="Distance"/> metres from where the
-/// camera was when the frame was taken, so it sits still while the wearer
-/// moves. It is a flat projection, not per-pixel depth: correct along the
-/// capture ray, approximate off to the side.
+/// One tracked object gets one quad, so each mask is tinted its own colour and
+/// sits at its own measured depth: a laptop at 0.8 m and a poster at 3 m both
+/// land on their object, which a single shared plane cannot do.
+///
+/// Each quad is world-locked at its object's distance from where the camera was
+/// when the frame was taken, so it sits still while the wearer moves. It is a
+/// flat projection, not per-pixel depth: correct along the capture ray,
+/// approximate off to the side.
 ///
 /// Creates itself at startup; no scene wiring needed.
 /// </summary>
 public class TrackingMaskOverlay : MonoBehaviour
 {
-    /// <summary>Metres from the capture pose to the mask plane.</summary>
+    /// <summary>Fallback metres from the capture pose to a mask plane.</summary>
     public float Distance = 1.5f;
-    public Color MaskColor = new Color(0.24f, 0.86f, 1f, 0.55f);
-    /// <summary>Hide the mask if no result arrives for this long.</summary>
+
+    /// <summary>
+    /// Mask tints by object, indexed <c>obj_id % Palette.Length</c>. Same order
+    /// as COLORS in sam2/sam2_ws_client.py, so the webcam demo and the headset
+    /// give the same object the same colour.
+    /// </summary>
+    public Color[] Palette =
+    {
+        new Color(0.13f, 1f, 0.13f, 0.55f),   // green
+        new Color(0.24f, 0.51f, 1f, 0.55f),   // blue
+        new Color(1f, 0.24f, 0.24f, 0.55f),   // red
+        new Color(1f, 0.93f, 0.16f, 0.55f),   // yellow
+        new Color(1f, 0.31f, 1f, 0.55f),      // magenta
+    };
+
+    /// <summary>Float the model's name for each object over its mask.</summary>
+    public bool ShowLabels = true;
+
+    /// <summary>Hide the masks if no result arrives for this long.</summary>
     public float StaleSeconds = 2f;
 
     const byte MaskThreshold = 127;
 
     SpatialRuntime _spatial;
     CoordinatorClient _subscribed;
-    GameObject _quad;
-    MeshFilter _filter;
-    MeshRenderer _renderer;
-    Material _material;
-    Texture2D _decoded;   // raw PNG from the coordinator
-    Texture2D _display;   // tinted RGBA shown on the quad
-    Color32[] _pixels;
-    int _litPixels;
-    float _centreU = -1f;
-    float _centreV = -1f;
-    string _depthSource = "default";
-    float _lastDepth;
+    Texture2D _decoded;   // shared scratch for the raw PNG from the coordinator
+    readonly Dictionary<int, MaskLayer> _layers = new Dictionary<int, MaskLayer>();
+    readonly HashSet<int> _seen = new HashSet<int>();
     EnvironmentRaycastManager _raycast;
+    Shader _shader;
     float _lastResult;
     bool _visible;
 
@@ -68,13 +82,18 @@ public class TrackingMaskOverlay : MonoBehaviour
         if (_visible && Time.realtimeSinceStartup - _lastResult > StaleSeconds)
         {
             Debug.Log("QUEST_OVERLAY no result for " + StaleSeconds + " s; hiding");
-            Show(false);
+            HideAll();
         }
     }
 
     void OnDestroy()
     {
         Unsubscribe();
+        foreach (MaskLayer layer in _layers.Values)
+            layer.Dispose();
+        _layers.Clear();
+        if (_decoded != null)
+            Destroy(_decoded);
     }
 
     void Unsubscribe()
@@ -92,7 +111,7 @@ public class TrackingMaskOverlay : MonoBehaviour
             return;
         Debug.Log("QUEST_OVERLAY status " + status.state + ": " + status.text);
         if (status.state == "stopped" || status.state == "error")
-            Show(false);
+            HideAll();
     }
 
     /// <summary>Main thread: CoordinatorClient pumps inbound messages in Tick.</summary>
@@ -103,7 +122,7 @@ public class TrackingMaskOverlay : MonoBehaviour
             if (result == null || result.objects == null || result.objects.Length == 0)
             {
                 Debug.Log("QUEST_OVERLAY result with no objects; hiding");
-                Show(false);
+                HideAll();
                 return;
             }
             Debug.Log("QUEST_OVERLAY result frame=" + result.frame_id + " objects=" + result.objects.Length
@@ -112,29 +131,41 @@ public class TrackingMaskOverlay : MonoBehaviour
             if (payload == null || payload.envelope == null || !payload.envelope.IsUsable)
             {
                 Debug.LogWarning("QUEST_OVERLAY result without usable envelope; not drawing");
-                Show(false);
+                HideAll();
                 return;
             }
-            if (!Paint(result))
+
+            _seen.Clear();
+            for (int i = 0; i < result.objects.Length; i++)
+            {
+                TrackingObject obj = result.objects[i];
+                if (obj == null || string.IsNullOrEmpty(obj.mask_b64))
+                    continue;
+                MaskLayer layer = LayerFor(obj.obj_id);
+                if (!Paint(layer, obj))
+                {
+                    layer.Show(false);
+                    continue;
+                }
+                Place(layer, payload.envelope, obj.label);
+                layer.Show(true);
+                _seen.Add(obj.obj_id);
+            }
+            // An object that stopped coming back is gone, not frozen in place.
+            foreach (KeyValuePair<int, MaskLayer> entry in _layers)
+                if (!_seen.Contains(entry.Key))
+                    entry.Value.Show(false);
+
+            if (_seen.Count == 0)
+            {
+                // All-empty masks are SAM 2 losing the objects, not a draw bug.
+                Debug.Log("QUEST_OVERLAY no mask could be drawn; hiding");
+                _visible = false;
                 return;
-            Place(payload.envelope);
-            Show(true);
+            }
+            _visible = true;
             _lastResult = Time.realtimeSinceStartup;
-            Transform head = Camera.main != null ? Camera.main.transform : null;
-            MaskEnvelope e = payload.envelope;
-            Debug.Log("QUEST_OVERLAY geometry: sent=" + e.sent_w + "x" + e.sent_h
-                      + " image=" + e.image_w + "x" + e.image_h
-                      + " crop=" + (e.crop != null ? e.crop.sx + "," + e.crop.sy + "," + e.crop.tx + "," + e.crop.ty : "none")
-                      + " fx=" + e.intrinsics.fx.ToString("F1") + " cx=" + e.intrinsics.cx.ToString("F1")
-                      + " cy=" + e.intrinsics.cy.ToString("F1")
-                      + " depth=" + _lastDepth.ToString("F2") + "m from " + _depthSource
-                      + " mask_centre=" + _centreU.ToString("F0") + "," + _centreV.ToString("F0"));
-            Debug.Log("QUEST_OVERLAY drawn: texture=" + (_display != null ? _display.width + "x" + _display.height : "none")
-                      + " lit=" + _litPixels + "/" + (_pixels != null ? _pixels.Length : 0)
-                      + " quad_at=" + _quad.transform.position.ToString("F2")
-                      + " head_at=" + (head != null ? head.position.ToString("F2") : "?")
-                      + " dist=" + (head != null ? Vector3.Distance(head.position, _quad.transform.position).ToString("F2") : "?")
-                      + " active=" + _quad.activeSelf);
+            LogDrawn(payload.envelope);
         }
         catch (Exception e)
         {
@@ -142,87 +173,102 @@ public class TrackingMaskOverlay : MonoBehaviour
         }
     }
 
-    /// <summary>Decode every object's mask into one tinted RGBA texture.</summary>
-    bool Paint(TrackingResult result)
+    void LogDrawn(MaskEnvelope e)
     {
-        EnsureQuad();
-        bool any = false;
-        double sumX = 0, sumY = 0;
-        _centreU = _centreV = -1f;
-        for (int i = 0; i < result.objects.Length; i++)
+        Transform head = Camera.main != null ? Camera.main.transform : null;
+        Debug.Log("QUEST_OVERLAY geometry: sent=" + e.sent_w + "x" + e.sent_h
+                  + " image=" + e.image_w + "x" + e.image_h
+                  + " crop=" + (e.crop != null ? e.crop.sx + "," + e.crop.sy + "," + e.crop.tx + "," + e.crop.ty : "none")
+                  + " fx=" + e.intrinsics.fx.ToString("F1") + " cx=" + e.intrinsics.cx.ToString("F1")
+                  + " cy=" + e.intrinsics.cy.ToString("F1"));
+        foreach (int objId in _seen)
         {
-            TrackingObject obj = result.objects[i];
-            if (obj == null || string.IsNullOrEmpty(obj.mask_b64))
-                continue;
-            byte[] png = Convert.FromBase64String(obj.mask_b64);
-            if (_decoded == null)
-                _decoded = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-            if (!_decoded.LoadImage(png, false))
-                continue;
+            MaskLayer layer = _layers[objId];
+            Debug.Log("QUEST_OVERLAY drawn obj=" + objId
+                      + " label=" + (string.IsNullOrEmpty(layer.LabelText) ? "none" : layer.LabelText)
+                      + " lit=" + layer.LitPixels + "/" + (layer.Pixels != null ? layer.Pixels.Length : 0)
+                      + " centre=" + layer.CentreU.ToString("F0") + "," + layer.CentreV.ToString("F0")
+                      + " depth=" + layer.Depth.ToString("F2") + "m from " + layer.DepthSource
+                      + " quad_at=" + layer.Quad.transform.position.ToString("F2")
+                      + " dist=" + (head != null
+                          ? Vector3.Distance(head.position, layer.Quad.transform.position).ToString("F2") : "?"));
+        }
+    }
 
-            int w = _decoded.width;
-            int h = _decoded.height;
-            if (_display == null || _display.width != w || _display.height != h)
-            {
-                if (_display != null)
-                    Destroy(_display);
-                _display = new Texture2D(w, h, TextureFormat.RGBA32, false);
-                _display.wrapMode = TextureWrapMode.Clamp;
-                _pixels = new Color32[w * h];
-                _material.mainTexture = _display;
-            }
-            Color32[] src = _decoded.GetPixels32();
-            Color32 tint = MaskColor;
-            if (!any)
-            {
-                Array.Clear(_pixels, 0, _pixels.Length);
-                _litPixels = 0;
-            }
-            for (int p = 0; p < src.Length && p < _pixels.Length; p++)
-            {
-                if (src[p].r > MaskThreshold)
-                {
-                    _pixels[p] = tint;
-                    _litPixels++;
-                    sumX += p % w;
-                    sumY += p / w;
-                }
-            }
-            any = true;
-        }
-        if (!any)
+    MaskLayer LayerFor(int objId)
+    {
+        MaskLayer layer;
+        if (_layers.TryGetValue(objId, out layer))
+            return layer;
+        layer = new MaskLayer(objId, ColorFor(objId), ShaderForMasks(), ShowLabels);
+        _layers[objId] = layer;
+        return layer;
+    }
+
+    Color ColorFor(int objId)
+    {
+        if (Palette == null || Palette.Length == 0)
+            return new Color(0.24f, 0.86f, 1f, 0.55f);
+        // Mirrors COLORS[obj_id % len(COLORS)] in sam2/sam2_ws_client.py.
+        int index = objId % Palette.Length;
+        if (index < 0)
+            index += Palette.Length;
+        return Palette[index];
+    }
+
+    /// <summary>Decode one object's mask PNG into its own tinted RGBA texture.</summary>
+    bool Paint(MaskLayer layer, TrackingObject obj)
+    {
+        byte[] png = Convert.FromBase64String(obj.mask_b64);
+        if (_decoded == null)
+            _decoded = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+        if (!_decoded.LoadImage(png, false))
+            return false;
+
+        layer.Resize(_decoded.width, _decoded.height);
+        Color32[] src = _decoded.GetPixels32();
+        Color32[] pixels = layer.Pixels;
+        Color32 tint = layer.Tint;
+        Array.Clear(pixels, 0, pixels.Length);
+        int lit = 0;
+        double sumX = 0, sumY = 0;
+        int w = _decoded.width;
+        int count = Math.Min(src.Length, pixels.Length);
+        for (int p = 0; p < count; p++)
         {
-            Debug.Log("QUEST_OVERLAY no mask could be decoded; hiding");
-            Show(false);
+            if (src[p].r <= MaskThreshold)
+                continue;
+            pixels[p] = tint;
+            lit++;
+            sumX += p % w;
+            sumY += p / w;
+        }
+        layer.LitPixels = lit;
+        if (lit == 0)
+        {
+            layer.CentreU = layer.CentreV = -1f;
             return false;
         }
-        if (_litPixels == 0)
-        {
-            // An all-empty mask is SAM 2 losing the object, not a draw bug.
-            Debug.Log("QUEST_OVERLAY mask is empty (0 lit pixels); hiding");
-            Show(false);
-            return false;
-        }
-        _centreU = (float)(sumX / _litPixels);
-        _centreV = (float)(sumY / _litPixels);
-        _display.SetPixels32(_pixels);
-        _display.Apply(false);
+        layer.CentreU = (float)(sumX / lit);
+        layer.CentreV = (float)(sumY / lit);
+        layer.Display.SetPixels32(pixels);
+        layer.Display.Apply(false);
         return true;
     }
 
     /// <summary>
     /// Build the quad in the capture camera's frame: each image corner becomes
-    /// a ray through the intrinsics, taken out to Distance metres.
+    /// a ray through the intrinsics, taken out to this object's depth.
     /// </summary>
-    void Place(MaskEnvelope env)
+    void Place(MaskLayer layer, MaskEnvelope env, string label)
     {
-        float d = _lastDepth = DepthFor(env);   // one raycast per result
+        float d = layer.Depth = DepthFor(layer, env);   // one raycast per object
         Vector3 tl = Unproject(0, 0, env, d);
         Vector3 tr = Unproject(env.sent_w, 0, env, d);
         Vector3 bl = Unproject(0, env.sent_h, env, d);
         Vector3 br = Unproject(env.sent_w, env.sent_h, env, d);
 
-        var mesh = _filter.mesh;
+        var mesh = layer.Filter.mesh;
         mesh.Clear();
         mesh.vertices = new[] { tl, tr, bl, br };
         // Image row 0 is the top; LoadImage puts it at v = 1.
@@ -231,9 +277,11 @@ public class TrackingMaskOverlay : MonoBehaviour
         mesh.triangles = new[] { 0, 1, 2, 2, 1, 3, 2, 1, 0, 3, 1, 2 };
         mesh.RecalculateBounds();
 
-        _quad.transform.SetPositionAndRotation(
+        layer.Quad.transform.SetPositionAndRotation(
             new Vector3(env.pose.px, env.pose.py, env.pose.pz),
             new Quaternion(env.pose.qx, env.pose.qy, env.pose.qz, env.pose.qw));
+        // Slightly in front of the mask plane so the text never z-fights it.
+        layer.SetLabel(label, Unproject(layer.CentreU, layer.CentreV, env, d) * 0.97f);
     }
 
     /// <summary>
@@ -250,13 +298,13 @@ public class TrackingMaskOverlay : MonoBehaviour
     }
 
     /// <summary>
-    /// Distance to the mask plane. The capture-time depth hit is what the
-    /// wearer was actually looking at, so the plane sits on the object instead
-    /// of a guessed 1.5 m, which is what makes a flat overlay line up.
+    /// Distance to this object's mask plane. The capture-time depth hit is what
+    /// the wearer was actually looking at, so the plane sits on the object
+    /// instead of a guessed 1.5 m, which is what makes a flat overlay line up.
     /// </summary>
-    float DepthFor(MaskEnvelope env)
+    float DepthFor(MaskLayer layer, MaskEnvelope env)
     {
-        _depthSource = "default";
+        layer.DepthSource = "default";
         if (env.world_hint != null && env.world_hint.IsSet && env.pose != null)
         {
             var hit = new Vector3(env.world_hint.px, env.world_hint.py, env.world_hint.pz);
@@ -264,28 +312,28 @@ public class TrackingMaskOverlay : MonoBehaviour
             float measured = Vector3.Distance(hit, eye);
             if (measured > 0.25f && measured < 5f)
             {
-                _depthSource = "world_hint";
+                layer.DepthSource = "world_hint";
                 return measured;
             }
         }
-        float scanned = DepthAtMaskCentre(env);
+        float scanned = DepthAtMaskCentre(layer, env);
         if (scanned > 0f)
         {
-            _depthSource = "depth raycast";
+            layer.DepthSource = "depth raycast";
             return scanned;
         }
         return Mathf.Max(0.2f, Distance);
     }
 
     /// <summary>
-    /// Distance to whatever the mask's centre points at, via the environment
+    /// Distance to whatever this mask's centre points at, via the environment
     /// depth raycast. Tracking snapshots carry no world_hint (no surface hit is
     /// required to segment), so without this the plane sits at a guessed
     /// distance and the overlay slides off the object as the wearer moves.
     /// </summary>
-    float DepthAtMaskCentre(MaskEnvelope env)
+    float DepthAtMaskCentre(MaskLayer layer, MaskEnvelope env)
     {
-        if (_centreU < 0f)
+        if (layer.CentreU < 0f)
             return 0f;
         if (_raycast == null)
             _raycast = FindAnyObjectByType<EnvironmentRaycastManager>();
@@ -293,7 +341,7 @@ public class TrackingMaskOverlay : MonoBehaviour
             return 0f;
         var origin = new Vector3(env.pose.px, env.pose.py, env.pose.pz);
         var rotation = new Quaternion(env.pose.qx, env.pose.qy, env.pose.qz, env.pose.qw);
-        Vector3 local = Unproject(_centreU, _centreV, env, 1f);
+        Vector3 local = Unproject(layer.CentreU, layer.CentreV, env, 1f);
         var ray = new Ray(origin, rotation * local.normalized);
         EnvironmentRaycastHit hit;
         if (_raycast.Raycast(ray, out hit, 5f) && hit.status == EnvironmentRaycastHitStatus.Hit)
@@ -305,23 +353,19 @@ public class TrackingMaskOverlay : MonoBehaviour
         return 0f;
     }
 
-    void EnsureQuad()
+    void HideAll()
     {
-        if (_quad != null)
-            return;
-        _quad = new GameObject("TrackingMaskQuad");
-        _quad.transform.SetParent(null);
-        _filter = _quad.AddComponent<MeshFilter>();
-        _filter.mesh = new Mesh { name = "TrackingMask" };
-        _renderer = _quad.AddComponent<MeshRenderer>();
-        _renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-        _renderer.receiveShadows = false;
-        _material = new Material(FindShader());
-        _material.color = Color.white;   // tint lives in the texture
-        _renderer.sharedMaterial = _material;
-        _quad.SetActive(false);
-        Debug.Log("QUEST_OVERLAY quad created, shader=" + _material.shader.name
-                  + " supported=" + _material.shader.isSupported);
+        _visible = false;
+        _seen.Clear();
+        foreach (MaskLayer layer in _layers.Values)
+            layer.Show(false);
+    }
+
+    Shader ShaderForMasks()
+    {
+        if (_shader == null)
+            _shader = FindShader();
+        return _shader;
     }
 
     static Shader FindShader()
@@ -343,11 +387,98 @@ public class TrackingMaskOverlay : MonoBehaviour
         throw new InvalidOperationException("no transparent unlit shader available");
     }
 
-    void Show(bool visible)
+    /// <summary>One tracked object: its own quad, tinted texture, and depth.</summary>
+    class MaskLayer
     {
-        _visible = visible;
-        if (_quad != null && _quad.activeSelf != visible)
-            _quad.SetActive(visible);
+        public readonly Color32 Tint;
+        public readonly GameObject Quad;
+        public readonly MeshFilter Filter;
+        public Texture2D Display;
+        public Color32[] Pixels;
+        public int LitPixels;
+        public float CentreU = -1f;
+        public float CentreV = -1f;
+        public float Depth;
+        public string DepthSource = "default";
+        public string LabelText;
+
+        readonly Material _material;
+        readonly bool _wantsLabel;
+        TextMesh _label;
+
+        public MaskLayer(int objId, Color tint, Shader shader, bool wantsLabel)
+        {
+            Tint = tint;
+            _wantsLabel = wantsLabel;
+            Quad = new GameObject("TrackingMaskQuad" + objId);
+            Quad.transform.SetParent(null);
+            Filter = Quad.AddComponent<MeshFilter>();
+            Filter.mesh = new Mesh { name = "TrackingMask" + objId };
+            var renderer = Quad.AddComponent<MeshRenderer>();
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            renderer.receiveShadows = false;
+            _material = new Material(shader);
+            _material.color = Color.white;   // tint lives in the texture
+            renderer.sharedMaterial = _material;
+            Quad.SetActive(false);
+            Debug.Log("QUEST_OVERLAY quad created for obj=" + objId + ", shader=" + shader.name
+                      + " supported=" + shader.isSupported);
+        }
+
+        public void Resize(int w, int h)
+        {
+            if (Display != null && Display.width == w && Display.height == h)
+                return;
+            if (Display != null)
+                UnityEngine.Object.Destroy(Display);
+            Display = new Texture2D(w, h, TextureFormat.RGBA32, false);
+            Display.wrapMode = TextureWrapMode.Clamp;
+            Pixels = new Color32[w * h];
+            _material.mainTexture = Display;
+        }
+
+        /// <summary>Float the object's name at a point in the quad's local space.</summary>
+        public void SetLabel(string text, Vector3 localPosition)
+        {
+            LabelText = text;
+            if (!_wantsLabel || string.IsNullOrEmpty(text))
+            {
+                if (_label != null)
+                    _label.gameObject.SetActive(false);
+                return;
+            }
+            if (_label == null)
+            {
+                var go = new GameObject("TrackingMaskLabel");
+                go.transform.SetParent(Quad.transform, false);
+                _label = go.AddComponent<TextMesh>();
+                _label.anchor = TextAnchor.MiddleCenter;
+                _label.alignment = TextAlignment.Center;
+                _label.fontSize = 48;
+                _label.characterSize = 0.004f;
+                _label.color = new Color(Tint.r / 255f, Tint.g / 255f, Tint.b / 255f, 1f);
+            }
+            _label.gameObject.SetActive(true);
+            _label.text = text;
+            _label.transform.localPosition = localPosition;
+            _label.transform.localRotation = Quaternion.identity;
+        }
+
+        public void Show(bool visible)
+        {
+            if (Quad != null && Quad.activeSelf != visible)
+                Quad.SetActive(visible);
+        }
+
+        public void Dispose()
+        {
+            if (Display != null)
+                UnityEngine.Object.Destroy(Display);
+            if (_material != null)
+                UnityEngine.Object.Destroy(_material);
+            if (Quad != null)
+                UnityEngine.Object.Destroy(Quad);
+        }
     }
 
     // Spec-shaped slice of the tracking_result payload (snake_case for JsonUtility).

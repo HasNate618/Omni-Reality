@@ -49,6 +49,7 @@ A decoupled client-server architecture for real-time SAM 2 tracking.
 - **Payload Format**: 
   - Client sends `{"type": "frame", "jpeg_b64": <string>, "clicks": [{"x": int, "y": int, "obj_id": int}]}`. Click coordinates are in the pixels of the sent (downscaled) frame.
   - Server replies `{"type": "result", "objects": [{"obj_id": int, "mask_b64": <string>}]}`; masks are PNGs at the first frame's resolution. Keep dimensions fixed within a connection.
+  - Several objects are clicked by sending several `clicks` entries with distinct `obj_id`s. Doing that on **one** frame is what the Quest path uses: each is an initial conditioning frame, so the reply carries a mask for every object.
   - An optional string `frame_id` on a request is echoed in its result. Existing webcam requests without it still work.
   - Object removal (`removes`, right-click) is **not implemented** on either side yet.
 - **Memory Safety**: The server keeps a rolling window. It drops raw image tensors older than 5 frames and keeps only a small set of past frames per object in tracking memory (`SAM2_MEMORY`, below). Clicked (conditioning) frames are kept, and attention uses at most the 2 closest per object. Device memory stays flat over long sessions.
@@ -90,6 +91,27 @@ Per tracked frame, server round-trip, static image:
 | + float16 on MPS | 148 ms (6.8 FPS) | 238 ms (4.2 FPS) | flat (390 MB) |
 | + `SAM2_MEMORY=sparse` (default) | — | 158 ms (6.3 FPS) | flat (368 MB) |
 
+### Object count sets the frame budget
+
+Measured 2026-09-20 on the pan sequence (`--pan --frames 180`, MPS float16,
+`SAM2_MEMORY=sparse`), adding objects to the same session:
+
+| objects | p50 | p95 | achieved | masks held on their clicked point |
+| --- | --- | --- | --- | --- |
+| 1 | 111 ms | 115 ms | 8.9 FPS | 179/179 |
+| 2 | 167 ms | 172 ms | 5.9 FPS | 179/179 each |
+| 3 | 266 ms | 279 ms | 3.7 FPS | 179/179 each |
+| 4 | 329 ms | 344 ms | 3.0 FPS | 179/179 each |
+
+Roughly +70 ms per object, and tracking quality does not degrade as objects are
+added. **This is why selection is capped at 3** (`MAX_TRACKED_OBJECTS` in
+`provider/coordinator/planner.py`): the Quest stream's default 3 fps gives a
+333 ms budget per frame, which 3 objects fit with headroom and 4 do not. Past
+the budget the steady state merely drops frames, but the post-seed catch-up
+starts failing with "SAM 2 could not catch up. Lower Stream FPS and try again."
+Frame time also scales with mask area, so a large object costs more than a small
+one: the same 3-object run with a small third mask measured 226 ms.
+
 Panning sequence (`--pan`, 180 frames): `full` 147 ms (1 obj) / 241 ms (2 obj) vs `sparse` 111 ms / 195 ms. Masks stayed on every clicked point in 179/179 frames; per-frame IoU sparse vs full ≥ 0.986. Static masks vs the original code: IoU ≥ 0.991. First frame after connect: 1.4–4 s originally, ~0.1 s now.
 
 Client, simulated 1080p webcam, 1 object: 3.7 mask updates/s with the old client (fixed 100 ms sleep, full-resolution frames) vs 6.4/s now. Motion compensation on the pan sequence: the mask's IoU with the object's current position goes from 0.937 → 0.989 at 3 frames of display lag (~100 ms) and 0.885 → 0.991 at 6 frames (~200 ms), at 1.9 ms per displayed 1080p frame. The 4060 has not been benchmarked with these changes yet.
@@ -107,12 +129,19 @@ Benchmark without a webcam (works on both machines):
 
 ## Quest + voice automatic initialization
 
-This opt-in integration replaces one manual click with one Huawei-selected
-**interior point**. Quest supplies RGB and push-to-talk audio. Huawei sees one
+This opt-in integration replaces manual clicking with Huawei-selected
+**interior points**. Quest supplies RGB and push-to-talk audio. Huawei sees one
 selected JPEG plus that audio; the existing SAM 2 server gets the exact JPEG
-and a normal `clicks` entry, then subsequent Quest images with empty `clicks`.
-It does not call Huawei per video frame. One active object is supported in this
-mode; a new utterance replaces the previous selection/tracker connection.
+and one normal `clicks` entry per selected object, then subsequent Quest images
+with empty `clicks`. It does not call Huawei per video frame.
+
+Up to `MAX_TRACKED_OBJECTS` (3) objects are tracked at once, all clicked on the
+one selected frame so a single SAM 2 session holds them together. `obj_id` runs
+1..N in the model's own order. Points closer than 0.05 normalised distance are
+treated as the same object named twice and dropped, and if SAM 2 fails to start
+any requested object the whole selection errors rather than quietly tracking a
+smaller set. A new utterance replaces the whole previous selection, not one
+object of it.
 
 For Python server commands, Unity configuration, USB/Wi-Fi connectivity,
 microphone permissions, controls, and troubleshooting, follow
@@ -123,7 +152,10 @@ microphone permissions, controls, and troubleshooting, follow
 `CoordinatorClient.TrackingResultReceived` is the **main-thread handoff to the
 existing visualization code**. `LatestTrackingResult` also exposes the latest
 result. It carries `frame_id`, `seed_frame_id`, `width`, `height`, `generation`,
-`stage_epoch`, and `objects[]` with the existing `obj_id`/`mask_b64` fields.
+`stage_epoch`, and `objects[]` with the existing `obj_id`/`mask_b64` fields plus
+`label`, the name the model gave that object (null when it named none; SAM 2
+itself knows only `obj_id`s, so the bridge re-attaches these). `objects[]` holds
+one entry per tracked object, so a renderer must handle more than one.
 `RawPayloadJson` includes the original capture envelope. For example, attach
 your existing renderer by subscribing once the client exists:
 
@@ -182,7 +214,16 @@ python -m unittest discover -s tests -v
 For on-device checks and the headset-free smoke, see
 [Quest setup verification](quest-audio-setup.md#how-to-verify).
 The offline suite delays selection and checks exact JPEG identity,
-ordered replay, wrong-frame rejection, cancellation, and bounded history.
+ordered replay, wrong-frame rejection, cancellation, and bounded history. For
+multi-object selection it also checks that several points are parsed, deduped
+and capped, that both objects are clicked on the one seed frame and tracked
+without re-clicking, and that a half-started selection raises instead of
+silently tracking fewer objects.
+
+Multi-object verification (2026-09-20): **209 Python tests** passed, and the
+timing table above was measured against the real MPS server. **Rendering more
+than one mask in the headset has not been run on device**; per-object colours,
+depths, and labels are Unity-side changes that only a headset run can confirm.
 
 Verification recorded for this integration (2026-09-19): **82 Python tests**
 passed; **28 Unity EditMode tests** passed with Android selected, and the four

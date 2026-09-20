@@ -286,16 +286,22 @@ def _turn_sender(ws: Any, state: CoordinatorState):
 
 async def _warm_speech(purpose: str) -> None:
     """Pre-synthesize the canned lines; failures are not worth a turn."""
-    from coordinator.turn import SAY_MODEL_ERROR, SAY_NO_TARGET, SAY_TRACKING_DEFAULT
+    from coordinator.turn import (
+        SAY_MODEL_ERROR,
+        SAY_NO_TARGET,
+        SAY_TRACKING_DEFAULT,
+        SAY_TRACKING_MANY,
+    )
     from voice.cloud_speech import warm_line
 
-    for line in (SAY_TRACKING_DEFAULT, SAY_NO_TARGET, SAY_MODEL_ERROR):
+    lines = (SAY_TRACKING_DEFAULT, SAY_TRACKING_MANY, SAY_NO_TARGET, SAY_MODEL_ERROR)
+    for line in lines:
         try:
             await warm_line(line, purpose=purpose)
         except Exception as exc:
             logger.info("speech warm failed exception_class=%s", type(exc).__name__)
             return
-    logger.info("canned speech warmed (%d lines)", 3)
+    logger.info("canned speech warmed (%d lines)", len(lines))
 
 
 async def _warm_live_session(state: CoordinatorState) -> None:
@@ -624,7 +630,8 @@ def make_planner(
 
             class TrackingStub(StubPlanner):
                 async def plan(self, **kwargs):
-                    return PlanResult(ops=[], text="", tracking_target={"type": "image_point", "u": 0.5, "v": 0.5})
+                    return PlanResult(ops=[], text="", tracking_targets=[
+                        {"type": "image_point", "u": 0.5, "v": 0.5, "label": "centre"}])
             return TrackingStub()
         return StubPlanner()
     if kind == "voice-stub":
@@ -716,7 +723,7 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument("--model", help="yibu model id (default qwen3.8-omni-flash)")
-    parser.add_argument("--sam2-url", help="enable single-object tracking, e.g. ws://127.0.0.1:8766")
+    parser.add_argument("--sam2-url", help="enable object tracking, e.g. ws://127.0.0.1:8766")
     parser.add_argument(
         "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING"],
         help="DEBUG traces every message, frame and model call",
