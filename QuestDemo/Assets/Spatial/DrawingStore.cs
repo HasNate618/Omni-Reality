@@ -68,10 +68,10 @@ public class DrawingStore : MonoBehaviour
         {
             // Unlit/Transparent, not Unlit/Color: Unlit/Color is an opaque pass
             // whose fragment forces alpha to 1, which would render the ghost solid.
-            rend.material = new Material(Shader.Find("Unlit/Transparent"));
+            rend.sharedMaterial = new Material(Shader.Find("Unlit/Transparent"));
             Color c = PulsingRing.RingColor;
             c.a = 0.45f;
-            rend.material.color = c;
+            rend.sharedMaterial.color = c;
         }
         var motion = root.AddComponent<GhostMotion>();
         motion.MotionKind = op.MotionKind;
@@ -96,7 +96,7 @@ public class DrawingStore : MonoBehaviour
         lr.SetPosition(1, to);
         lr.startWidth = 0.008f;
         lr.endWidth = 0.008f;
-        lr.material = new Material(Shader.Find("Unlit/Color"));
+        lr.sharedMaterial = new Material(Shader.Find("Unlit/Color"));
         lr.startColor = PulsingRing.RingColor;
         lr.endColor = PulsingRing.RingColor;
         lr.useWorldSpace = true;
@@ -283,11 +283,11 @@ public class DrawingStore : MonoBehaviour
         if (rec.Root == null)
             return;
         Renderer box = rec.Root.GetComponentInChildren<Renderer>();
-        if (box != null && box.material != null)
+        if (box != null && box.sharedMaterial != null)
         {
-            Color c = box.material.color;
+            Color c = box.sharedMaterial.color;
             c.a = approximate ? 0.35f : 0.12f;
-            box.material.color = c;
+            box.sharedMaterial.color = c;
         }
     }
 
