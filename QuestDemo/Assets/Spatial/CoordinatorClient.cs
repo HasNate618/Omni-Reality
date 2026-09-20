@@ -440,7 +440,12 @@ public class CoordinatorClient : MonoBehaviour
             {
                 if (!PrepareSceneOp(op))
                     return;
-                GeneratedMeshPlacer.TryHandle(this, this, op, _ipv4, _artifactPort, Cache);
+                if (Store == null)
+                {
+                    Debug.LogWarning("CoordinatorClient: no DrawingStore for place_generated");
+                    return;
+                }
+                GeneratedMeshPlacer.TryHandle(this, this, op, _ipv4, _artifactPort, Cache, Store);
                 return;
             }
             if (op.Kind == "label" || op.Kind == "ghost" || op.Kind == "connect")
@@ -723,6 +728,16 @@ public class CoordinatorClient : MonoBehaviour
         int ackTurnId = op.TurnId < 1 ? 1 : op.TurnId;
         _outbox.Enqueue(PriorityAck, ProtocolJson.BuildAck(
             _sessionId, ackTurnId, op.OpId, op.StageEpoch, status, drawingId, reason, pin));
+    }
+
+    /// <summary>
+    /// The box is placed; the mesh never arrived. Quest sends no arrival
+    /// report (spec §8.2), so this only logs: the coordinator must not be
+    /// told a transfer completed when it did not.
+    /// </summary>
+    internal void NotifyMeshMissing(string drawingId)
+    {
+        Debug.Log("GENERATED_MESH_MISSING drawing=" + drawingId);
     }
 
     /// <summary>

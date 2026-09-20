@@ -66,7 +66,9 @@ public class DrawingStore : MonoBehaviour
         var rend = root.GetComponent<Renderer>();
         if (rend != null)
         {
-            rend.material = new Material(Shader.Find("Unlit/Color"));
+            // Unlit/Transparent, not Unlit/Color: Unlit/Color is an opaque pass
+            // whose fragment forces alpha to 1, which would render the ghost solid.
+            rend.material = new Material(Shader.Find("Unlit/Transparent"));
             Color c = PulsingRing.RingColor;
             c.a = 0.45f;
             rend.material.color = c;
@@ -160,6 +162,115 @@ public class DrawingStore : MonoBehaviour
     }
 
     readonly Dictionary<string, ProceduralRecord> _procedural = new Dictionary<string, ProceduralRecord>();
+
+    /// <summary>Generated furniture record (spec §6.1): box, mesh, one id.</summary>
+    sealed class GeneratedRecord
+    {
+        public GameObject Root;
+        public GameObject Mesh;
+        public Vector3 BoxSize;
+        public bool Approximate;
+    }
+
+    readonly Dictionary<string, GeneratedRecord> _generated = new Dictionary<string, GeneratedRecord>();
+
+    /// <summary>
+    /// Register one generated placement as a normal drawing so remove, undo,
+    /// the clutter cap, and revise all see it. Returns the root.
+    /// </summary>
+    /// <param name="offsetM">
+    /// Frame-relative centre offset along the width axis (spec §7.1). The
+    /// first item in a row is 0, so a lone placement lands on the hit.
+    /// </param>
+    public GameObject PlaceGenerated(
+        Vector3 point, Vector3 normal, string drawingId, Vector3? extentM, float offsetM = 0f)
+    {
+        Prune();
+        EvictIfNeeded();
+        GameObject root = new GameObject("Drawing_" + drawingId);
+        Vector3 n = normal.sqrMagnitude < 1e-6f ? Vector3.up : normal.normalized;
+        Vector3 facing = -n;
+        Vector3 boxSize = extentM.HasValue
+            ? ListingBox.ToBoxSize(extentM.Value)
+            : Vector3.one * 0.12f;
+        Vector3 planted = point;
+        if (Mathf.Abs(offsetM) > 1e-6f)
+        {
+            Vector3 flat = new Vector3(facing.x, 0f, facing.z);
+            if (flat.sqrMagnitude < 1e-6f)
+                flat = Vector3.forward;
+            // Right-hand width axis of the placement frame: rows run along it.
+            Vector3 widthAxis = Vector3.Cross(Vector3.up, flat.normalized);
+            planted += widthAxis * offsetM;
+        }
+        GameObject box = ListingBox.Create(boxSize, planted, facing, drawingId);
+        // Root and box coincide: the root carries the pose, the box is its
+        // visual at local zero. Grab locks the root's Y, so the two must not
+        // be offset from each other or a drag would double the height.
+        root.transform.position = box.transform.position;
+        root.transform.rotation = box.transform.rotation;
+        box.transform.SetParent(root.transform, false);
+        box.transform.localPosition = Vector3.zero;
+        root.transform.SetParent(null, true);
+        TryAddAnchor(root);
+        _marks.Add(root);
+        _generated[drawingId] = new GeneratedRecord
+        {
+            Root = root,
+            Mesh = null,
+            BoxSize = boxSize,
+            Approximate = false,
+        };
+        return root;
+    }
+
+    /// <summary>True when this drawing id is a generated placement.</summary>
+    public bool HasGenerated(string drawingId)
+    {
+        return !string.IsNullOrEmpty(drawingId) && _generated.ContainsKey(drawingId);
+    }
+
+    /// <summary>
+    /// Attach the imported mesh under the listed box and fit it uniformly.
+    /// The box stays as the size claim; only its opacity changes.
+    /// </summary>
+    public void MarkMeshFitted(string drawingId, bool approximate)
+    {
+        GeneratedRecord rec = null;
+        if (string.IsNullOrEmpty(drawingId) || !_generated.TryGetValue(drawingId, out rec))
+            return;
+        rec.Approximate = approximate;
+        if (rec.Root == null)
+            return;
+        Renderer box = rec.Root.GetComponentInChildren<Renderer>();
+        if (box != null && box.material != null)
+        {
+            Color c = box.material.color;
+            c.a = approximate ? 0.35f : 0.12f;
+            box.material.color = c;
+        }
+    }
+
+    /// <summary>Fit an imported mesh object inside the recorded box.</summary>
+    public bool FitMeshIntoBox(string drawingId, GameObject mesh)
+    {
+        GeneratedRecord rec = null;
+        if (mesh == null || string.IsNullOrEmpty(drawingId) ||
+            !_generated.TryGetValue(drawingId, out rec) || rec.Root == null)
+            return false;
+        Renderer[] renderers = mesh.GetComponentsInChildren<Renderer>();
+        if (renderers.Length == 0)
+            return false;
+        Bounds bounds = renderers[0].bounds;
+        for (int i = 1; i < renderers.Length; i++)
+            bounds.Encapsulate(renderers[i].bounds);
+        float scale = ListingBox.FitScale(bounds.size, rec.BoxSize);
+        mesh.transform.localScale = mesh.transform.localScale * scale;
+        mesh.transform.SetParent(rec.Root.transform, true);
+        rec.Mesh = mesh;
+        MarkMeshFitted(drawingId, ListingBox.IsApproximate(bounds.size, rec.BoxSize));
+        return true;
+    }
 
     public GameObject PlaceProcedural(
         Vector3 point, Vector3 normal, string drawingId,
@@ -281,6 +392,7 @@ public class DrawingStore : MonoBehaviour
         }
         _marks.Clear();
         _procedural.Clear();
+        _generated.Clear();
     }
 
     /// <summary>Pure cap seam: true once the store holds MaxDrawings. Test-covered.</summary>

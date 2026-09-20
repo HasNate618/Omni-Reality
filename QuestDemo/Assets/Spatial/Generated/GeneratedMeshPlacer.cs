@@ -4,14 +4,25 @@ using UnityEngine.Networking;
 
 /// <summary>
 /// Quest-side handler for coordinator-authored <c>place_generated</c> ops.
-/// Fetches GLB bytes from the laptop artifact HTTP server, imports the mesh
-/// with glTFast (com.atteneder.gltfast), and pins it at the capture-time
-/// surface (uniform scale to fit a 1 m sphere). If the import fails, a
-/// placeholder cube preserves the harness behaviour.
+/// The store plants the listed box first: that box IS the size claim and it
+/// stays whether or not a mesh ever arrives. The GLB is then fetched from the
+/// laptop artifact server, imported with glTFast (com.atteneder.gltfast), and
+/// fitted uniformly inside the box. A missing or timed-out artifact leaves
+/// the box at its listed size, never a smaller substitute.
 /// </summary>
 public static class GeneratedMeshPlacer
 {
     public const int MaxGlbBytes = 25 * 1024 * 1024;
+
+    /// <summary>
+    /// Artifact fetch attempts. The coordinator only serves a file once its
+    /// job is <c>ready</c>, and a sized job is planted before that, so the
+    /// first 404s are expected and must be retried rather than rejected.
+    /// </summary>
+    public const int MaxFetchAttempts = 6;
+
+    public const float FetchRetrySeconds = 15f;
+
     static readonly byte[] GltfMagic = { (byte)'g', (byte)'l', (byte)'T', (byte)'F' };
 
     public static string ArtifactUrl(string laptopIpv4, int artifactPort, string jobId)
@@ -31,13 +42,14 @@ public static class GeneratedMeshPlacer
         ProtocolJson.SceneOpMsg op,
         string laptopIpv4,
         int artifactPort,
-        CaptureGeometryCache cache)
+        CaptureGeometryCache cache,
+        DrawingStore store)
     {
         if (op == null || op.Kind != "place_generated")
             return false;
         if (host == null || client == null)
             return false;
-        host.StartCoroutine(FetchAndPlace(client, op, laptopIpv4, artifactPort, cache));
+        host.StartCoroutine(FetchAndPlace(client, op, laptopIpv4, artifactPort, cache, store));
         return true;
     }
 
@@ -46,7 +58,8 @@ public static class GeneratedMeshPlacer
         ProtocolJson.SceneOpMsg op,
         string laptopIpv4,
         int artifactPort,
-        CaptureGeometryCache cache)
+        CaptureGeometryCache cache,
+        DrawingStore store)
     {
         string jobId = op.JobId;
         if (string.IsNullOrEmpty(jobId))
@@ -88,90 +101,126 @@ public static class GeneratedMeshPlacer
             yield break;
         }
 
-        using (UnityWebRequest req = UnityWebRequest.Get(url))
+        byte[] data = null;
+        for (int attempt = 0; attempt < MaxFetchAttempts && data == null; attempt++)
         {
-            req.downloadHandler = new DownloadHandlerBuffer();
-            yield return req.SendWebRequest();
+            if (attempt > 0)
+                yield return new WaitForSeconds(FetchRetrySeconds);
+            using (UnityWebRequest req = UnityWebRequest.Get(url))
+            {
+                req.downloadHandler = new DownloadHandlerBuffer();
+                yield return req.SendWebRequest();
 #if UNITY_2020_2_OR_NEWER
-            if (req.result != UnityWebRequest.Result.Success)
+                bool ok = req.result == UnityWebRequest.Result.Success;
 #else
-            if (req.isNetworkError || req.isHttpError)
+                bool ok = !req.isNetworkError && !req.isHttpError;
 #endif
-            {
-                client.EnqueueAck(op, "rejected", null, "invalid", null);
-                yield break;
+                if (!ok)
+                    continue;
+                byte[] candidate = req.downloadHandler.data;
+                if (candidate == null || candidate.Length < 12 || candidate.Length > MaxGlbBytes)
+                    continue;
+                if (!StartsWithGltf(candidate))
+                    continue;
+                data = candidate;
             }
-            byte[] data = req.downloadHandler.data;
-            if (data == null || data.Length < 12 || data.Length > MaxGlbBytes)
-            {
-                client.EnqueueAck(op, "rejected", null, "invalid", null);
-                yield break;
-            }
-            if (!StartsWithGltf(data))
-            {
-                client.EnqueueAck(op, "rejected", null, "invalid", null);
-                yield break;
-            }
-            GameObject root = null;
-            string tmpPath = null;
-            try
-            {
-                tmpPath = System.IO.Path.Combine(Application.temporaryCachePath, jobId + ".glb");
-                System.IO.File.WriteAllBytes(tmpPath, data);
-            }
-            catch (System.Exception e)
-            {
-                Debug.LogWarning("GeneratedMeshPlacer: cache write failed (" + e.GetType().Name + ")");
-                tmpPath = null;
-            }
-            if (tmpPath != null)
-            {
-                GameObject holder = new GameObject("Generated_" + jobId);
-                GLTFast.GltfAsset asset = holder.AddComponent<GLTFast.GltfAsset>();
-                System.Threading.Tasks.Task<bool> loadTask = asset.Load("file://" + tmpPath);
-                while (!loadTask.IsCompleted)
-                    yield return null;
-                bool ok = loadTask.Status == System.Threading.Tasks.TaskStatus.RanToCompletion
-                    && loadTask.Result
-                    && holder.GetComponentsInChildren<Renderer>().Length > 0;
-                if (ok)
-                {
-                    root = holder;
-                }
-                else
-                {
-                    Debug.LogWarning("GeneratedMeshPlacer: import failed, placeholder cube job=" + jobId);
-                    Object.Destroy(holder);
-                }
-                try { System.IO.File.Delete(tmpPath); } catch (System.Exception) { }
-            }
-            if (root == null)
-            {
-                root = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                root.name = "Generated_" + jobId;
-                root.transform.localScale = Vector3.one * 0.1f;
-            }
-            root.transform.position = result.Point;
-            Vector3 n = result.Normal;
-            if (n.sqrMagnitude < 1e-6f)
-                n = Vector3.up;
-            root.transform.rotation = Quaternion.FromToRotation(Vector3.up, n.normalized);
-            FitInsideUnitSphere(root);
-            string drawingId = client.NewDrawingId != null
-                ? client.NewDrawingId()
-                : SpatialRuntime.NewFrameId();
-            try
-            {
-                if (root.GetComponent<OVRSpatialAnchor>() == null)
-                    root.AddComponent<OVRSpatialAnchor>();
-            }
-            catch (System.Exception e)
-            {
-                Debug.LogWarning("GeneratedMeshPlacer: anchor unavailable (" + e.GetType().Name + ")");
-            }
-            client.EnqueueAck(op, "placed", drawingId, null, "surface");
-            Debug.Log("GENERATED_PLACED op=" + op.OpId + " job=" + jobId + " drawing=" + drawingId);
         }
+
+        string drawingId = client.NewDrawingId != null
+            ? client.NewDrawingId()
+            : SpatialRuntime.NewFrameId();
+        Vector3? extent = op.HasExtentM ? (Vector3?)op.ExtentM : null;
+        if (store == null)
+        {
+            client.EnqueueAck(op, "rejected", null, "invalid", null);
+            yield break;
+        }
+        GameObject drawing = store.PlaceGenerated(
+            result.Point, result.Normal, drawingId, extent,
+            op.HasOffsetM ? op.OffsetM : 0f);
+        if (drawing == null)
+        {
+            client.EnqueueAck(op, "rejected", null, "invalid", null);
+            yield break;
+        }
+        // The box is placed and real whether or not the mesh ever arrives.
+        // ACK now: placement_ack 'placed' needs drawing_id + pin only.
+        client.EnqueueAck(op, "placed", drawingId, null, "surface");
+        Debug.Log("GENERATED_BOX_PLACED op=" + op.OpId + " job=" + jobId + " drawing=" + drawingId);
+
+        if (data == null)
+        {
+            Debug.LogWarning("GeneratedMeshPlacer: no artifact after "
+                + MaxFetchAttempts + " attempts; box stays at listed size job=" + jobId);
+            client.NotifyMeshMissing(drawingId);
+            yield break;
+        }
+
+        PendingImport pending = BeginImport(data, jobId);
+        if (pending == null)
+        {
+            client.NotifyMeshMissing(drawingId);
+            yield break;
+        }
+        while (!pending.Task.IsCompleted)
+            yield return null;
+        GameObject mesh = FinishImport(pending, jobId);
+        if (mesh == null)
+        {
+            client.NotifyMeshMissing(drawingId);
+            yield break;
+        }
+        if (!store.FitMeshIntoBox(drawingId, mesh))
+            Object.Destroy(mesh);
+    }
+
+    sealed class PendingImport
+    {
+        public GameObject Holder;
+        public System.Threading.Tasks.Task<bool> Task;
+        public string TmpPath;
+    }
+
+    /// <summary>Start the import. Caller yields on PendingImport.Task.</summary>
+    static PendingImport BeginImport(byte[] data, string jobId)
+    {
+        string tmpPath;
+        try
+        {
+            tmpPath = System.IO.Path.Combine(Application.temporaryCachePath, jobId + ".glb");
+            System.IO.File.WriteAllBytes(tmpPath, data);
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogWarning("GeneratedMeshPlacer: cache write failed (" + e.GetType().Name + ")");
+            return null;
+        }
+        GameObject holder = new GameObject("Generated_" + jobId);
+        GLTFast.GltfAsset asset = holder.AddComponent<GLTFast.GltfAsset>();
+        return new PendingImport
+        {
+            Holder = holder,
+            Task = asset.Load("file://" + tmpPath),
+            TmpPath = tmpPath,
+        };
+    }
+
+    /// <summary>Resolve a finished import. Null when it did not produce a mesh.</summary>
+    static GameObject FinishImport(PendingImport pending, string jobId)
+    {
+        if (pending == null)
+            return null;
+        try { System.IO.File.Delete(pending.TmpPath); } catch (System.Exception) { }
+        bool ok = pending.Task.Status == System.Threading.Tasks.TaskStatus.RanToCompletion
+            && pending.Task.Result
+            && pending.Holder != null
+            && pending.Holder.GetComponentsInChildren<Renderer>().Length > 0;
+        if (ok)
+            return pending.Holder;
+        Debug.LogWarning("GeneratedMeshPlacer: import failed job=" + jobId);
+        if (pending.Holder != null)
+            Object.Destroy(pending.Holder);
+        return null;
     }
 
     static bool StartsWithGltf(byte[] data)
@@ -184,18 +233,5 @@ public static class GeneratedMeshPlacer
                 return false;
         }
         return true;
-    }
-
-    static void FitInsideUnitSphere(GameObject root)
-    {
-        Renderer[] renderers = root.GetComponentsInChildren<Renderer>();
-        if (renderers == null || renderers.Length == 0)
-            return;
-        Bounds bounds = renderers[0].bounds;
-        for (int i = 1; i < renderers.Length; i++)
-            bounds.Encapsulate(renderers[i].bounds);
-        float m = Mathf.Max(bounds.size.x, bounds.size.y, bounds.size.z);
-        if (m > 1f)
-            root.transform.localScale *= 1f / m;
     }
 }
