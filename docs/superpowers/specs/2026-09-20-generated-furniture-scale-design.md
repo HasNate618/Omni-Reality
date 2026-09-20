@@ -321,13 +321,16 @@ Python, offline, no credit (`cd provider && . .venv/bin/activate && python -m un
   numbers, non-numbers, negatives, and values outside 0.05–3.0 m.
 - `place_generated` without `extent_m` still validates, so existing fixtures
   and the shop-to-life path are unchanged.
-- `place_listing` is refused with an unknown `listing_id`, with a stored row
-  missing an axis, with `extent_m` disagreeing with memory, and with a target
-  that is not image-space.
-- `place_listing` succeeds with a complete row, and the resulting
+- `place_listing` is refused with `extent_m` missing, with the wrong number
+  of axes, with a non-number, with a negative value, with any axis outside
+  0.05–3.0 m, and with a turn that has no capture frame.
+- `place_listing` succeeds with valid extents, and the resulting
   coordinator-authored `place_generated` carries `extent_m`.
-- Listing memory: a multi-row page frame stores several rows; a spoken
-  answer fills a missing axis and marks the source.
+- Placing the same name twice updates one row rather than creating two.
+- An extents job emits exactly one `place_generated`: at accept, and not again
+  when the job turns ready. A job without extents still emits only at ready.
+- A pre-baked listing resolves to its configured artifact without queueing a
+  worker.
 - Pack arithmetic: first item at the hit, widths plus 0.05 m gaps, stable
   ordering, single floor height, and a run length that matches the inputs.
 - Job record retains `extent_m` across the queued → ready transition.
