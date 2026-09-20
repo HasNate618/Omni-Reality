@@ -154,30 +154,26 @@ public class MicUplinkTests
     }
 
     [Test]
-    public void PttPressArmsHoldReleaseDisarmsOffline()
+    public void ToggleListeningFlipsDefaultOnAndStaysSafeOffline()
     {
-        var go = new GameObject("MicPttHold");
+        var go = new GameObject("MicToggleListen");
         var client = go.AddComponent<CoordinatorClient>();
         var mic = go.AddComponent<MicUtterance>();
         RunAwake(mic);
-        var press = typeof(MicUtterance).GetMethod(
-            "PressPtt", BindingFlags.NonPublic | BindingFlags.Instance);
-        var release = typeof(MicUtterance).GetMethod(
-            "ReleasePtt", BindingFlags.NonPublic | BindingFlags.Instance);
+        var toggle = typeof(MicUtterance).GetMethod(
+            "ToggleListening", BindingFlags.NonPublic | BindingFlags.Instance);
         var flag = typeof(MicUtterance).GetField(
-            "_manualCapture", BindingFlags.NonPublic | BindingFlags.Instance);
-        Assert.IsNotNull(press);
-        Assert.IsNotNull(release);
+            "_listening", BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.IsNotNull(toggle);
         Assert.IsNotNull(flag);
-        // Offline: press arms the hold but opens nothing, release disarms.
-        press.Invoke(mic, null);
+        Assert.IsFalse((bool)flag.GetValue(mic));
+        toggle.Invoke(mic, null);
         Assert.IsTrue((bool)flag.GetValue(mic));
         Assert.IsNull(mic.UtteranceId);
-        release.Invoke(mic, null);
+        toggle.Invoke(mic, null);
         Assert.IsFalse((bool)flag.GetValue(mic));
         Assert.IsNull(mic.UtteranceId);
         Assert.AreEqual(0, OutboxCount(client));
-        Assert.AreEqual(MicUtterance.SampleRate * 2 * 15, MicUtterance.PttMaxPcmBytes);
         Object.DestroyImmediate(go);
     }
 

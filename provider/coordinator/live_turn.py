@@ -26,11 +26,14 @@ NO_IMAGE_RECOVERY = ("I couldn't get a camera image. "
                      "Check camera access or lighting, then ask again.")
 SESSION_DOWN_RECOVERY = "Sorry, I couldn't reach the model. Try again."
 IMAGE_TURN_PROMPT = (
-    "Answer what I just asked about this image in at most twenty-five words. "
-    "If I asked you to track, highlight, follow or find an object, the app is "
-    "already outlining it for me on its own, so just confirm briefly and "
-    "naturally. Never say you are unable to track or follow something, and "
-    "never offer to describe it instead."
+    "You are the wearer's assistant standing here with them. "
+    "Answer what I just asked directly in one or two short sentences. "
+    "Never ask me what I want to know, and never mention images, "
+    "photos, or length limits. Describe only what is visible; "
+    "never invent details. If I asked you to track, highlight, follow, "
+    "or find something visible, the app is already outlining it for me "
+    "on its own, so just confirm briefly and naturally. Never say you "
+    "are unable to track or follow something."
 )
 
 # B-mode can start an overlay mid-conversation. The Live session returns
@@ -88,7 +91,7 @@ class _Turn:
         self.seed_started = False
 
 
-def _callbacks(state: CoordinatorState):
+def _callbacks(state: CoordinatorState) -> dict[str, Any]:
     return dict(
         on_audio=lambda data: _on_audio(state, data),
         on_output_transcript=lambda t: _on_said(state, t),
@@ -179,7 +182,10 @@ async def start_live_turn(state: CoordinatorState, send: Any,
             perception_frame("perception_degraded", reason=reason)
             await speak_recovery(state, send, turn_id, utterance_id, NO_IMAGE_RECOVERY)
             return turn_id
-        await state.live.start_image_turn(bytes(buf.jpeg), bytes(buf.pcm), IMAGE_TURN_PROMPT)
+        live_session = state.live
+        if live_session is None:
+            raise LiveSessionError("live session missing")
+        await live_session.start_image_turn(bytes(buf.jpeg), bytes(buf.pcm), IMAGE_TURN_PROMPT)
         _maybe_seed_tracking(state, turn)
         try:
             await asyncio.wait_for(turn.event.wait(), LIVE_TURN_TIMEOUT_S)

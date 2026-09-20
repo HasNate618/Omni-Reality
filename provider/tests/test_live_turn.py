@@ -78,7 +78,7 @@ class LiveTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(live.image_turns), 1)
         self.assertEqual(live.image_turns[0][0], JPEG)
         self.assertEqual(live.image_turns[0][1], PCM_06S)
-        self.assertIn('twenty-five', live.image_turns[0][2])
+        self.assertIn('Never ask me what I want to know', live.image_turns[0][2])
         self.assertEqual(sent[0][0], 'turn_started')
 
     async def test_missing_image_never_calls_session(self):

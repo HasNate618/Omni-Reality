@@ -49,6 +49,7 @@ Everything an agent needs to use the sponsor model gateway. Code lives in `provi
 - Normalization covers OpenAI HTTP (`prompt_tokens`/`completion_tokens`/`total_tokens`), OpenAI realtime nested `response.usage` (`input_tokens`/`output_tokens`), and Gemini (`promptTokenCount`/`responseTokenCount`/`totalTokenCount`, incl. `inputTokenCount` variants). Total is derived only when both parts exist and is flagged.
 - **Missing stays `null`: unknown, never zero.** Summaries sum reported values and carry `*_missing_calls` counters.
 - Summarize: `python summarize_usage.py [--log <ledger> --out-dir <dir>]` → `usage_summary.json` + `usage_by_model_key_purpose.csv` (grouped by model/key/purpose, ok/failed splits). Identical duplicate call IDs are ignored; conflicting duplicates raise.
+- Quick human-readable view (offline, no credit): `python show_usage.py [--log <ledger>]` — per-call table plus totals; missing prints as `?`.
 - Before reporting: inspect both files. `usage_raw`, `error`, `source.path` (absolute local path), purpose labels, and endpoints can leak details — redact a sharing copy, keep the original ledger private.
 
 ## Observed live numbers (2026-09-19 smoke, minimal prompts)
