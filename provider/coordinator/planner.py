@@ -158,7 +158,9 @@ TRACKING_PROMPT = """You hear a user's recorded request and see one Quest camera
 Select the single visible object the user asks to track/find. Reply ONLY with:
 {"heard":"the user's words", "say":"short clarification if needed",
  "track":{"type":"image_point","u":0.5,"v":0.5}}
-u is left-to-right and v is top-to-bottom, normalized 0..1 in THIS image.
+u is left-to-right and v is top-to-bottom, given as FRACTIONS of the image
+between 0 and 1 (e.g. the centre is u=0.5, v=0.5). Never answer in pixels:
+"u":320 is wrong, "u":0.5 is right.
 Choose a point INSIDE the object's visible solid surface, not background,
 a hole, a shadow, or merely the centre of its bounding box. For a laptop,
 prefer the middle of its screen or keyboard. Return "track":null if no image
@@ -168,7 +170,12 @@ Return one point only, not a box, world coordinates, or drawing ops.
 Never claim tracking or rendering has started; the application does that later."""
 
 
-def parse_tracking_reply(text: str) -> tuple[str, str | None, dict | None]:
+def parse_tracking_reply(
+    text: str, width: int | None = None, height: int | None = None
+) -> tuple[str, str | None, dict | None]:
+    """(say, heard, target). The point may come back as 0..1 fractions or as
+    pixels of the image we sent; the model uses both despite the prompt, and a
+    rejected point means no tracking at all."""
     obj = _extract_json_object(text) or {}
     say = obj.get("say") if isinstance(obj.get("say"), str) else ""
     heard = obj.get("heard") if isinstance(obj.get("heard"), str) else None
@@ -177,9 +184,19 @@ def parse_tracking_reply(text: str) -> tuple[str, str | None, dict | None]:
         return say, heard, None
     coords = [target.get("u"), target.get("v")]
     if any(isinstance(n, bool) or not isinstance(n, (int, float)) or not math.isfinite(n)
-           or not 0 <= n <= 1 for n in coords):
+           or n < 0 for n in coords):
         return say, heard, None
-    return say, heard, {"type": "image_point", "u": coords[0], "v": coords[1]}
+    u, v = float(coords[0]), float(coords[1])
+    if u > 1 or v > 1:
+        if not width or not height:
+            logger.info("model returned pixels (%s, %s) but the image size is unknown", u, v)
+            return say, heard, None
+        if u > width or v > height:
+            logger.info("model point (%s, %s) is outside the %dx%d image", u, v, width, height)
+            return say, heard, None
+        logger.info("model returned pixels (%.0f, %.0f); normalised to the %dx%d image", u, v, width, height)
+        u, v = u / width, v / height
+    return say, heard, {"type": "image_point", "u": u, "v": v}
 
 
 def _extract_json_object(text: str) -> dict | None:
@@ -272,7 +289,11 @@ class YibuPlanner:
         latency_ms = int((time.monotonic() - started) * 1000)
         logger.debug("%s raw reply: %s", self.model, text[:400].replace("\n", " "))
         if self.tracking:
-            say, heard, target = parse_tracking_reply(text)
+            say, heard, target = parse_tracking_reply(
+                text,
+                envelope.get("sent_w") if envelope else None,
+                envelope.get("sent_h") if envelope else None,
+            )
             return PlanResult(ops=[], text=say, heard=heard, latency_ms=latency_ms,
                               audit_id=record.get("call_id"),
                               tracking_target=target if jpeg is not None and envelope else None)

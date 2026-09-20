@@ -1,4 +1,5 @@
 using System;
+using Meta.XR;
 using UnityEngine;
 
 /// <summary>
@@ -34,6 +35,11 @@ public class TrackingMaskOverlay : MonoBehaviour
     Texture2D _display;   // tinted RGBA shown on the quad
     Color32[] _pixels;
     int _litPixels;
+    float _centreU = -1f;
+    float _centreV = -1f;
+    string _depthSource = "default";
+    float _lastDepth;
+    EnvironmentRaycastManager _raycast;
     float _lastResult;
     bool _visible;
 
@@ -115,6 +121,14 @@ public class TrackingMaskOverlay : MonoBehaviour
             Show(true);
             _lastResult = Time.realtimeSinceStartup;
             Transform head = Camera.main != null ? Camera.main.transform : null;
+            MaskEnvelope e = payload.envelope;
+            Debug.Log("QUEST_OVERLAY geometry: sent=" + e.sent_w + "x" + e.sent_h
+                      + " image=" + e.image_w + "x" + e.image_h
+                      + " crop=" + (e.crop != null ? e.crop.sx + "," + e.crop.sy + "," + e.crop.tx + "," + e.crop.ty : "none")
+                      + " fx=" + e.intrinsics.fx.ToString("F1") + " cx=" + e.intrinsics.cx.ToString("F1")
+                      + " cy=" + e.intrinsics.cy.ToString("F1")
+                      + " depth=" + _lastDepth.ToString("F2") + "m from " + _depthSource
+                      + " mask_centre=" + _centreU.ToString("F0") + "," + _centreV.ToString("F0"));
             Debug.Log("QUEST_OVERLAY drawn: texture=" + (_display != null ? _display.width + "x" + _display.height : "none")
                       + " lit=" + _litPixels + "/" + (_pixels != null ? _pixels.Length : 0)
                       + " quad_at=" + _quad.transform.position.ToString("F2")
@@ -133,6 +147,8 @@ public class TrackingMaskOverlay : MonoBehaviour
     {
         EnsureQuad();
         bool any = false;
+        double sumX = 0, sumY = 0;
+        _centreU = _centreV = -1f;
         for (int i = 0; i < result.objects.Length; i++)
         {
             TrackingObject obj = result.objects[i];
@@ -168,6 +184,8 @@ public class TrackingMaskOverlay : MonoBehaviour
                 {
                     _pixels[p] = tint;
                     _litPixels++;
+                    sumX += p % w;
+                    sumY += p / w;
                 }
             }
             any = true;
@@ -185,6 +203,8 @@ public class TrackingMaskOverlay : MonoBehaviour
             Show(false);
             return false;
         }
+        _centreU = (float)(sumX / _litPixels);
+        _centreV = (float)(sumY / _litPixels);
         _display.SetPixels32(_pixels);
         _display.Apply(false);
         return true;
@@ -196,7 +216,7 @@ public class TrackingMaskOverlay : MonoBehaviour
     /// </summary>
     void Place(MaskEnvelope env)
     {
-        float d = Mathf.Max(0.2f, Distance);
+        float d = _lastDepth = DepthFor(env);   // one raycast per result
         Vector3 tl = Unproject(0, 0, env, d);
         Vector3 tr = Unproject(env.sent_w, 0, env, d);
         Vector3 bl = Unproject(0, env.sent_h, env, d);
@@ -216,12 +236,73 @@ public class TrackingMaskOverlay : MonoBehaviour
             new Quaternion(env.pose.qx, env.pose.qy, env.pose.qz, env.pose.qw));
     }
 
-    /// <summary>Pixel (top-left origin) to a point in camera space at distance d.</summary>
+    /// <summary>
+    /// Sent-image pixel (top-left origin) to a point in camera space at distance d.
+    /// The intrinsics describe the FULL camera image, while masks arrive at the
+    /// downscaled size, so map through the envelope's crop first.
+    /// </summary>
     static Vector3 Unproject(float x, float y, MaskEnvelope env, float d)
     {
-        float dirX = (x - env.intrinsics.cx) / env.intrinsics.fx;
-        float dirY = -(y - env.intrinsics.cy) / env.intrinsics.fy; // image y grows down
+        Vector2 full = env.ToImagePixels(x, y);
+        float dirX = (full.x - env.intrinsics.cx) / env.intrinsics.fx;
+        float dirY = -(full.y - env.intrinsics.cy) / env.intrinsics.fy; // image y grows down
         return new Vector3(dirX * d, dirY * d, d);
+    }
+
+    /// <summary>
+    /// Distance to the mask plane. The capture-time depth hit is what the
+    /// wearer was actually looking at, so the plane sits on the object instead
+    /// of a guessed 1.5 m, which is what makes a flat overlay line up.
+    /// </summary>
+    float DepthFor(MaskEnvelope env)
+    {
+        _depthSource = "default";
+        if (env.world_hint != null && env.world_hint.IsSet && env.pose != null)
+        {
+            var hit = new Vector3(env.world_hint.px, env.world_hint.py, env.world_hint.pz);
+            var eye = new Vector3(env.pose.px, env.pose.py, env.pose.pz);
+            float measured = Vector3.Distance(hit, eye);
+            if (measured > 0.25f && measured < 5f)
+            {
+                _depthSource = "world_hint";
+                return measured;
+            }
+        }
+        float scanned = DepthAtMaskCentre(env);
+        if (scanned > 0f)
+        {
+            _depthSource = "depth raycast";
+            return scanned;
+        }
+        return Mathf.Max(0.2f, Distance);
+    }
+
+    /// <summary>
+    /// Distance to whatever the mask's centre points at, via the environment
+    /// depth raycast. Tracking snapshots carry no world_hint (no surface hit is
+    /// required to segment), so without this the plane sits at a guessed
+    /// distance and the overlay slides off the object as the wearer moves.
+    /// </summary>
+    float DepthAtMaskCentre(MaskEnvelope env)
+    {
+        if (_centreU < 0f)
+            return 0f;
+        if (_raycast == null)
+            _raycast = FindAnyObjectByType<EnvironmentRaycastManager>();
+        if (_raycast == null)
+            return 0f;
+        var origin = new Vector3(env.pose.px, env.pose.py, env.pose.pz);
+        var rotation = new Quaternion(env.pose.qx, env.pose.qy, env.pose.qz, env.pose.qw);
+        Vector3 local = Unproject(_centreU, _centreV, env, 1f);
+        var ray = new Ray(origin, rotation * local.normalized);
+        EnvironmentRaycastHit hit;
+        if (_raycast.Raycast(ray, out hit, 5f) && hit.status == EnvironmentRaycastHitStatus.Hit)
+        {
+            float d = Vector3.Distance(hit.point, origin);
+            if (d > 0.25f && d < 5f)
+                return d;
+        }
+        return 0f;
     }
 
     void EnsureQuad()
@@ -282,8 +363,23 @@ public class TrackingMaskOverlay : MonoBehaviour
     {
         public int sent_w;
         public int sent_h;
+        public int image_w;
+        public int image_h;
         public MaskIntrinsics intrinsics;
         public MaskPose pose;
+        public MaskCrop crop;
+        public MaskWorldHint world_hint;
+
+        /// <summary>Sent-image pixel -> full-image pixel, where the intrinsics live.</summary>
+        public Vector2 ToImagePixels(float x, float y)
+        {
+            if (crop != null && crop.sx != 0f && crop.sy != 0f)
+                return new Vector2(crop.sx * x + crop.tx, crop.sy * y + crop.ty);
+            // No crop block: fall back to the plain resize ratio.
+            float sx = sent_w > 0 && image_w > 0 ? image_w / (float)sent_w : 1f;
+            float sy = sent_h > 0 && image_h > 0 ? image_h / (float)sent_h : 1f;
+            return new Vector2(sx * x + (sx - 1f) * .5f, sy * y + (sy - 1f) * .5f);
+        }
 
         public bool IsUsable
         {
@@ -293,6 +389,28 @@ public class TrackingMaskOverlay : MonoBehaviour
                        && intrinsics.fx > 0f && intrinsics.fy > 0f;
             }
         }
+    }
+
+    [Serializable]
+    class MaskCrop
+    {
+        public float sx = 1f;
+        public float sy = 1f;
+        public float tx;
+        public float ty;
+    }
+
+    [Serializable]
+    class MaskWorldHint
+    {
+        public float px;
+        public float py;
+        public float pz;
+        // JsonUtility materialises a null object as zeros, so a present hit is
+        // only distinguishable by its non-empty frame name.
+        public string frame;
+
+        public bool IsSet { get { return !string.IsNullOrEmpty(frame); } }
     }
 
     [Serializable]

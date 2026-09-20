@@ -189,3 +189,20 @@ class TrackingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(missing.tracking_target)
         for text in ('{}', '{"track":null}', '{"track":{"type":"image_point","u":NaN,"v":0.5}}'):
             self.assertIsNone(parse_tracking_reply(text)[2])
+
+    def test_pixel_coordinates_are_normalised(self) -> None:
+        """The model answers in pixels despite the prompt; don't drop the target."""
+        pixels = '{"heard":"track it","say":"","track":{"type":"image_point","u":492,"v":351}}'
+        self.assertEqual(
+            parse_tracking_reply(pixels, 640, 480)[2],
+            {"type": "image_point", "u": 492 / 640, "v": 351 / 480},
+        )
+        # Fractions still win when both readings are possible.
+        fraction = '{"track":{"type":"image_point","u":0.5,"v":0.25}}'
+        self.assertEqual(
+            parse_tracking_reply(fraction, 640, 480)[2],
+            {"type": "image_point", "u": 0.5, "v": 0.25},
+        )
+        # Outside the image, or no size to work with: no target.
+        self.assertIsNone(parse_tracking_reply(pixels)[2])
+        self.assertIsNone(parse_tracking_reply('{"track":{"type":"image_point","u":900,"v":10}}', 640, 480)[2])
