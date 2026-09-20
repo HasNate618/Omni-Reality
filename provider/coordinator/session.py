@@ -58,6 +58,8 @@ class CoordinatorState:
         self.mark_sent: bool = False
         # Optional Sam2Bridge; existing mark/voice paths stay default.
         self.tracking: Any = None
+        self.guide: Any = None
+        self.guide_lock = asyncio.Lock()
         # Test seam: injected LiveSession factory (None = construct directly).
         self.live_factory: Any = None
         self.last_clock_skew_ns: int | None = None
@@ -93,6 +95,11 @@ class CoordinatorState:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.turn_tasks.clear()
+        if self.guide is not None:
+            self.guide.stop()
+            self.guide = None
+        if self.tracking is not None:
+            await self.tracking.reset()
         self.closed_utterances.update(self.utterances)
         self.utterances.clear()
         self.context.clear()

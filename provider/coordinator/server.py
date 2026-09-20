@@ -195,6 +195,8 @@ async def _handle_frame(ws: Any, state: CoordinatorState, message: dict) -> None
             if bridge.epoch is not None:
                 for turn_id in list(state.turn_tasks):
                     cancel_turn(state, turn_id)
+                from coordinator.turn import finish_guide
+                await finish_guide(state, _turn_sender(ws, state), state.turn_id, reason="error")
                 await bridge.reset()
                 await bridge.status("stopped", "Tracking origin changed; select the object again.")
             bridge.epoch = envelope["stage_epoch"]
@@ -276,6 +278,9 @@ def _attach_frame_to_utterance(state: CoordinatorState, message: dict, envelope:
 def _turn_sender(ws: Any, state: CoordinatorState):
     async def send(msg_type: str, turn_id: int, payload: dict, utterance_id: str | None = None) -> None:
         logger.debug("-> %s turn=%s", msg_type, turn_id)
+        if msg_type == "tracking_status" and payload.get("state") == "error" and state.guide is not None:
+            from coordinator.turn import finish_guide
+            await finish_guide(state, send, state.turn_id, reason="error", stop_tracking=False)
         try:
             await ws.send(_sendable(msg_type, state.session_id, turn_id, payload, utterance_id))
         except Exception:  # socket gone: drawings stay on Quest, nothing to retry
@@ -367,7 +372,7 @@ async def _handle_utterance_end(ws: Any, state: CoordinatorState, message: dict)
         return
     if buf is not None and _drop_phantom(state, _turn_sender(ws, state), utterance_id, buf):
         return
-    if mode == "live":
+    if mode == "live" and not (state.guide is not None and state.guide.active):
         _start_live_utterance(state, _turn_sender(ws, state), utterance_id)
         return
     if state.tracking is not None:
@@ -451,6 +456,13 @@ async def _handle_cancel(ws: Any, state: CoordinatorState, message: dict) -> Non
     turn_id = payload.get("turn_id")
     if isinstance(turn_id, int) and not isinstance(turn_id, bool) and "op_id" not in payload:
         cancel_turn(state, turn_id)
+        if state.guide is not None and (turn_id == state.tracking.turn_id
+                                        or turn_id == state.turn_id
+                                        or turn_id in state.turn_tasks):
+            from coordinator.turn import finish_guide
+            for pending_id in list(state.turn_tasks):
+                cancel_turn(state, pending_id)
+            await finish_guide(state, _turn_sender(ws, state), turn_id)
         if state.tracking is not None and state.tracking.turn_id == turn_id:
             await state.tracking.stop()
             await state.tracking.status("stopped", "Tracking stopped.")
@@ -560,6 +572,8 @@ async def _handle_clear_session(ws: Any, state: CoordinatorState, message: dict)
     from coordinator.jobs import clear_jobs
 
     clear_jobs(state.jobs, state.artifact_root)
+    from coordinator.turn import finish_guide
+    await finish_guide(state, _turn_sender(ws, state), state.turn_id)
     await state.clear_voice()
     await _close_live(state)
     payload = {"session_id": state.session_id, "generation": state.clear_generation}

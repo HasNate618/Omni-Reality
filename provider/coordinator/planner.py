@@ -31,6 +31,7 @@ from jsonschema import ValidationError
 from omni.reasoner import run_tool_loop
 from omni.tools import TOOL_DEFINITIONS
 from protocol.validate import validate_instance
+from coordinator.guide import GuidePlan
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ class PlanResult:
     audit_id: str | None = None
     proposed_op_count: int = 0  # before validation/capping
     tracking_targets: list[dict] = field(default_factory=list)
+    guide_plan: GuidePlan | None = None
 
     @property
     def tracking_target(self) -> dict | None:
@@ -224,7 +226,26 @@ is provided, the objects are absent, the request isn't to select an object,
 or you cannot determine which instance is meant. Do not invent a target.
 Give ONE point per distinct object and never two points on the same object.
 Return points only, not boxes, world coordinates, or drawing ops.
-Never claim tracking or rendering has started; the application does that later."""
+Never claim tracking or rendering has started; the application does that later.
+
+If and ONLY if the user asks for a tutorial, step-by-step help, or how to do a
+physical task (for example "show me how to organize this desk"), instead return:
+{"heard":"the user's words", "say":"", "guide": {
+ "title":"Organize your desk",
+ "objects":[{"id":"mug","label":"Mug","u":0.7,"v":0.6}],
+ "steps":[{"index":0,"instruction":"Move the mug to the right.","highlight":["mug"]}]}}
+A guide has 1-3 DISTINCT visible physical objects and 1-8 concise actionable
+steps, preferably three; each instruction is at most 240 characters.
+Use the exact supplied image and audio. Never invent
+objects or image coordinates. IDs are unique short alphanumeric identifiers;
+all highlight IDs must exist in objects and all objects must be used. Indices
+start at zero and are contiguous. The first highlight is the primary object;
+remaining highlights are secondary references. Points must lie on each visible
+object's surface, normalized 0..1; no pixels, world coordinates or extra fields.
+Keep the whole plan bounded and self-contained. If no image, the task is unclear,
+or needed objects are not visible, return track:[] and ask a short clarification.
+Ordinary requests to track/find/mark objects must use track, NEVER guide.
+Never generate a tutorial in response to a standalone next/repeat/stop command."""
 
 
 def parse_tracking_reply(
@@ -407,7 +428,7 @@ class YibuPlanner:
             model=self.model,
             messages=messages,
             purpose=self.purpose,
-            max_tokens=self.max_tokens,
+            max_tokens=max(self.max_tokens, 1536) if self.tracking else self.max_tokens,
         )
         return text, record
 
@@ -436,7 +457,7 @@ class YibuPlanner:
             self.model, len(pcm) / 32000, len(jpeg) if jpeg else 0, self.tracking,
         )
         if self.tracking:
-            # One call, no tools: tracking only ever wants a point back.
+            # One multimodal call selects points or returns a bounded guide.
             try:
                 text, record = await asyncio.to_thread(self._call, messages)
             except Exception as exc:
@@ -449,8 +470,23 @@ class YibuPlanner:
                 envelope.get("sent_w") if envelope else None,
                 envelope.get("sent_h") if envelope else None,
             )
+            reply = _extract_json_object(text) or {}
+            guide = None
+            if "guide" in reply:
+                targets = []
+                if jpeg is not None and envelope:
+                    try:
+                        guide = GuidePlan.from_dict(reply["guide"])
+                    except ValueError:
+                        logger.info("dropping invalid guide plan")
+                if guide is None:
+                    say = "I couldn't build a clear guide from that view. Please look at the objects and try again."
+                else:
+                    # The controller owns first-step speech after tracker seeding.
+                    say = ""
+                    targets = guide.tracking_targets
             return PlanResult(ops=[], text=say, heard=heard, latency_ms=latency_ms,
-                              audit_id=record.get("call_id"),
+                              audit_id=record.get("call_id"), guide_plan=guide,
                               tracking_targets=targets if jpeg is not None and envelope else [])
         frame_id = envelope["frame_id"] if envelope and jpeg is not None else None
         if self._execute_fn is None and self._jobs is None:
@@ -493,6 +529,30 @@ class YibuPlanner:
             audit_id=None,
             proposed_op_count=len(collected),
         )
+
+    async def guide_command(self, *, pcm: bytes) -> str:
+        """Transcribe a guide control turn without an image, tools, or replanning."""
+        from voice.audio import build_voice_messages, pcm_to_wav_bytes
+        from yibu_http import chat_completion, require_api_key
+
+        messages = build_voice_messages(
+            "Transcribe the recorded speech.", wav=pcm_to_wav_bytes(pcm), jpeg=None,
+            system='Return ONLY JSON {"heard":"verbatim speech transcript"}. '
+                   'Do not answer the request, generate instructions, or infer words not spoken. '
+                   'For silence or unintelligible audio return {"heard":""}.',
+            audio_as=self.audio_as,
+        )
+
+        def call() -> str:
+            text, _, _record = chat_completion(
+                api_key=require_api_key(), model=self.model, messages=messages,
+                purpose="guide-command", max_tokens=128,
+            )
+            return text
+
+        text = await asyncio.to_thread(call)
+        obj = _extract_json_object(text) or {}
+        return obj["heard"] if isinstance(obj.get("heard"), str) else ""
 
     async def _plan_voice_only(self, *, pcm: bytes, context: list[dict]) -> PlanResult:
         from voice.audio import build_voice_messages, pcm_to_wav_bytes

@@ -171,6 +171,10 @@ seed SAM 2 on that exact snapshot, then feeds subsequent Quest frames. The
 reply is spoken by Android text-to-speech on the headset, which costs no
 gateway credit.
 
+For step-by-step physical help, say **“Show me how to organize this desk.”**
+The [guided tutorial controller](omni-guided-tutorials.md) keeps the resulting
+plan and advances on “next”/“done”, replays on “repeat”, and clears on “stop”.
+
 ### B — continuous conversation
 
 Press **B** once to hand the microphone to the conversation loop (the caption

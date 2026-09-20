@@ -82,12 +82,15 @@ def start_turn(state: CoordinatorState, send: Send, utterance_id: str) -> asynci
         return None
     state.turn_id += 1
     turn_id = state.turn_id
-    if state.tracking is not None:
+    guide = state.guide if state.guide is not None and state.guide.active else None
+    if state.tracking is not None and guide is None:
         # Newest utterance replaces the whole pending selection, not just one
         # object of it: a new request re-picks everything to track.
         for old_id in list(state.turn_tasks):
             cancel_turn(state, old_id)
-    task = asyncio.create_task(_run_turn(state, send, turn_id, utterance_id, buf))
+    task = asyncio.create_task(
+        _run_guide_turn(state, send, turn_id, utterance_id, buf, guide) if guide else
+        _run_turn(state, send, turn_id, utterance_id, buf))
     state.turn_tasks[turn_id] = task
     task.add_done_callback(lambda t: _turn_task_done(state, turn_id, t))
     return task
@@ -259,6 +262,77 @@ async def _run_turn(
     del state.context[:-CONTEXT_TURNS]
 
 
+async def _emit_guide_step(state, send, turn_id, utterance_id, guide):
+    payload = guide.step_payload()
+    if payload is None:
+        return
+    generation = state.tracking.generation
+    if state.guide is not guide or not guide.active or generation != state.tracking.generation:
+        return
+    payload["generation"] = generation
+    await send("guide_step", turn_id, payload, utterance_id)
+    state.tracking.presentation_ready.set()
+    audio, _ = await _speak_audio(state, payload["instruction"], turn_id)
+    if state.guide is not guide or not guide.active or generation != state.tracking.generation:
+        return
+    await send("speak", turn_id, {
+        "turn_id": turn_id, "text": payload["instruction"], "audio": audio,
+    }, utterance_id)
+
+
+async def finish_guide(state, send, turn_id, utterance_id=None, *, reason="stopped", stop_tracking=True):
+    guide = state.guide
+    if guide is None:
+        return
+    guide.stop()
+    state.guide = None
+    generation = state.tracking.generation
+    if stop_tracking:
+        await state.tracking.stop()
+    line = "Great. Your guide is complete." if reason == "completed" else (
+        "Tracking was lost. Please start the guide again." if reason == "error" else "Guide stopped.")
+    await send("guide_finished", turn_id, {
+        "guide_id": guide.guide_id, "reason": reason,
+        "instruction": line, "generation": generation,
+    }, utterance_id)
+    if reason == "error" or utterance_id is None:
+        await send("stop_speak", turn_id, {"turn_id": turn_id}, utterance_id)
+    return line
+
+
+async def _run_guide_turn(state, send, turn_id, utterance_id, buf, guide):
+    from coordinator.guide import classify_guide_command
+
+    # Commands are serialized in arrival order; a second 'next' must not cancel
+    # the first transcript, and both must use the same original plan.
+    async with state.guide_lock:
+        if state.guide is not guide or not guide.active:
+            await send("stop_speak", turn_id, {"turn_id": turn_id}, utterance_id)
+            return
+        await send("turn_started", turn_id, {"utterance_id": utterance_id, "turn_id": turn_id}, utterance_id)
+        try:
+            heard = await asyncio.wait_for(state.planner.guide_command(pcm=bytes(buf.pcm)), 20)
+        except asyncio.CancelledError:
+            raise
+        except (Exception, SystemExit):
+            heard = ""
+        if state.guide is not guide or not guide.active:
+            return
+        command = classify_guide_command(heard)
+        if command == "next":
+            guide.advance()
+        if command == "stop" or not guide.active:
+            line = await finish_guide(state, send, turn_id, utterance_id,
+                                      reason="stopped" if command == "stop" else "completed")
+        elif command in ("next", "repeat"):
+            await _emit_guide_step(state, send, turn_id, utterance_id, guide)
+            return
+        else:
+            line = "Say next when you are ready, repeat to hear this step, or stop to end the guide."
+        audio, _ = await _speak_audio(state, line, turn_id)
+        await send("speak", turn_id, {"turn_id": turn_id, "text": line, "audio": audio}, utterance_id)
+
+
 async def _run_tracking_turn(state, turn_id, utterance_id, buf):
     from coordinator.sam2_bridge import TrackingError
 
@@ -283,7 +357,8 @@ async def _run_tracking_turn(state, turn_id, utterance_id, buf):
         ), bridge.history.seconds)
         if turn_id in state.cancelled_turns or generation != bridge.generation:
             return
-        targets = plan.tracking_targets
+        guide_plan = getattr(plan, "guide_plan", None)
+        targets = guide_plan.tracking_targets if guide_plan else plan.tracking_targets
         logger.info(
             "turn %d: model replied in %d ms; heard=%r targets=%s say=%r",
             turn_id, plan.latency_ms, plan.heard, targets, plan.text,
@@ -302,7 +377,19 @@ async def _run_tracking_turn(state, turn_id, utterance_id, buf):
         # mask and the voice is closed by the speech cache: canned lines are
         # warmed at startup and come back without a network call.
         seeded_at = time.monotonic()
-        await bridge.seed(frame, targets, generation)
+        if guide_plan is not None:
+            await bridge.seed(frame, targets, generation, defer_results=True)
+        else:
+            await bridge.seed(frame, targets, generation)
+        if guide_plan is not None:
+            from coordinator.guide import GuideSession
+            await bridge.wait_ready(generation)
+            if turn_id in state.cancelled_turns or generation != bridge.generation:
+                return
+            async with state.guide_lock:
+                state.guide = GuideSession.from_plan(guide_plan)
+                await _emit_guide_step(state, bridge.send, turn_id, utterance_id, state.guide)
+            return
         seeded_ms = int((time.monotonic() - seeded_at) * 1000)
         line = plan.text or (SAY_TRACKING_MANY if len(targets) > 1 else SAY_TRACKING_DEFAULT)
         audio, _voice_gate = await _speak_audio(state, line, turn_id)
@@ -322,15 +409,17 @@ async def _run_tracking_turn(state, turn_id, utterance_id, buf):
     except asyncio.TimeoutError:
         logger.warning("turn %d: the model did not answer in time", turn_id)
         if generation == bridge.generation:
-            await bridge.status("error", "The model timed out. Try again.")
+            await bridge.stop()
+            await bridge.status("error", "Selection or tracker startup timed out. Try again.")
         return
-    except Exception as exc:
+    except (Exception, SystemExit) as exc:
         logger.warning(
             "turn %d: tracking selection failed: %s: %s", turn_id, type(exc).__name__, exc,
             exc_info=not isinstance(exc, TrackingError),
         )
         if generation == bridge.generation:
             text = str(exc) if isinstance(exc, TrackingError) else "Object selection failed or timed out. Try again."
+            await bridge.stop()
             await bridge.status("error", text)
 
 
