@@ -284,6 +284,20 @@ def _turn_sender(ws: Any, state: CoordinatorState):
     return send
 
 
+async def _warm_speech(purpose: str) -> None:
+    """Pre-synthesize the canned lines; failures are not worth a turn."""
+    from coordinator.turn import SAY_MODEL_ERROR, SAY_NO_TARGET, SAY_TRACKING_DEFAULT
+    from voice.cloud_speech import warm_line
+
+    for line in (SAY_TRACKING_DEFAULT, SAY_NO_TARGET, SAY_MODEL_ERROR):
+        try:
+            await warm_line(line, purpose=purpose)
+        except Exception as exc:
+            logger.info("speech warm failed exception_class=%s", type(exc).__name__)
+            return
+    logger.info("canned speech warmed (%d lines)", 3)
+
+
 async def _warm_live_session(state: CoordinatorState) -> None:
     from coordinator import live_turn as live_mod
     await live_mod.ensure_live_session(state)
@@ -619,7 +633,7 @@ def make_planner(
         from coordinator.perception import PerceptionQaPlanner
         return PerceptionQaPlanner(**({"model": model} if model else {}))
     if tracking:
-        options = {"tracking": True, "purpose": "track-object"}
+        options = {"tracking": True, "purpose": "track-object", "max_tokens": 96}
         if model:
             options["model"] = model
         return YibuPlanner(**options)
@@ -671,6 +685,8 @@ async def run_server(
                 return await synthesize_line(text=text, purpose=speak_purpose)
 
             state.synthesizer = _live_synth
+            # Warm the fixed lines so the first turn does not pay for them.
+            asyncio.create_task(_warm_speech(speak_purpose))
         try:
             await handle_connection(ws, state)
         finally:

@@ -23,6 +23,23 @@ ENCODING = "pcm_s16le"
 SynthFn = Callable[[str], Awaitable[bytes | None]]
 
 
+# Short fixed lines ("Tracking that now.") repeat every turn and cost ~2 s of
+# synthesis each time, which is what separated the mask from the voice. Keep
+# them; the set of distinct lines in a session is tiny.
+_CACHE: dict[str, bytes] = {}
+_CACHE_MAX = 32
+
+
+def cached_line(text: str) -> bytes | None:
+    """PCM for a line already synthesized this session, if any."""
+    return _CACHE.get((text or "").strip())
+
+
+async def warm_line(text: str, purpose: str = "voice-speak") -> bool:
+    """Synthesize a line ahead of time so the turn that needs it does not wait."""
+    return await synthesize_line(text=text, purpose=purpose) is not None
+
+
 async def synthesize_line(
     *,
     text: str,
@@ -33,6 +50,9 @@ async def synthesize_line(
     """Speak `text` through cloud TTS. Returns s16le mono 16 kHz PCM or None."""
     if not text or not text.strip():
         return None
+    hit = _CACHE.get(text.strip())
+    if hit is not None:
+        return hit
     if synth_fn is not None:
         try:
             result = synth_fn(text)
@@ -42,7 +62,12 @@ async def synthesize_line(
         except Exception:
             logger.exception("injected speech synth failed")
             return None
-    return await asyncio.to_thread(_gemini_speech, text, purpose, timeout)
+    pcm = await asyncio.to_thread(_gemini_speech, text, purpose, timeout)
+    if pcm:
+        if len(_CACHE) >= _CACHE_MAX:
+            _CACHE.pop(next(iter(_CACHE)), None)
+        _CACHE[text.strip()] = pcm
+    return pcm
 
 
 def _gemini_speech(text: str, purpose: str, timeout: float) -> bytes | None:

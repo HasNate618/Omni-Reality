@@ -166,6 +166,7 @@ public class CoordinatorClient : MonoBehaviour
     int _trackingGeneration;
     int _activeTurn;
     string _activeUtterance;
+    int _droppedResults;
     string _stoppedUtterance;
     string _helloJson;
     string _pendingReplyId;
@@ -486,7 +487,14 @@ public class CoordinatorClient : MonoBehaviour
                 return;
             var header = JsonUtility.FromJson<TrackingMessageHeader>(text);
             if (header.utterance_id != _activeUtterance)
-                return; // a new push-to-talk request supersedes old results locally
+            {
+                // A newer request supersedes older results locally. Logged
+                // because a silent drop here looks exactly like "no masks".
+                if (type == "tracking_result" && _droppedResults++ % 30 == 0)
+                    Debug.Log("QUEST_TRACKING dropping " + type + " for utterance "
+                              + header.utterance_id + "; active is " + (_activeUtterance ?? "none"));
+                return;
+            }
             if (type == "turn_started")
             {
                 _activeTurn = header.turn_id;
@@ -825,6 +833,12 @@ public class CoordinatorClient : MonoBehaviour
             _pendingReplyId = utteranceId;
             _replyStartedAt = Time.realtimeSinceStartup;
         }
+        // B-mode turns can seed tracking too, and results are matched against
+        // _activeUtterance. Without this every B-mode mask was discarded.
+        _activeUtterance = utteranceId;
+        _activeTurn = 0;
+        _stoppedUtterance = null;
+        LatestTrackingResult = null;
         _outbox.Enqueue(PriorityUtteranceEnd,
             ProtocolJson.BuildUtteranceEnd(_sessionId, utteranceId));
     }

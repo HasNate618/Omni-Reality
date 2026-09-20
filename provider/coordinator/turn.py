@@ -14,6 +14,7 @@ import asyncio
 import base64
 import binascii
 import logging
+import time
 from typing import Any, Awaitable, Callable
 
 from jsonschema import ValidationError
@@ -287,17 +288,28 @@ async def _run_tracking_turn(state, turn_id, utterance_id, buf):
         target = plan.tracking_target
         if target is None:
             raise TrackingError("I couldn't identify one target. Look at it and try again.")
-        await bridge.seed(frame, target, generation)
+        # Seed first, and strictly: SAM 2's exact-frame handoff depends on no
+        # other task interleaving here, so synthesis must not overlap it.
         # Said only after seeding, so we never claim to be tracking something
-        # SAM 2 has not accepted. The mask is already on screen by now, so the
-        # synthesis below delays only the voice.
+        # SAM 2 has not accepted.
         #
         # Quest ships no Android text-to-speech engine (TTS_SERVICE resolves to
         # nothing), so QuestSpeech can never make sound on this device. Cloud
         # speech is the only audible path; when it is unavailable the headset
-        # still shows the caption.
+        # still shows the caption. The gap synthesis used to leave between the
+        # mask and the voice is closed by the speech cache: canned lines are
+        # warmed at startup and come back without a network call.
+        seeded_at = time.monotonic()
+        await bridge.seed(frame, target, generation)
+        seeded_ms = int((time.monotonic() - seeded_at) * 1000)
         line = plan.text or SAY_TRACKING_DEFAULT
         audio, _voice_gate = await _speak_audio(state, line, turn_id)
+        logger.info(
+            "turn %d: seed %d ms, then speech in %d ms (%s)",
+            turn_id, seeded_ms,
+            int((time.monotonic() - seeded_at) * 1000) - seeded_ms,
+            "no audio" if audio is None else "%d b64 bytes" % len(audio["data_b64"]),
+        )
         await bridge.send(
             "speak", turn_id,
             {"turn_id": turn_id, "text": line, "audio": audio},
