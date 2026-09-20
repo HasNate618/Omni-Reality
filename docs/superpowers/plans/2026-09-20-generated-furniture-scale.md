@@ -1336,7 +1336,7 @@ Expected: PASS. If a test double calls `bind_tools` positionally, fix the call t
 - [ ] **Step 10: Commit**
 
 ```bash
-git add provider/coordinator/listings.py provider/coordinator/planner.py provider/coordinator/session.py provider/tests/test_listings.py provider/tests/test_place_item_turn.py
+git add provider/coordinator/listings.py provider/coordinator/planner.py provider/coordinator/session.py provider/coordinator/jobs.py provider/coordinator/prebaked.py provider/tests/test_listings.py provider/tests/test_place_item_turn.py
 git commit -m "Coordinator: place_item handler, listing memory, coordinator ops"
 ```
 
@@ -1352,7 +1352,7 @@ git commit -m "Coordinator: place_item handler, listing memory, coordinator ops"
 - Consumes: `extent_m` on the job record and `planted` (Task 6).
 - Produces: `build_place_generated(*, job_id, turn_id, stage_epoch, target, extent_m=None)`. `on_job_terminal` no longer emits for a planted job.
 
-**Why:** a job with extents is planted when accepted, so `on_job_terminal` emitting again would place the same object twice.
+**Why:** a job with extents is planted when accepted, so `on_job_terminal` emitting again would place the same object twice. This task also wires the session stores into the planner, without which `place_item` cannot work in production at all.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1466,14 +1466,73 @@ In `on_job_terminal`, immediately after the `if status not in ("ready", "failed"
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cd provider && . .venv/bin/activate && python -m unittest tests.test_turn_tools -v`
-Expected: PASS, including the four pre-existing `PlaceGeneratedTests`.
+Run: `cd provider && . .venv/bin/activate && python -m unittest tests.test_turn_tools tests.test_turn -v`
+Expected: PASS, including the four pre-existing `PlaceGeneratedTests` and the new bind-wiring test.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Bind the session stores into the planner**
+
+`_run_turn` binds only `jobs`, `jpeg_b64`, and `frame_id`, so in production
+`self._listings` stays `None` and a model `place_item` call raises
+`AttributeError` — which `_run_turn` then degrades into a model-error turn.
+Nothing places, and the tests do not catch it because they bind the planner
+directly.
+
+In `provider/coordinator/turn.py`, extend the bind call inside `_run_turn`:
+
+```python
+        try:
+            bind(
+                jobs=state.jobs,
+                jpeg_b64=base64.b64encode(buf.jpeg).decode() if buf.jpeg else None,
+                frame_id=(buf.envelope or {}).get("frame_id"),
+                listings=state.listings,
+                prebaked=state.prebaked,
+            )
+        except Exception:
+```
+
+Do **not** add a `queue_fn` argument here. `_dispatch_tool` already resolves
+`self._queue_fn or _default_queue_fn`, so leaving it unbound falls back to the
+real worker client in production, which is what the live path needs. Unit tests
+bind a fake `queue_fn` directly, and `None` there is what exempts them from the
+busy check.
+
+Add a test to `provider/tests/test_turn.py` using a fake planner that records
+its `bind_tools` keyword arguments:
+
+```python
+    def test_turn_binds_session_stores_into_the_planner(self) -> None:
+        bound = {}
+
+        class RecordingPlanner:
+            def bind_tools(self, **kwargs):
+                bound.update(kwargs)
+
+            async def plan(self, **kwargs):
+                from coordinator.planner import PlanResult
+
+                return PlanResult(ops=[], text="ok")
+
+        state = CoordinatorState(planner=RecordingPlanner())
+        state.listings.record("oak side table", [0.55, 0.40, 0.72], "f1", "page")
+        state.prebaked = {"oak side table": "01m2xbae3n81b4scq0k83teqjw"}
+        asyncio.run(_run_turn_for_test(state, "utt-1"))
+        self.assertIs(bound.get("listings"), state.listings)
+        self.assertEqual(bound.get("prebaked"), state.prebaked)
+        self.assertIs(bound.get("jobs"), state.jobs)
+```
+
+Drive `_run_turn` the way the existing turn tests already do — reuse whatever
+helper `provider/tests/test_turn.py` uses to build an `UtteranceBuffer` and a
+`send` stub, rather than inventing one. If there is no such helper, call
+`start_turn` with a buffered utterance longer than
+`MIN_UTTERANCE_S * BYTES_PER_SECOND` and await the returned task.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add provider/coordinator/turn.py provider/tests/test_turn_tools.py
-git commit -m "Coordinator: plant sized ops at accept, never twice"
+git add provider/coordinator/turn.py provider/tests/test_turn_tools.py provider/tests/test_turn.py
+git commit -m "Coordinator: plant sized ops at accept, and bind session stores"
 ```
 
 ---
