@@ -902,6 +902,16 @@ class HandlePlaceItemTests(unittest.TestCase):
         ))
         self.assertAlmostEqual(result["run_length_m"], 0.55, places=6)
 
+    def test_boolean_axis_is_refused(self) -> None:
+        # isinstance(True, int) is True in Python, so a bool must be rejected
+        # explicitly rather than slipping through the numeric check.
+        args = self._good()
+        args["extent_m"] = [True, 0.40, 0.72]
+        result, op = self._call(args)
+        self.assertEqual(result["error"], "invalid")
+        self.assertIsNone(op)
+        self.assertEqual(self.memory.rows(), [])
+
     def test_busy_refusal_leaves_no_trace(self) -> None:
         # A worker is queued for the first item, so the second is refused.
         # A refusal must not record a row or queue a worker.
@@ -1017,21 +1027,16 @@ async def handle_place_item(
     if name is None or extents is None or target is None:
         return {"error": "invalid"}, None
 
-    # The busy rule protects the worker, so it only applies when we are about
-    # to queue one. A refusal must leave no trace, so record() runs after it.
+    # The busy rule protects the worker, so it applies only when a worker is
+    # actually about to be queued. Nothing is recorded until the placement is
+    # certain, so every refusal leaves no row and shifts no pack offset.
     from workers.gen_client import BusyError
 
     artifact_id = lookup(prebaked, name)
-    if artifact_id is None and queue_fn is not None and session_generation_busy(store):
-        return {"error": "busy"}, None
-
-    listings.record(name, extents, current_frame_id, "page")
-    offset_m = _offset_for(listings, name)
-    row_extents = [row["extent_m"] for row in listings.rows()]
     if artifact_id is not None:
-        job_id = artifact_id
-        store.jobs[job_id] = {
-            "job_id": job_id,
+        # No worker is queued, so there is nothing to serialize.
+        store.jobs[artifact_id] = {
+            "job_id": artifact_id,
             "frame_id": current_frame_id,
             "target": target,
             "object_id": None,
@@ -1039,15 +1044,10 @@ async def handle_place_item(
             "extent_m": extents,
             "planted": True,
         }
-        return (
-            {
-                "listed": name,
-                "extent_m": extents,
-                "job_id": job_id,
-                "run_length_m": run_length(row_extents),
-            },
-            _place_op(job_id, extents, target, offset_m),
-        )
+        return _place_result(listings, name, extents, target, current_frame_id, artifact_id)
+
+    if queue_fn is not None and session_generation_busy(store):
+        return {"error": "busy"}, None
 
     job_id = new_ulid()
     store.jobs[job_id] = {
@@ -1070,16 +1070,37 @@ async def handle_place_item(
                 extent_m=extents,
             ))
         except BusyError:
+            # The worker refused, so no placement happened. No row was
+            # recorded yet, so there is nothing to roll back.
             store.jobs.pop(job_id, None)
             return {"error": "busy"}, None
+
+    return _place_result(listings, name, extents, target, current_frame_id, job_id)
+
+
+def _place_result(
+    listings: "ListingMemory",
+    name: str,
+    extents: list[float],
+    target: dict,
+    current_frame_id: str | None,
+    job_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Record the row and build (tool_result, coordinator_op) in one place.
+
+    Both success paths go through here so `run_length_m` and the offset can
+    never drift between them. Recording happens here, after every refusal
+    point, which is what keeps a refused placement side-effect free.
+    """
+    listings.record(name, extents, current_frame_id, "page")
     return (
         {
             "listed": name,
             "extent_m": extents,
             "job_id": job_id,
-            "run_length_m": run_length(row_extents),
+            "run_length_m": run_length([row["extent_m"] for row in listings.rows()]),
         },
-        _place_op(job_id, extents, target, offset_m),
+        _place_op(job_id, extents, target, _offset_for(listings, name)),
     )
 
 
@@ -1326,7 +1347,7 @@ and the legacy path line becomes:
 - [ ] **Step 9: Run the tests to verify they pass**
 
 Run: `cd provider && . .venv/bin/activate && python -m unittest tests.test_place_item_turn tests.test_listings -v`
-Expected: PASS, 33 tests.
+Expected: PASS, 34 tests.
 
 Then run the whole suite to catch regressions from the `bind_tools` signature change:
 

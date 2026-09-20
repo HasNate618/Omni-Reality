@@ -182,7 +182,7 @@ on whether extents are known:
 - **No extents (existing path).** Behaviour is unchanged: nothing is emitted
   until the artifact is ready.
 
-Generation is serialized: `_session_generation_busy` refuses a second worker
+Generation is serialized: `session_generation_busy` refuses a second worker
 job while one is queued or running. The rule protects the worker, so it applies
 **only when a worker is actually about to be queued** — the pre-baked path
 queues nothing and is not subject to it. A refusal must leave no trace: a
