@@ -118,9 +118,33 @@ public class DrawingStore : MonoBehaviour
         {
             GameObject oldest = _marks[0];
             _marks.RemoveAt(0);
+            ForgetGenerated(oldest);
             if (oldest != null)
                 DestroyMark(oldest);
         }
+    }
+
+    /// <summary>
+    /// Drop the generated record for an evicted root: HasGenerated must not
+    /// keep claiming a drawing the clutter cap already removed.
+    /// </summary>
+    void ForgetGenerated(GameObject root)
+    {
+        // Unity's == treats two destroyed objects as equal, so compare only
+        // while the evicted root is still alive.
+        if (root == null)
+            return;
+        string key = null;
+        foreach (KeyValuePair<string, GeneratedRecord> entry in _generated)
+        {
+            if (entry.Value.Root == root)
+            {
+                key = entry.Key;
+                break;
+            }
+        }
+        if (key != null)
+            _generated.Remove(key);
     }
 
     public GameObject PlaceMark(Vector3 point, Vector3 normal, string drawingId, float diameterM)
@@ -211,6 +235,10 @@ public class DrawingStore : MonoBehaviour
         root.transform.rotation = box.transform.rotation;
         box.transform.SetParent(root.transform, false);
         box.transform.localPosition = Vector3.zero;
+        // SetParent(false) keeps the box's local rotation, which still equals
+        // its former world rotation; the root carries that rotation already,
+        // so leaving it would render the box at twice the yaw.
+        box.transform.localRotation = Quaternion.identity;
         root.transform.SetParent(null, true);
         TryAddAnchor(root);
         _marks.Add(root);
@@ -276,9 +304,17 @@ public class DrawingStore : MonoBehaviour
         Bounds bounds = renderers[0].bounds;
         for (int i = 1; i < renderers.Length; i++)
             bounds.Encapsulate(renderers[i].bounds);
+        // The imported holder sits at the world origin, so its bounds centre
+        // is not its pivot. Capture both in the world frame before the
+        // reparent, which is the only frame where they are still meaningful.
+        Vector3 centreOffset = bounds.center - mesh.transform.position;
         float scale = ListingBox.FitScale(bounds.size, rec.BoxSize);
         mesh.transform.localScale = mesh.transform.localScale * scale;
-        mesh.transform.SetParent(rec.Root.transform, true);
+        // worldPositionStays: false, so the mesh keeps its local transform and
+        // would otherwise stay at the origin it was imported at. Uniform
+        // scaling leaves the centre offset parallel to itself, only scaled.
+        mesh.transform.SetParent(rec.Root.transform, false);
+        mesh.transform.position = rec.Root.transform.position - centreOffset * scale;
         rec.Mesh = mesh;
         MarkMeshFitted(drawingId, ListingBox.IsApproximate(bounds.size, rec.BoxSize));
         return true;
