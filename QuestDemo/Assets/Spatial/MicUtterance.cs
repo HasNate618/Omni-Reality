@@ -87,6 +87,7 @@ public class MicUtterance : MonoBehaviour
 
     bool _listening;
     bool _toggleWasHeld;
+    bool _replyWasPlaying;
     GameObject _listeningDot;
 
     /// <summary>Controller A press: flip listening. Off cuts any reply and
@@ -207,14 +208,24 @@ public class MicUtterance : MonoBehaviour
             DiscardMicWindow();
             return;
         }
-        if (_client.SpeakPlayer != null && _client.SpeakPlayer.IsPlaying)
+        bool playing = _client.SpeakPlayer != null && _client.SpeakPlayer.IsPlaying;
+        if (playing)
         {
+            _replyWasPlaying = true;
             if (_listening)
                 PumpMicBargeIn();
             else
                 DiscardMicWindow();
             return;
         }
+        if (_replyWasPlaying && _listening && !_client.AwaitingReply)
+        {
+            // One-shot: the reply just finished, stand down until next press.
+            _replyWasPlaying = false;
+            ToggleListening();
+            return;
+        }
+        _replyWasPlaying = false;
         if (!_listening || _clip == null)
         {
             if (!_listening)
