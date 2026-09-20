@@ -24,13 +24,18 @@ import base64
 import binascii
 import json
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Any
 
 from jsonschema import ValidationError
 
 from coordinator.live_config import ensure_live_voice_only_config
-from coordinator.session import CoordinatorState, UtteranceBuffer
+from coordinator.artifacts import ARTIFACT_PORT, start_artifact_server
+from coordinator.jobs import JobStore
+from coordinator.prebaked import load_registry
+from coordinator.session import DEFAULT_ARTIFACT_ROOT, CoordinatorState, UtteranceBuffer
 from coordinator.turn import cancel_turn, ingest_audio_chunk, start_turn
 from voice.audio import BYTES_PER_SECOND, MIN_UTTERANCE_S
 from yibu_audit import ApiKeyConfigurationError, ensure_env_api_key
@@ -40,6 +45,42 @@ from protocol.validate import validate_instance
 logger = logging.getLogger(__name__)
 
 CLOCK_SKEW_THRESHOLD_NS = 2_000_000_000
+
+# Pre-baked artifact registry (spec §5.3): the operator maps a listing name to
+# an existing artifact id, so a pre-baked listing is placed without queueing a
+# worker. A missing or malformed file degrades to an empty registry, so a
+# fresh checkout behaves exactly as before.
+DEFAULT_PREBAKED_REGISTRY = DEFAULT_ARTIFACT_ROOT.parent / "prebaked.json"
+
+
+def prebaked_registry_path() -> Path:
+    """Operator-set registry path; default sits beside the generated GLBs."""
+    return Path(os.environ.get("OMNI_PREBAKED_REGISTRY", str(DEFAULT_PREBAKED_REGISTRY)))
+
+
+def build_state(
+    planner_kind: str,
+    model: str | None = None,
+    *,
+    voice_only: bool = False,
+    perception_qa: bool = False,
+    jobs: JobStore | None = None,
+) -> CoordinatorState:
+    """One connection's state, with the operator's pre-baked registry loaded.
+
+    Whether a listing is pre-baked is coordinator configuration, never a model
+    input, so the registry comes from the environment here rather than from a
+    tool argument.
+    """
+    state = CoordinatorState(
+        planner=make_planner(
+            planner_kind, model, voice_only=voice_only, perception_qa=perception_qa
+        ),
+        jobs=jobs,
+    )
+    state.prebaked = load_registry(prebaked_registry_path())
+    return state
+
 
 _MARK_STYLE = {"color": "#3DDCFF", "label": None}
 _MARK_MOTION = {"kind": "pulse", "period_s": 1.2}
@@ -597,9 +638,16 @@ async def run_server(
         ensure_env_api_key("YIBU_API_KEY")
     import websockets
 
+    # One job store for the process: the artifact HTTP server (below) reads job
+    # readiness from the same store the connection registers jobs in, and
+    # binding 8766 once keeps a reconnect from colliding with the first bind.
+    jobs = JobStore()
+    start_artifact_server(host, ARTIFACT_PORT, jobs, DEFAULT_ARTIFACT_ROOT)
+
     async def _serve_one(ws) -> None:
-        state = CoordinatorState(
-            planner=make_planner(planner_kind, model, voice_only=voice_only, perception_qa=perception_qa)
+        state = build_state(
+            planner_kind, model, voice_only=voice_only, perception_qa=perception_qa,
+            jobs=jobs,
         )
         if sam2_url:
             from coordinator.sam2_bridge import Sam2Bridge

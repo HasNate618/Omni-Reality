@@ -24,6 +24,10 @@ is known and at ready otherwise.
   `JobStore` for the gen worker only.
 - Generated meshes: `GET http://{laptop}:{artifact_port}/artifacts/{job_id}.glb`
   with ULID `job_id` only (default port 8766 in `hello_ok.payload.artifact_port`).
+- Pre-baked registry (coordinator config, not a model input): env var
+  `OMNI_PREBAKED_REGISTRY` (default `provider/artifacts/prebaked.json`) maps a
+  normalized listing name to an existing artifact id; a missing or malformed
+  file yields an empty registry.
 - Speech after generation waits for placement ACKs; the first turn must not claim
   the GLB is already placed.
 - Live voice turn (`--planner yibu`): the turn loop binds session tools per turn

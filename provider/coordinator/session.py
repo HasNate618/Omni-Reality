@@ -19,6 +19,11 @@ from coordinator.artifacts import ARTIFACT_PORT
 from coordinator.jobs import JobStore
 from coordinator.listings import ListingMemory
 
+# Default artifact directory, a sibling of the pre-baked registry file
+# (server.py). Kept module-level so the process-wide artifact HTTP server and
+# every connection state agree on one path.
+DEFAULT_ARTIFACT_ROOT = Path(__file__).resolve().parent.parent / "artifacts" / "generated"
+
 
 @dataclass
 class UtteranceBuffer:
@@ -38,7 +43,7 @@ class CoordinatorState:
     run instead.
     """
 
-    def __init__(self, planner: Any = None) -> None:
+    def __init__(self, planner: Any = None, *, jobs: JobStore | None = None) -> None:
         self.planner = planner
         self.utterances: dict[str, UtteranceBuffer] = {}
         self.closed_utterances: set[str] = set()
@@ -57,7 +62,7 @@ class CoordinatorState:
         self.cancelled_op_ids: list[str] = []
         self.mark_sent: bool = False
         self.last_clock_skew_ns: int | None = None
-        self.jobs = JobStore()
+        self.jobs = jobs if jobs is not None else JobStore()
         self.listings = ListingMemory()
         self.prebaked: dict[str, str] = {}
         # Cloud speech synth for speak.audio (None = caption-only degraded).
@@ -80,7 +85,7 @@ class CoordinatorState:
         self.sam2_url: str | None = None
         self._live_frame: tuple | None = None
         self.artifact_port: int = ARTIFACT_PORT
-        self.artifact_root: Path = Path(__file__).resolve().parent.parent / "artifacts" / "generated"
+        self.artifact_root: Path = DEFAULT_ARTIFACT_ROOT
         self.clear_generation: int = 1
 
     def accepts_utterance(self, utterance_id: str) -> bool:

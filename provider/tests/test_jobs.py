@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 
 from coordinator.jobs import (
     JobStore,
@@ -133,3 +135,27 @@ class JobStoreTests(unittest.TestCase):
         self.assertTrue(coordinator_may_place(self.store, job_id))
         clear_jobs(self.store)
         self.assertFalse(coordinator_may_place(self.store, job_id))
+
+    def test_clear_jobs_keeps_prebaked_artifacts(self) -> None:
+        # The pre-baked GLB is the operator's night-before bake, not the
+        # session's. Unlinking it on teardown made the pre-bake single-use:
+        # take two got a 404, six retries, and a box with no mesh (spec §5.3).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prebaked_id = new_ulid()
+            owned_id = new_ulid()
+            self.store.jobs[prebaked_id] = {
+                "job_id": prebaked_id, "status": "ready", "prebaked": True,
+            }
+            self.store.jobs[owned_id] = {"job_id": owned_id, "status": "ready"}
+            for job_id in (prebaked_id, owned_id):
+                (root / f"{job_id}.glb").write_bytes(b"glTF" + b"\x00" * 8)
+
+            clear_jobs(self.store, root)
+
+            self.assertTrue(
+                (root / f"{prebaked_id}.glb").is_file(),
+                "a pre-baked artifact must survive session teardown")
+            self.assertFalse(
+                (root / f"{owned_id}.glb").exists(),
+                "a session-owned artifact is still reclaimed")

@@ -27,7 +27,7 @@ async def _call_injected(fn: InspectFn | QueueFn, **kwargs: Any) -> Any:
 
 
 def _inspect_result(
-    frame_id: str,
+    frame_id: str | None,
     *,
     count: int = 0,
     objects: list[dict[str, Any]] | None = None,
@@ -46,11 +46,11 @@ def _inspect_result(
 async def handle_inspect(
     store: JobStore,
     *,
-    frame_id: str,
+    frame_id: str | None,
     jpeg_b64: str,
     target: dict[str, Any],
     phrase: str | None,
-    current_frame_id: str,
+    current_frame_id: str | None,
     inspect_fn: InspectFn,
 ) -> dict[str, Any]:
     if frame_id != current_frame_id:
@@ -99,7 +99,7 @@ async def handle_inspect(
     return _inspect_result(frame_id, count=len(public), objects=public)
 
 
-def _object_target(frame_id: str, obj: dict[str, Any]) -> dict[str, Any]:
+def _object_target(frame_id: str | None, obj: dict[str, Any]) -> dict[str, Any]:
     return {
         "type": "image_box",
         "frame_id": frame_id,
@@ -122,7 +122,7 @@ async def handle_start_generation(
     store: JobStore,
     *,
     args: dict[str, Any],
-    current_frame_id: str,
+    current_frame_id: str | None,
     jpeg_b64: str | None,
     queue_fn: QueueFn,
 ) -> dict[str, Any]:
@@ -193,12 +193,17 @@ def mark_failed(store: JobStore, job_id: str) -> None:
 
 
 def clear_jobs(store: JobStore, artifact_root: Path | None = None) -> None:
-    job_ids = list(store.jobs.keys())
+    job_records = list(store.jobs.items())
     store.objects.clear()
     store.jobs.clear()
     if artifact_root is None:
         return
-    for job_id in job_ids:
+    for job_id, job in job_records:
+        # A pre-baked artifact belongs to the operator, not the session: it is
+        # the night-before bake, and unlinking it would make take two a 404
+        # (spec §5.3). Session-owned artifacts are still reclaimed.
+        if job.get("prebaked"):
+            continue
         path = artifact_root / f"{job_id}.glb"
         try:
             path.unlink(missing_ok=True)

@@ -12,10 +12,13 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
+import tempfile
 import time
 import unittest
+from pathlib import Path
 
-from coordinator.server import handle_connection, CoordinatorState
+from coordinator.server import CoordinatorState, build_state, handle_connection
 from protocol.validate import load_fixture, validate_instance
 
 
@@ -322,6 +325,46 @@ class CoordinatorTests(unittest.TestCase):
             self.assertEqual(message["v"], 1)
             validate_instance("message", message)
         json.dumps(ws.sent)  # must be JSON-serializable text frames
+
+
+_ARTIFACT = "01m2xbae3n81b4scq0k83teqjw"
+
+
+class PrebakedRegistryWiringTests(unittest.TestCase):
+    """The pre-baked registry is coordinator configuration (spec §5.3).
+
+    Nothing called load_registry outside tests before this, so every listing
+    fell to the (dead) live branch and the locked demo's pre-baked plan could
+    not load in production.
+    """
+
+    def _build_with_registry(self, contents: str | None):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "prebaked.json"
+            if contents is not None:
+                path.write_text(contents)
+            previous = os.environ.get("OMNI_PREBAKED_REGISTRY")
+            os.environ["OMNI_PREBAKED_REGISTRY"] = str(path)
+            try:
+                return build_state("mark")
+            finally:
+                if previous is None:
+                    os.environ.pop("OMNI_PREBAKED_REGISTRY", None)
+                else:
+                    os.environ["OMNI_PREBAKED_REGISTRY"] = previous
+
+    def test_state_loads_the_configured_registry(self) -> None:
+        state = self._build_with_registry(
+            json.dumps({"Oak Side Table": _ARTIFACT}))
+        self.assertEqual(state.prebaked, {"oak side table": _ARTIFACT})
+
+    def test_missing_registry_degrades_to_empty(self) -> None:
+        state = self._build_with_registry(None)
+        self.assertEqual(state.prebaked, {})
+
+    def test_malformed_registry_degrades_to_empty(self) -> None:
+        state = self._build_with_registry("not json")
+        self.assertEqual(state.prebaked, {})
 
 
 if __name__ == "__main__":
