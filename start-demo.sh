@@ -164,8 +164,25 @@ if [ "$adb_up" = 1 ]; then
     installed_epoch=$(date -j -f "%Y-%m-%d %H:%M:%S" "$installed" +%s 2>/dev/null || echo 0)
     if [ "$INSTALL_APK" = 1 ]; then
       echo "    installing $APK ..."
-      if adb install -r "$APK" >/dev/null 2>&1; then ok "installed (built $(date -r "$apk_epoch" '+%H:%M'))"
-      else warn "adb install failed; install it from Unity instead"; fi
+      out=$(adb install -r "$APK" 2>&1)
+      if echo "$out" | grep -q Success; then
+        ok "installed (built $(date -r "$apk_epoch" '+%H:%M'))"
+      elif echo "$out" | grep -q INSTALL_FAILED_UPDATE_INCOMPATIBLE; then
+        # Different signing keystore than the build already on the headset.
+        # The app keeps no data worth saving, so replace it outright.
+        warn "installed app was signed with a different keystore; replacing it"
+        adb uninstall $APP_ID >/dev/null 2>&1
+        out=$(adb install "$APK" 2>&1)
+        if echo "$out" | grep -q Success; then
+          ok "reinstalled clean (built $(date -r "$apk_epoch" '+%H:%M'))"
+        else
+          warn "reinstall failed:"
+          echo "$out" | sed 's/^/        /'
+        fi
+      else
+        warn "adb install failed:"
+        echo "$out" | sed 's/^/        /'
+      fi
     elif [ "$apk_epoch" -gt "$installed_epoch" ]; then
       warn "the headset is running an OLDER build (installed $installed, apk built $(date -r "$apk_epoch" '+%Y-%m-%d %H:%M'))"
       warn "your Unity changes are NOT on the device. Re-run with --install"
