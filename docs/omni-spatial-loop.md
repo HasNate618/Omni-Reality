@@ -29,6 +29,22 @@ ops over LAN; Unity renders and ACKs. No model calls in these slices.
 - SAM2/generation tool loop (inspect, async mesh, artifact GET) is documented in
   `docs/omni-worker-tools.md` and is separate from the default mark-only path.
 
+## Sized placement (added 2026-09-20)
+
+`place_generated` may carry `extent_m` (3 axes, 0.05–3.0 m). When it does,
+Quest plants a listed-size box at the capture-time hit and ACKs `placed`
+immediately — the box is real whether or not the mesh exists yet. The GLB is
+fetched with a bounded retry (6 attempts, ~15 s) because the artifact server
+only serves a job once it is `ready`. The mesh is fitted uniformly inside the
+box; it is never stretched, and a mesh whose proportions miss the listing by
+more than 25% keeps the box visible and is reported as approximate. If the
+mesh never arrives, the box stays at full stated size.
+
+Generated drawings are `DrawingStore` citizens: one `drawing_id` covers the
+box and the mesh, so remove, undo, the clutter cap, voice revise, and
+floor-plane grab all address one object. Voice cannot enlarge or shrink
+generated furniture — the listed size is the claim.
+
 ## Pointers
 
 - Binding design: `docs/superpowers/specs/2026-09-19-spatial-omni-assistant-design.md`
@@ -104,6 +120,7 @@ Quest events: `mic_permission`, `mic_started`, `mic_failed`, `vad_opened`,
 Coordinator events: `connection_open`, `connection_close`,
 `utterance_end_accepted`, `turn_started`, `planner_complete`, `synth_result`,
 `planner_failed`, `synth_failed`.
+
 - Quest renders `mark`, `label` (billboard card), `ghost` (rotate/slide),
   `connect`, `place_procedural` (local composition: arrow/pointer/panel/
   cube/sphere/cylinder, closed palette/sizes/materials), and

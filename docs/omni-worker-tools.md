@@ -9,6 +9,14 @@ the coordinator owns `place_generated` after a job is ready.
 - Model tools (OpenAI function shape): `inspect_objects`, `start_generation`,
   `emit_scene_ops` (max three ops per call; no `place_generated` / `place_known`
   from the model).
+- `place_item(name, extent_m, target)` is a model tool. `extent_m` is the
+  listing's own `[width, depth, height]` in metres and is **required**: the
+  model may not place a listing it cannot size. The coordinator validates the
+  metres, records the row, and authors the `place_generated` op, which carries
+  `extent_m` when the size is known.
+- A listing that is pre-baked in the coordinator registry is placed without
+  queueing a worker. Generation is otherwise serialized: one worker job per
+  session at a time.
 - Omni inputs require ≥0.5 s PCM (s16le 16 kHz mono) plus a JPEG; tool loop caps
   at four rounds (`provider/omni/reasoner.py`).
 - Inspect results never include masks on the wire to the model; masks stay in
