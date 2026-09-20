@@ -166,6 +166,57 @@ class PlaceGeneratedTests(unittest.TestCase):
         self.assertEqual(self.sent, [], "already planted; no second op")
         self.assertEqual(self.announced, [{"status": "ready", "planted": True}])
 
+    def test_planted_but_extentless_job_still_emits(self) -> None:
+        # The guard needs BOTH keys. With `or` instead of `and`, a job that was
+        # marked planted but never given extents would silently suppress its
+        # place_generated op.
+        job_id = new_ulid()
+        self.store.jobs[job_id] = {
+            "job_id": job_id,
+            "frame_id": self.target["frame_id"],
+            "target": self.target,
+            "status": "ready",
+            "stage_epoch": 1,
+            "planted": True,
+        }
+
+        async def send(op):
+            self.sent.append(op)
+            return {"status": "placed", "op_id": op["op_id"]}
+
+        async def complete_final_fn(ack):
+            self.announced.append(ack)
+
+        asyncio.run(on_job_terminal(self.state, job_id, send, complete_final_fn))
+        self.assertEqual(len(self.sent), 1, "no extents, so it must still emit")
+
+    def test_failed_planted_job_reports_failure(self) -> None:
+        # A planted job whose worker fails must still report failure: the box
+        # stays in the room, but the mesh never arrived and the coordinator has
+        # to be able to say so.
+        job_id = new_ulid()
+        self.store.jobs[job_id] = {
+            "job_id": job_id,
+            "frame_id": self.target["frame_id"],
+            "target": self.target,
+            "status": "queued",
+            "stage_epoch": 1,
+            "extent_m": [0.55, 0.40, 0.72],
+            "planted": True,
+        }
+        mark_failed(self.store, job_id)
+
+        async def send(op):
+            self.sent.append(op)
+            return {"status": "placed"}
+
+        async def complete_final_fn(ack):
+            self.announced.append(ack)
+
+        asyncio.run(on_job_terminal(self.state, job_id, send, complete_final_fn))
+        self.assertEqual(self.sent, [], "a failed job emits no op")
+        self.assertEqual(self.announced, [{"status": "failed"}])
+
     def test_unplanted_ready_job_still_emits(self) -> None:
         job_id = new_ulid()
         self.store.jobs[job_id] = {

@@ -362,17 +362,17 @@ async def on_job_terminal(
     status = job.get("status")
     if status not in ("ready", "failed"):
         return
-    if job.get("extent_m") and job.get("planted"):
-        # Planted when the listing was accepted, so a stated-size box has been
-        # in the room since before the mesh existed. Emitting again would
-        # place the same object twice. Quest is already fetching the artifact.
-        await complete_final_fn({"status": "ready", "planted": True})
-        return
     stage_epoch = int(job.get("stage_epoch") or state.latest_stage_epoch)
     if stage_epoch < state.latest_stage_epoch:
         return
     if status == "failed":
         await complete_final_fn({"status": "failed"})
+        return
+    if job.get("extent_m") and job.get("planted"):
+        # Planted when the item was accepted, so a stated-size box has been in
+        # the room since before the mesh existed. Emitting again would place
+        # the same object twice. Quest is already fetching the artifact.
+        await complete_final_fn({"status": "ready", "planted": True})
         return
     turn_id = max(state.turn_id, 1)
     target = job.get("target")
