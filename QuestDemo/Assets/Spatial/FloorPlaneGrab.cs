@@ -1,6 +1,7 @@
 using UnityEngine;
 using UnityEngine.XR.Interaction.Toolkit;
 using UnityEngine.XR.Interaction.Toolkit.Interactables;
+using UnityEngine.XR.Interaction.Toolkit.Interactors;
 
 /// <summary>
 /// Floor-plane drag for generated furniture (spec §7.2). X and Z follow the
@@ -9,11 +10,20 @@ using UnityEngine.XR.Interaction.Toolkit.Interactables;
 /// the engine's own tracking is switched off and this component moves the
 /// object instead. The constraint math is static and pure for EditMode tests.
 /// </summary>
+/// <remarks>
+/// Because the engine's tracking is off, XRI's smoothing and velocity
+/// tracking do not apply on this path: the drag is more direct than a normal
+/// XRI grab. That is the intended trade for an object whose height must never
+/// move.
+/// </remarks>
 public class FloorPlaneGrab : MonoBehaviour
 {
     public float LockedY;
 
     Vector3 _scaleAtGrabStart;
+    Vector3 _grabOffset;
+    IXRSelectInteractor _interactor;
+    IXRSelectInteractable _interactable;
     bool _held;
 
     /// <summary>Desired position clamped to the locked height.</summary>
@@ -84,22 +94,52 @@ public class FloorPlaneGrab : MonoBehaviour
     void OnGrabbed(SelectEnterEventArgs args)
     {
         _held = true;
+        _interactor = args.interactorObject;
+        _interactable = args.interactableObject;
         _scaleAtGrabStart = transform.localScale;
+        Vector3 hand;
+        // Where it was grabbed stays under the hand: grabbing a corner must
+        // not snap the object's origin to the hand.
+        _grabOffset = TryGetHandPosition(out hand) ? transform.position - hand : Vector3.zero;
     }
 
     void OnReleased(SelectExitEventArgs args)
     {
         _held = false;
+        _interactor = null;
+        _interactable = null;
         // The pose it was left in is the pose it keeps: world-locked, no snap.
         transform.position = ConstrainPosition(transform.position, LockedY);
         transform.localScale = ConstrainedScale(transform.localScale, _scaleAtGrabStart);
+    }
+
+    /// <summary>Where the hand is, or false when it cannot be asked.</summary>
+    bool TryGetHandPosition(out Vector3 handPosition)
+    {
+        handPosition = Vector3.zero;
+        // An interface reference carries no Unity destroyed-object check, so
+        // look at the underlying objects before calling into them.
+        Object interactor = _interactor as Object;
+        Object interactable = _interactable as Object;
+        if (interactor == null || interactable == null)
+            return false;
+        Transform attach = _interactor.GetAttachTransform(_interactable);
+        if (attach == null)
+            return false;
+        handPosition = attach.position;
+        return true;
     }
 
     void Update()
     {
         if (!_held)
             return;
-        transform.position = ConstrainPosition(transform.position, LockedY);
+        Vector3 hand;
+        // A detaching or destroyed interactor must not teleport the object to
+        // the origin: with no hand to follow, it simply stays put.
+        if (!TryGetHandPosition(out hand))
+            return;
+        transform.position = ConstrainPosition(hand + _grabOffset, LockedY);
         transform.localScale = ConstrainedScale(transform.localScale, _scaleAtGrabStart);
     }
 }

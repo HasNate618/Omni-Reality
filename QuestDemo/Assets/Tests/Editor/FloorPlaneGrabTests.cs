@@ -32,6 +32,23 @@ public class FloorPlaneGrabTests
     }
 
     [Test]
+    public void GrabOffsetRidesTheHandAndTheHeightStaysPinned()
+    {
+        // Grabbed at a corner, so the object's origin sits off the hand.
+        Vector3 offset = new Vector3(0.20f, 0.90f, -0.30f);
+        Vector3 handAtGrab = new Vector3(-1.00f, 1.20f, 0.40f);
+        Vector3 handLater = handAtGrab + new Vector3(0.50f, 0.90f, 0.25f);
+        Vector3 atGrab = FloorPlaneGrab.ConstrainPosition(handAtGrab + offset, 0.36f);
+        Vector3 later = FloorPlaneGrab.ConstrainPosition(handLater + offset, 0.36f);
+        // The object travels exactly as far as the hand in X and Z...
+        Assert.AreEqual(handLater.x - handAtGrab.x, later.x - atGrab.x, 1e-5f);
+        Assert.AreEqual(handLater.z - handAtGrab.z, later.z - atGrab.z, 1e-5f);
+        // ...and never in Y, however far the hand rises.
+        Assert.AreEqual(0.36f, atGrab.y, 1e-5f);
+        Assert.AreEqual(0.36f, later.y, 1e-5f);
+    }
+
+    [Test]
     public void GrabDisablesEngineDrivenPositionAndScale()
     {
         var go = new GameObject("grabbable", typeof(RectTransform));
