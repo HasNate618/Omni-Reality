@@ -221,6 +221,18 @@ public class DrawingStore : MonoBehaviour
             BoxSize = boxSize,
             Approximate = false,
         };
+        // The collider must exist before the grab interactable: the
+        // interactable caches its colliders in Awake, so a body added after
+        // it would never be grabbable. Root and box coincide, so a collider
+        // at the root's local zero wraps the box exactly.
+        BoxCollider body = root.GetComponent<BoxCollider>();
+        if (body == null)
+            body = root.AddComponent<BoxCollider>();
+        body.size = boxSize;
+        body.center = Vector3.zero;
+        // Generated furniture is grabbable on the floor plane. Root and box
+        // coincide, so the locked height is simply the root's own Y.
+        FloorPlaneGrab.Attach(root, root.transform.position.y);
         return root;
     }
 

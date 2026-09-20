@@ -1,6 +1,6 @@
 {
   "name": "Omni.Spatial.Editor.Tests",
-  "references": ["Omni.Spatial", "Omni.Voice"],
+  "references": ["Omni.Spatial", "Omni.Voice", "Unity.XR.Interaction.Toolkit"],
   "includePlatforms": ["Editor"],
   "optionalUnityReferences": ["TestAssemblies"]
 }

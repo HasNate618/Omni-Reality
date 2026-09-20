@@ -1,4 +1,4 @@
 {
   "name": "Omni.Spatial",
-  "references": ["meta.xr.mrutilitykit", "Oculus.VR", "Omni.Voice", "glTFast", "Unity.Collections"]
+  "references": ["meta.xr.mrutilitykit", "Oculus.VR", "Omni.Voice", "glTFast", "Unity.Collections", "Unity.XR.Interaction.Toolkit"]
 }
