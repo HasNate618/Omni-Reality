@@ -44,6 +44,32 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "place_item",
+            "description": (
+                "Place an item you have sized onto a surface in the room. "
+                "State the sizes you read or were given; never guess them. "
+                "If you do not have all three sizes, ask the wearer instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["name", "extent_m", "target"],
+                "properties": {
+                    "name": {"type": "string", "minLength": 1, "maxLength": 40},
+                    "extent_m": {
+                        "type": "array",
+                        "minItems": 3,
+                        "maxItems": 3,
+                        "items": {"type": "number", "minimum": 0.05, "maximum": 3.0},
+                    },
+                    "target": {"type": "object"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "emit_scene_ops",
             "description": "Propose up to three scene operations (mark/label/ghost/connect/place_procedural/revise_procedural).",
             "parameters": {

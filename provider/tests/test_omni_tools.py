@@ -5,6 +5,7 @@ import json
 import unittest
 
 from omni.reasoner import require_omni_inputs, run_tool_loop
+from omni.tools import TOOL_DEFINITIONS
 from protocol.validate import load_fixture
 
 
@@ -59,3 +60,34 @@ class ReasonerTests(unittest.TestCase):
             complete_fn=complete_fn, execute_fn=execute_fn, messages=[],
         ))
         self.assertEqual(ops[0]["kind"], "ghost")
+
+
+class PlaceItemToolTests(unittest.TestCase):
+    def _tool(self) -> dict:
+        for entry in TOOL_DEFINITIONS:
+            if entry["function"]["name"] == "place_item":
+                return entry["function"]
+        self.fail("place_item not declared")
+
+    def test_declared_with_required_arguments(self) -> None:
+        tool = self._tool()
+        self.assertEqual(
+            sorted(tool["parameters"]["required"]),
+            ["extent_m", "name", "target"],
+        )
+
+    def test_extent_m_is_three_bounded_numbers(self) -> None:
+        schema = self._tool()["parameters"]["properties"]["extent_m"]
+        self.assertEqual(schema["minItems"], 3)
+        self.assertEqual(schema["maxItems"], 3)
+        self.assertEqual(schema["items"]["minimum"], 0.05)
+        self.assertEqual(schema["items"]["maximum"], 3.0)
+
+    def test_name_is_bounded(self) -> None:
+        schema = self._tool()["parameters"]["properties"]["name"]
+        self.assertEqual(schema["maxLength"], 40)
+
+    def test_no_property_accepts_a_world_point(self) -> None:
+        tool = self._tool()
+        self.assertNotIn("world_point", json.dumps(tool))
+        self.assertNotIn("px", tool["parameters"]["properties"])
