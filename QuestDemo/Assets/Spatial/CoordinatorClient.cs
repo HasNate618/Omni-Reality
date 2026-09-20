@@ -119,11 +119,6 @@ public class CoordinatorClient : MonoBehaviour
             return false;
         }
 
-        public void Clear()
-        {
-            lock (_gate) _queues.Clear();
-        }
-
         public int Count
         {
             get
