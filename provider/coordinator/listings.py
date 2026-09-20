@@ -123,6 +123,9 @@ async def handle_place_item(
     artifact_id = lookup(prebaked, name)
     if artifact_id is not None:
         # No worker is queued on this path, so the busy rule does not apply.
+        # Build the result BEFORE creating the job: if it raises, no job is
+        # left behind for session_generation_busy to trip over.
+        result = _place_result(listings, name, extents, target, current_frame_id, artifact_id)
         store.jobs[artifact_id] = {
             "job_id": artifact_id,
             "frame_id": current_frame_id,
@@ -132,7 +135,7 @@ async def handle_place_item(
             "extent_m": extents,
             "planted": True,
         }
-        return _place_result(listings, name, extents, target, current_frame_id, artifact_id)
+        return result
 
     from workers.gen_client import BusyError
 
@@ -151,8 +154,11 @@ async def handle_place_item(
         "extent_m": extents,
         "planted": True,
     }
-    if queue_fn is not None:
-        try:
+    # Everything from job creation onward is guarded: a job left behind as
+    # queued makes session_generation_busy true for the rest of the session,
+    # which refuses every later placement.
+    try:
+        if queue_fn is not None:
             await _maybe_await(queue_fn(
                 job_id=job_id,
                 frame_id=current_frame_id,
@@ -161,13 +167,15 @@ async def handle_place_item(
                 mask_png_b64=None,
                 extent_m=extents,
             ))
-        except BusyError:
-            # The worker refused, so no placement happened. No row was recorded
-            # yet, so there is nothing to roll back.
-            store.jobs.pop(job_id, None)
-            return {"error": "busy"}, None
-
-    return _place_result(listings, name, extents, target, current_frame_id, job_id)
+        return _place_result(listings, name, extents, target, current_frame_id, job_id)
+    except BusyError:
+        # The worker refused, so no placement happened. No row was recorded
+        # yet, so there is nothing to roll back.
+        store.jobs.pop(job_id, None)
+        return {"error": "busy"}, None
+    except BaseException:
+        store.jobs.pop(job_id, None)
+        raise
 
 
 def _place_result(

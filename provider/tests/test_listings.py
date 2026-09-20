@@ -267,3 +267,39 @@ class HandlePlaceItemTests(unittest.TestCase):
         result, op = self._call(lamp)
         self.assertNotIn("error", result)
         self.assertIsNotNone(op)
+
+    def test_worker_busy_error_leaves_no_trace(self) -> None:
+        # The pre-check passes here (nothing is queued yet) and the worker
+        # itself refuses with BusyError. This is the path that a test driving
+        # only the pre-check cannot reach, and it is the one that used to
+        # leave a recorded row behind.
+        from workers.gen_client import BusyError
+
+        async def queue_fn(**kwargs):
+            raise BusyError("worker busy")
+
+        result, op = asyncio.run(handle_place_item(
+            self.store, listings=self.memory, args=self._good(),
+            current_frame_id=_FRAME, prebaked={}, queue_fn=queue_fn))
+        self.assertEqual(result["error"], "busy")
+        self.assertIsNone(op)
+        self.assertEqual(self.memory.rows(), [], "no row may be recorded")
+        self.assertEqual(self.store.jobs, {}, "no job may survive a refusal")
+
+    def test_raise_inside_the_guarded_region_strands_no_job(self) -> None:
+        # A job left behind as queued makes session_generation_busy true for
+        # the rest of the session, refusing every later placement. Anything
+        # raised between job creation and the result must pop the job.
+        class _RaisingRecordListings(ListingMemory):
+            def record(self, name, extent_m, source_frame_id, source):
+                raise RuntimeError("record blew up")
+
+        with self.assertRaises(RuntimeError):
+            asyncio.run(handle_place_item(
+                self.store,
+                listings=_RaisingRecordListings(),
+                args=self._good(),
+                current_frame_id=_FRAME,
+                prebaked={},
+            ))
+        self.assertEqual(self.store.jobs, {}, "a stranded job would wedge the session")
