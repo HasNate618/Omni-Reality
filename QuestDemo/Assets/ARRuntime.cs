@@ -1,16 +1,16 @@
-using System.Collections;
 using System.Collections.Generic;
 using Meta.XR;
 using UnityEngine;
 
 /// <summary>
-/// Runtime AR director: camera permission, camera-texture quad, cube anchor.
+/// Runtime AR director: camera and scene permissions, plus the camera-texture
+/// quad. Capture pins come only from SpatialRuntime world_hint (capture-time
+/// ray + depth hit); a miss records null world_hint and nothing is planted here.
 /// </summary>
 public class ARRuntime : MonoBehaviour
 {
     PassthroughCameraAccess _cameraAccess;
     Renderer _quadRenderer;
-    bool _anchorSaveStarted;
 
     void Start()
     {
@@ -27,7 +27,18 @@ public class ARRuntime : MonoBehaviour
                 OVRPermissionsRequester.Permission.PassthroughCameraAccess
             });
         }
-        StartCoroutine(SaveAnchorWhenReady());
+        // Scene (spatial data) permission is requested independently: depth
+        // and environment raycast stay NotReady without it, and captures
+        // remain honest misses until it is granted. Never bundle the two
+        // requests; each grant is tracked on its own.
+        if (!OVRPermissionsRequester.IsPermissionGranted(OVRPermissionsRequester.Permission.Scene))
+        {
+            Debug.Log("ARRuntime: requesting Scene permission");
+            OVRPermissionsRequester.Request(new List<OVRPermissionsRequester.Permission>
+            {
+                OVRPermissionsRequester.Permission.Scene
+            });
+        }
     }
 
     void Update()
@@ -41,29 +52,5 @@ public class ARRuntime : MonoBehaviour
                 Debug.Log("ARRuntime: camera texture live " + tex.width + "x" + tex.height);
             }
         }
-    }
-
-    IEnumerator SaveAnchorWhenReady()
-    {
-        yield return new WaitForSeconds(6f);
-        if (_anchorSaveStarted)
-            yield break;
-        _anchorSaveStarted = true;
-        var cube = GameObject.Find("DemoCube");
-        if (cube == null)
-        {
-            Debug.LogWarning("ARRuntime: DemoCube missing, skipping anchor save");
-            yield break;
-        }
-        var anchor = cube.GetComponent<OVRSpatialAnchor>();
-        if (anchor == null)
-        {
-            Debug.LogWarning("ARRuntime: no OVRSpatialAnchor on DemoCube");
-            yield break;
-        }
-        var task = anchor.SaveAnchorAsync();
-        yield return new WaitUntil(() => task == null || task.IsCompleted);
-        if (task != null && task.IsCompleted)
-            Debug.Log("ARRuntime: anchor save result=" + task.GetResult());
     }
 }

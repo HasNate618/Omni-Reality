@@ -65,6 +65,70 @@ Everything an agent needs to use the sponsor model gateway. Code lives in `provi
 
 Takeaways: realtime first-turn setup is slow (~12s — budget for session warm-up); Gemini Live threw one transient upstream failure then succeeded (retry before concluding quota issues); Live token overhead is high (147 in / 39 out for a one-liner).
 
+## Audio input (2026-09-19 voice smoke, `qwen3.8-omni-flash`)
+
+Mic PCM is wrapped as WAV (16 kHz mono s16le) and sent as an `input_audio` data URL (`voice/audio.py: build_voice_messages`). This default shape works; `raw_b64` was not needed. Test speech comes from macOS `say` (`python -m voice.audio_smoke --say ...`).
+
+| Call | Result | Latency | Tokens in / out (reasoning) |
+| --- | --- | --- | --- |
+| audio only, 1.82 s (58 KB WAV) | heard verbatim: "Mark the red bottle on the left." | 6.02s | 103 (9 audio) / 523 (492) |
+| control, `--no-audio` | invented speech and an image that were never sent | 7.71s | 94 / 796 (765) |
+| audio 1.23 s + JPEG 612x408 (34 KB) | heard verbatim; described image correctly | 2.45s | 352 (9 audio, 249 image) / 106 (71) |
+| full voice turn via coordinator + fake Quest | `mark` image_point u=0.62 v=0.72 (on the laptop), ACK placed, spoke | ~3.5s model | — |
+
+Takeaways:
+
+- Audio really reaches the model: exact transcripts with audio, fabrication without. Slice-3 "mic audio in the HTTP call" is met.
+- `qwen3.8-omni-flash` does hidden reasoning that dominates latency (up to ~765 reasoning tokens) and `max_tokens` did not cap it (64 requested, 523 returned). Trying to disable thinking is the next latency lever.
+- With no image the model may invent one. The planner adds no ops when no JPEG was sent, whatever the model says.
+- The model said "I've marked…" despite the prompt. The coordinator only speaks that line after an ACK `placed`, so the claim stays honest.
+
+### Object tracking selection
+
+With coordinator `--sam2-url`, `YibuPlanner(tracking=True)` reuses the same
+audited audio + JPEG HTTP call, with purpose `track-object`. The tracking prompt
+requests `{"heard":"...","say":"...","track":[{"label":"laptop","type":"image_point","u":0.5,"v":0.5}]}`
+or `track:[]`. It asks for one point inside each visible foreground object the
+wearer named, one point per distinct object; coordinates are normalized top-left
+in the exact submitted JPEG. The parser
+rejects nonfinite, boolean, out-of-range, and non-point coordinates, strips
+model-supplied frame IDs, and accepts no target without an image and envelope.
+
+`PlanResult.tracking_targets` is a list. An unusable entry is dropped rather
+than failing the whole reply, so one bad point does not cost the objects listed
+beside it. A point within `MIN_TARGET_SEPARATION` (0.05 normalized) of an
+already-accepted one is the same object named twice and is dropped. The list is
+capped at `MAX_TRACKED_OBJECTS` (3), which is a SAM 2 frame-budget limit rather
+than a model one — see
+[object count sets the frame budget](omni-sam2-streaming.md#object-count-sets-the-frame-budget).
+A bare `track` object (the older single-object reply) is still accepted, and
+`PlanResult.tracking_target` still returns the first point for callers that
+handle only one. Each point's `label` is carried through to the headset so a
+mask can be named; it is never used to pick pixels.
+
+The coordinator owns snapshot identity and converts UVs to the existing SAM 2
+pixel-click protocol, assigning `obj_id` 1..N and clicking all of them on the
+one selected frame. Selection is called once per utterance, not per tracked
+frame. This path emits tracking status/masks, not placement ACKs or success
+speech. Defaults remain `qwen3.8-omni-flash`, 256 requested output tokens, and
+the same env-only key/audit handling. See [Quest camera + push-to-talk setup](quest-audio-setup.md).
+
+## LAN coordinator voice planners (`coordinator/server.py`)
+
+The offline LAN WebSocket coordinator can run voice turns with `--planner stub|yibu|voice-stub` (plus the legacy `--planner mark` hardcoded mark path). These modes sit beside the grounded voice path above: `--planner yibu` without `--voice-only` still sends JPEG when Quest provides a frame, binds Omni worker tools, and may emit up to three scene ops after ACKs. The bootstrap modes below prove mic transport or live audio-only conversation without spatial ops.
+
+| CLI | Credit | Model / speech | Scene ops | Audit `purpose` labels |
+| --- | --- | --- | --- | --- |
+| `--planner voice-stub` | none | Fixed caption plus a deterministic **non-speech** 16 kHz mono PCM test tone (`voice/test_tone.py`) — transport check only, not Omni speech | none | none (no yibu calls) |
+| `--planner yibu --voice-only` | yes (plan + TTS) | Buffered mic PCM → WAV → `qwen3.8-omni-flash` HTTP omni **without** JPEG or tools; reply text → Gemini Live cloud PCM for playback | none | `voice-only-turn` (omni), `voice-only-speak` (TTS) |
+| `--planner yibu` (default voice) | yes | PCM + optional JPEG, tool loop, spatial prompts | up to 3 after ACK | `voice-turn`, `voice-speak` |
+
+`--voice-only` is rejected unless `--planner yibu`. Direct `YibuPlanner(voice_only=True)` defaults `purpose` to `voice-only-turn`; grounded turns keep `voice-turn`. Live backends load lazily inside `plan()` / synthesizer — offline unit tests inject fakes and spend no credit.
+
+**Live start prerequisite (`--planner yibu --voice-only`):** export a non-empty ASCII `YIBU_API_KEY` on the laptop **before** starting `python -m coordinator.server`. Startup validates the env var and exits with a configuration error if it is missing or blank — **no WebSocket bind and no yibuapi call**. Error text names `YIBU_API_KEY` only; the key value never appears in logs or stderr.
+
+**Turn-time planner failures:** If a live planner path still raises `SystemExit` inside a background turn (should not happen after startup validation), the coordinator logs redacted `VoiceBootstrap` `planner_failed` with `exception_class=SystemExit` only, speaks the existing safe fallback line (`Sorry, I couldn't reach the model. Try again.`), and keeps the connection/event loop alive. Uncaught exceptions in turn background tasks also emit a coordinator log line with `turn_id` and exception class only (no message or PCM).
+
 ## Known gap: multi-turn + interruption
 
 The WS scripts record single-turn usage only and have no barge-in handling. Planned conversation work needs: session reuse across turns, per-event usage classification (per-response vs cumulative — verify, never double-count), missing-usage retention, retry dedupe, TTS cancellation on interruption, and stale-frame pose discipline (late replies use capture-time pose). Extend `yibu_audit.py`; see AGENTS.md doc procedure before adding new scripts.

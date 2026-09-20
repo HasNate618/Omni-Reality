@@ -1,0 +1,12 @@
+{
+  "frame_id": "01k5j8g0008q3m7b2d6h9n4r5v",
+  "target": {
+    "type": "image_box",
+    "frame_id": "01k5j8g0008q3m7b2d6h9n4r5v",
+    "u0": 0.2,
+    "v0": 0.1,
+    "u1": 0.8,
+    "v1": 0.9
+  },
+  "phrase": "chair"
+}

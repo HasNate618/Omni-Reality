@@ -1,0 +1,9 @@
+{
+  "kind": "place_procedural",
+  "drawing_id": null,
+  "target": { "type": "capture_hint", "frame_id": "01k5j8g0008q3m7b2d6h9n4r5v" },
+  "elements": [
+    { "element": "arrow", "color": "cyan", "size": "medium", "material": "glow" },
+    { "element": "panel", "color": "white", "size": "small", "material": "solid", "text": "Inlet valve" }
+  ]
+}

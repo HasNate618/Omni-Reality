@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind"],
+  "properties": {
+    "kind": { "enum": ["mark", "label", "connect", "ghost", "remove", "undo", "place_procedural", "revise_procedural"] },
+    "drawing_id": { "anyOf": [{ "$ref": "#/$defs/ulid" }, { "type": "null" }] },
+    "target": { "$ref": "#/$defs/target" },
+    "from": { "$ref": "#/$defs/target" },
+    "to": { "$ref": "#/$defs/target" },
+    "style": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "color": { "type": "string" },
+        "label": { "type": ["string", "null"] }
+      }
+    },
+    "motion": { "anyOf": [{ "$ref": "#/$defs/motion" }, { "type": "null" }] },
+    "shape": { "enum": ["ring", "dot"] },
+    "elements": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 6,
+      "items": { "$ref": "#/$defs/procedural_element" }
+    },
+    "action": { "enum": ["enlarge", "shrink", "rotate_cw", "rotate_ccw", "nudge", "remove"] },
+    "direction": { "enum": ["left", "right", "up", "down", "forward", "back"] },
+    "text": { "type": "string", "maxLength": 48 },
+    "asset_id": { "type": "string" },
+    "scale": { "type": "number", "minimum": 0.1, "maximum": 2 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "enum": ["mark", "label", "ghost", "remove", "place_procedural"] } }, "required": ["kind"] },
+      "then": { "required": ["target"] }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "place_procedural" } }, "required": ["kind"] },
+      "then": { "required": ["target", "elements"] }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "revise_procedural" } }, "required": ["kind"] },
+      "then": { "required": ["drawing_id", "action"] }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "revise_procedural" }, "action": { "const": "nudge" } }, "required": ["kind"] },
+      "then": { "required": ["direction"] }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "label" } }, "required": ["kind"] },
+      "then": { "required": ["text"] }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "connect" } }, "required": ["kind"] },
+      "then": { "required": ["from", "to"] }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "ghost" } }, "required": ["kind"] },
+      "then": {
+        "required": ["motion"],
+        "properties": { "motion": { "type": "object", "properties": { "kind": { "enum": ["rotate", "slide"] } }, "required": ["kind"] } }
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "remove" } }, "required": ["kind"] },
+      "then": { "properties": { "target": { "properties": { "type": { "const": "drawing" } } } } }
+    }
+  ],
+  "$defs": {
+    "ulid": { "type": "string", "pattern": "^[0-7][0-9a-hjkmnp-tv-z]{25}$", "minLength": 26, "maxLength": 26 },
+    "procedural_color": { "enum": ["cyan", "amber", "green", "magenta", "white", "slate"] },
+    "procedural_element": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["element", "color", "size", "material"],
+          "properties": {
+            "element": { "enum": ["panel", "pointer"] },
+            "color": { "$ref": "#/$defs/procedural_color" },
+            "size": { "enum": ["small", "medium", "large"] },
+            "material": { "enum": ["solid", "translucent", "glow"] },
+            "text": { "type": "string", "maxLength": 40 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["element", "color", "size", "material"],
+          "properties": {
+            "element": { "enum": ["arrow", "cube", "sphere", "cylinder"] },
+            "color": { "$ref": "#/$defs/procedural_color" },
+            "size": { "enum": ["small", "medium", "large"] },
+            "material": { "enum": ["solid", "translucent", "glow"] }
+          }
+        }
+      ]
+    },
+    "unit_pixel": { "type": "number", "minimum": 0, "maximum": 1 },
+    "target": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "frame_id"],
+          "properties": {
+            "type": { "enum": ["capture_hint", "pointing"] },
+            "frame_id": { "$ref": "#/$defs/ulid" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "frame_id", "u", "v"],
+          "properties": {
+            "type": { "const": "image_point" },
+            "frame_id": { "$ref": "#/$defs/ulid" },
+            "u": { "$ref": "#/$defs/unit_pixel" }, "v": { "$ref": "#/$defs/unit_pixel" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "frame_id", "u0", "v0", "u1", "v1"],
+          "properties": {
+            "type": { "const": "image_box" },
+            "frame_id": { "$ref": "#/$defs/ulid" },
+            "u0": { "$ref": "#/$defs/unit_pixel" }, "v0": { "$ref": "#/$defs/unit_pixel" },
+            "u1": { "$ref": "#/$defs/unit_pixel" }, "v1": { "$ref": "#/$defs/unit_pixel" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "drawing_id"],
+          "properties": {
+            "type": { "const": "drawing" },
+            "drawing_id": { "$ref": "#/$defs/ulid" }
+          }
+        }
+      ]
+    },
+    "motion": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "period_s"],
+          "properties": {
+            "kind": { "const": "pulse" },
+            "period_s": { "type": "number", "minimum": 0.6, "maximum": 3 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "period_s"],
+          "properties": {
+            "kind": { "const": "travel" },
+            "period_s": { "type": "number", "minimum": 1, "maximum": 4 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "angle_deg", "period_s"],
+          "properties": {
+            "kind": { "const": "rotate" },
+            "axis": { "enum": ["x", "y", "z"] },
+            "angle_deg": { "type": "number", "minimum": 15, "maximum": 180 },
+            "period_s": { "type": "number", "minimum": 1, "maximum": 4 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "axis", "distance_m", "period_s"],
+          "properties": {
+            "kind": { "const": "slide" },
+            "axis": { "enum": ["x", "z"] },
+            "distance_m": { "type": "number", "minimum": 0.03, "maximum": 0.4 },
+            "period_s": { "type": "number", "minimum": 1, "maximum": 4 }
+          }
+        }
+      ]
+    }
+  }
+}

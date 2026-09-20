@@ -1,0 +1,5 @@
+# SAM 2 WebSocket Streaming Dependencies
+# (Assumes PyTorch and SAM 2 are already installed via setup.py)
+websockets>=11.0
+opencv-python>=4.8.0
+numpy

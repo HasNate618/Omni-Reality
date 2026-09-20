@@ -530,6 +530,8 @@ EOF
 - Consumes: `Meta.XR.PassthroughCameraAccess` (`CameraPositionType.Left`, `RequestedResolution` 1280x960, `IsPlaying`, `Timestamp`, `CurrentResolution`, `Intrinsics.FocalLength/PrincipalPoint/SensorResolution`, `GetCameraPose()`, `GetTexture()`, `ViewportPointToRay(Vector2, Pose?)`). `Meta.XR.EnvironmentRaycastManager.Raycast(Ray, out EnvironmentRaycastHit, float maxDistance)`. `OVRManager.TrackingOriginChangePending` increments `stage_epoch`.
 - Produces: `SpatialRuntime.TryCapture(out CaptureEnvelope env, out Pose cameraPose, out Ray ray)` using pointing if trigger held else image centre. Fills `world_hint` from that same ray. Cache key `frame_id` for 10 seconds.
 
+**Approved correction (binding spec governs):** Configure a floor-based tracking origin before serializing `openxr_floor_stage` coordinates. Request spatial Scene permission in addition to camera permission; a fresh install must not wait forever for raycast data. When trigger pointing is unavailable, use the capture-time left-camera centre ray and serialize `pointing: null`, not a current head ray. For a trigger point, serialize the exact sampled controller ray and its sample time, and derive cache/hint from that same ray. Convert PCA sensor intrinsics to top-left original-texture pixel intrinsics using the SDK crop/scale semantics. Cache every valid capture for 10 s, including identity crop and explicit optional-hit state on misses/too-close frames. Do not fabricate a normal if the SDK does not supply one. Preserve all 80 random bits in Unity ULIDs. Render a visible runtime thin aim ray rather than relying on `Debug.DrawRay`.
+
 - [ ] **Step 1: Write a failing Editor test for envelope JSON shape**
 
 `QuestDemo/Assets/Tests/Editor/CaptureEnvelopeJsonTests.cs` asserts a hand-built envelope serializes `camera` as `left` and `pose.frame` as `openxr_floor_stage`. If EditMode tests are not wired, write the serializer first and verify with a `Debug.Log` of one envelope on device (slice 1 pass/fail is on-headset).
@@ -652,7 +654,7 @@ EOF
 
 **Interfaces:**
 - Consumes: `protocol.validate`, `protocol.ids.new_ulid`, `websockets` (already in requirements).
-- Produces: `async def run_server(host: str = "0.0.0.0", port: int = 8765) -> None`. On Quest `hello` (`session_id` null), reply `hello_ok` with new `session_id` and `laptop_t_unix_ns`. On `ping`, reply `pong`. After first `frame` (or `hello` if testing without JPEG), send one `scene_op` `kind=mark` `target.type=capture_hint` `motion.pulse` with new `op_id`, `turn_id=1`, `stage_epoch` copied from envelope (or 1). Do not call yibuapi. Log clock skew if `|quest - laptop| > 2s` as `clock_skew_ns`; do not rewrite poses.
+- Produces: `async def run_server(host: str = "0.0.0.0", port: int = 8765) -> None`. On Quest `hello` (`session_id` null), reply `hello_ok` with new `session_id` and `laptop_t_unix_ns`. On `ping`, reply `pong`. After the first valid `frame`, send one `scene_op` `kind=mark` `target.type=capture_hint` `motion.pulse` with new `op_id`, `turn_id=1`, and the envelope stage epoch. The default coordinator never sends a production mark on `hello`; a future explicit `--plant-on-hello` test flag may do so only when it supplies a resolvable cached frame id. Do not call yibuapi. Log clock skew if `|quest - laptop| > 2s` as `clock_skew_ns`; do not rewrite poses.
 
 - [ ] **Step 1: Write the failing test**
 

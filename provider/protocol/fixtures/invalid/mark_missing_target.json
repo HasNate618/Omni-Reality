@@ -1,0 +1,8 @@
+{
+  "op_id": "01k5j8g0019q3m7b2d6h9n4r5v",
+  "turn_id": 3,
+  "stage_epoch": 1,
+  "kind": "mark",
+  "drawing_id": null,
+  "motion": { "kind": "pulse", "period_s": 1.2 }
+}

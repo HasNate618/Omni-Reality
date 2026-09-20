@@ -4,6 +4,11 @@
       "name": "Meta",
       "url": "https://npm.developer.oculus.com",
       "scopes": [ "com.meta.xr" ]
+    },
+    {
+      "name": "OpenUPM",
+      "url": "https://package.openupm.com",
+      "scopes": [ "com.atteneder" ]
     }
   ],
   "dependencies": {
@@ -28,6 +33,7 @@
     "com.unity.xr.interaction.toolkit": "3.6.1",
     "com.meta.xr.sdk.core": "205.0.0",
     "com.meta.xr.mrutilitykit": "205.0.0",
+    "com.atteneder.gltfast": "6.9.1",
     "com.unity.modules.accessibility": "1.0.0",
     "com.unity.modules.adaptiveperformance": "1.0.0",
     "com.unity.modules.ai": "1.0.0",

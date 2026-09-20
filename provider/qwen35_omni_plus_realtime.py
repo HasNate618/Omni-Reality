@@ -12,6 +12,8 @@ from urllib.parse import urlencode
 
 import websockets
 
+from ws_tls import gateway_ssl_context
+
 from yibu_audit import append_audit_record, require_env_api_key
 
 
@@ -45,6 +47,7 @@ async def realtime_text_call(
         async with websockets.connect(
             url,
             additional_headers={"Authorization": f"Bearer {api_key}"},
+            ssl=gateway_ssl_context(),
             proxy=None,
             open_timeout=30,
             close_timeout=5,

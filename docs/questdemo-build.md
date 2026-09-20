@@ -41,8 +41,30 @@ Meta XR SDK 205 (`core` + `mrutilitykit`) comes from the scoped registry `https:
 
 ## How to verify
 
+### Unity Editor menus (Mac / Windows / Linux)
+
+- **Omni → Configure Quest Tracking** creates a persistent Resources settings
+  asset for the laptop endpoint and video cadence. **Omni → Build Quest APK**
+  invokes the existing `BuildAndroid.Build` setup/build pipeline. **Omni → Setup
+  Quest Scene** prepares the scene for inspection without an APK build.
+- `ARSetup` now attaches `QuestStreamInput` alongside `SpatialRuntime`. It is
+  active only when the tracking settings asset is enabled. This mode uses
+  right-controller **A** for push-to-talk and **B** for stop.
+- The Android manifest explicitly declares `INTERNET` and `RECORD_AUDIO`,
+  permits the existing local `ws://` transport, and keeps `HEADSET_CAMERA`.
+  The app requests microphone permission; the existing camera permission
+  path is reused.
+- Install Android Build Support with its SDK/NDK/OpenJDK through Unity Hub.
+  The full two-server, USB/Wi-Fi, and headset setup is documented once in
+  [Quest camera + push-to-talk setup](quest-audio-setup.md).
+
+### Existing build/device checks
+
 - Build: the licensing-wrapped command above; expect `BUILD SUCCEEDED: Builds/QuestDemo.apk` in the log (~52 MB).
 - Deploy/launch: `adb install -r QuestDemo/Builds/QuestDemo.apk`, then `adb shell monkey -p com.omni.questdemo -c android.intent.category.LAUNCHER 1`.
 - On-device: real room visible (passthrough), cube world-locked, no skybox.
 - Logs: `adb logcat -d | grep -i unity | grep -iE "OVR|passthrough|error"` — expect `XR_FB_passthrough` from "Meta XR Feature", no `Failed to initialize Insight Passthrough`. Compositor `app 0` in `Passthrough usage state` lines means no layer submitted (check the manifest tag + `isInsightPassthroughEnabled`).
+- Perception Q&A adds no scene edits: `SpatialRuntime` wires one `PerceptionCapture`
+  (single AsyncGPUReadback frame, never a video loop) to `MicUtterance` at
+  coordinator startup, plus a head-relative `VoiceCaption` for speech/recovery text.
 - Do not "fix" vendored files or SDK package-cache sources to satisfy linters.

@@ -67,6 +67,35 @@ def extract_text(response_json: Mapping[str, Any]) -> str:
     return str(content or "")
 
 
+def extract_tool_calls(response_json: Mapping[str, Any]) -> list[dict[str, Any]]:
+    choices = response_json.get("choices") or []
+    if not choices:
+        return []
+    message = choices[0].get("message") or {}
+    raw = message.get("tool_calls") or []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        fn = item.get("function") or {}
+        args = fn.get("arguments") or "{}"
+        parsed: dict[str, Any]
+        if isinstance(args, Mapping):
+            parsed = dict(args)
+        else:
+            try:
+                value = json.loads(args)
+            except json.JSONDecodeError:
+                value = {}
+            parsed = value if isinstance(value, dict) else {}
+        out.append({
+            "id": str(item.get("id") or ""),
+            "name": str(fn.get("name") or ""),
+            "arguments": parsed,
+        })
+    return out
+
+
 def chat_completion(
     *,
     api_key: str,
@@ -76,6 +105,8 @@ def chat_completion(
     base_url: str = DEFAULT_BASE_URL,
     max_tokens: int = 256,
     temperature: float = 0.2,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: Any = None,
     audit_log: str | Path | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
     endpoint = f"{base_url.rstrip('/')}/chat/completions"
@@ -85,6 +116,10 @@ def chat_completion(
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
+    if tools is not None:
+        payload["tools"] = tools
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
     started = time.monotonic()
     status: int | None = None
     response_json: dict[str, Any] = {}
