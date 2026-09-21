@@ -40,7 +40,13 @@
       "maxItems": 3,
       "items": { "type": "number", "minimum": 0.05, "maximum": 3.0 }
     },
-    "offset_m": { "type": "number", "minimum": -3.0, "maximum": 3.0 }
+    "offset_m": { "type": "number", "minimum": -3.0, "maximum": 3.0 },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 40,
+      "description": "Listing name this placement was recorded under. Optional on the wire by contract: consumers fall back to a dims-only label rather than blanking."
+    }
   },
   "allOf": [
     {

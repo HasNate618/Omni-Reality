@@ -11,6 +11,8 @@ import json
 import unittest
 
 from coordinator import turn
+from coordinator.jobs import JobStore
+from coordinator.listings import ListingMemory
 from coordinator.planner import YibuPlanner
 from coordinator.session import CoordinatorState, UtteranceBuffer
 from protocol.ids import new_ulid
@@ -33,6 +35,63 @@ def _tool_response(name: str, arguments: dict, call_id: str = "call_1") -> dict:
 
 def _text_response(text: str) -> dict:
     return {"choices": [{"message": {"content": text}}]}
+
+
+class RecentDrawingIdPromptTests(unittest.TestCase):
+    def test_recent_drawing_ids_reach_the_model(self) -> None:
+        # A revision op is keyed on a drawing_id that Quest mints, so the model
+        # can only revise what it is told about. Without this the "revise it"
+        # beat is unbuildable: the model has no id to name and cannot invent a
+        # 26-char ULID that Quest will accept.
+        frame_id = new_ulid()
+        drawing_id = new_ulid()
+        seen: list = []
+
+        async def complete_fn(messages, tools_enabled):
+            seen.append(messages)
+            return _text_response('{"heard": "move it left", "say": "Moved."}')
+
+        planner = YibuPlanner(complete_fn=complete_fn, execute_fn=None)
+        planner.bind_tools(
+            jobs=JobStore(), jpeg_b64="qq==", frame_id=frame_id,
+            listings=ListingMemory(), prebaked={},
+        )
+        asyncio.run(planner.plan(
+            pcm=b"\x00\x00" * 9000,
+            jpeg=b"fakejpeg",
+            envelope={"frame_id": frame_id, "stage_epoch": 0},
+            context=[{
+                "heard": "place the table",
+                "said": "There it is.",
+                "drawing_ids": [drawing_id],
+            }],
+        ))
+
+        self.assertTrue(seen, "the model was never called")
+        blob = json.dumps(seen[0])
+        self.assertIn(drawing_id, blob, "the model cannot revise an id it never saw")
+
+    def test_no_recent_placements_adds_no_id_section(self) -> None:
+        frame_id = new_ulid()
+        seen: list = []
+
+        async def complete_fn(messages, tools_enabled):
+            seen.append(messages)
+            return _text_response('{"heard": "hi", "say": "Hello."}')
+
+        planner = YibuPlanner(complete_fn=complete_fn, execute_fn=None)
+        planner.bind_tools(
+            jobs=JobStore(), jpeg_b64="qq==", frame_id=frame_id,
+            listings=ListingMemory(), prebaked={},
+        )
+        asyncio.run(planner.plan(
+            pcm=b"\x00\x00" * 9000,
+            jpeg=b"fakejpeg",
+            envelope={"frame_id": frame_id, "stage_epoch": 0},
+            context=[{"heard": "hi", "said": "Hello.", "drawing_ids": []}],
+        ))
+
+        self.assertNotIn("Objects already placed", json.dumps(seen[0]))
 
 
 class PlannerToolLoopTests(unittest.TestCase):

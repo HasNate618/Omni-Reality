@@ -31,14 +31,20 @@ from typing import Any
 
 from jsonschema import ValidationError
 
-from coordinator.live_config import ensure_live_voice_only_config
+from coordinator.live_config import ensure_live_planner_config
 from coordinator.artifacts import ARTIFACT_PORT, start_artifact_server
 from coordinator.jobs import JobStore, StatusFn, poll_queued_jobs
 from coordinator.prebaked import load_registry
 from coordinator.session import DEFAULT_ARTIFACT_ROOT, CoordinatorState, UtteranceBuffer
-from coordinator.turn import ACK_TIMEOUT_S, cancel_turn, ingest_audio_chunk, start_turn
+from coordinator.turn import (
+    ACK_TIMEOUT_S,
+    cancel_turn,
+    ingest_audio_chunk,
+    planner_binds_tools,
+    start_turn,
+)
 from voice.audio import BYTES_PER_SECOND, MIN_UTTERANCE_S
-from yibu_audit import ApiKeyConfigurationError, ensure_env_api_key
+from yibu_audit import ApiKeyConfigurationError
 from protocol.ids import new_ulid
 from protocol.validate import validate_instance
 
@@ -204,6 +210,11 @@ async def _handle_hello(ws: Any, state: CoordinatorState, message: dict) -> None
                 "laptop_t_unix_ns": _laptop_now_ns(),
                 "artifact_port": state.artifact_port,
                 "perception_qa": bool(getattr(state.planner, "perception_qa", False)),
+                # Distinct from perception_qa on purpose. The tool planner needs a
+                # camera frame too, but must not be mistaken for the vision-only
+                # planner, which is tool-less and blocks scene ops. See
+                # planner_binds_tools for why these two must not drift apart.
+                "accepts_frame": planner_binds_tools(state.planner),
             },
         )
     )
@@ -771,9 +782,7 @@ async def run_server(
     """Bind the coordinator WebSocket server (CLI: python -m coordinator.server)."""
     _validate_cli_args(argparse.ArgumentParser(), argparse.Namespace(
         planner=planner_kind, voice_only=voice_only, perception_qa=perception_qa))
-    ensure_live_voice_only_config(planner_kind, voice_only)
-    if planner_kind == "yibu" and perception_qa:
-        ensure_env_api_key("YIBU_API_KEY")
+    ensure_live_planner_config(planner_kind)
     import websockets
 
     # One job store for the process: the artifact HTTP server (below) reads job
@@ -846,9 +855,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     _validate_cli_args(parser, args)
     try:
-        ensure_live_voice_only_config(args.planner, args.voice_only)
-        if args.planner == "yibu" and args.perception_qa:
-            ensure_env_api_key("YIBU_API_KEY")
+        ensure_live_planner_config(args.planner)
     except ApiKeyConfigurationError as exc:
         parser.error(
             f"Live coordinator requires environment variable {exc.name} "

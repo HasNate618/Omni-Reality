@@ -11,7 +11,26 @@ import math
 import struct
 
 WINDOW = 1600  # 100 ms at 16 kHz mono s16le
-VOICED_RMS = 0.01
+# A window counts as voiced at/above this RMS.
+#
+# Calibrated against MEASURED Quest 3S audio. Real utterances from the headset
+# arrived with peak_rms between 0.0135 and 0.0525 -- around -37 to -25 dBFS, where
+# close-mic speech is normally -20 to -25 -- and the old 0.01 floor therefore sat
+# right at the top of the speech range. A measured turn was dropped as no_speech
+# with voiced=1 of 12 windows while four others passed with 3-7, i.e. whether the
+# wearer got an answer was close to a coin flip.
+#
+# The floor is now below that speech and still above a quiet room. The CLICK that
+# MIN_VOICED_WINDOWS exists to reject is NOT protected by this constant: a single
+# spike makes exactly one voiced window at 0.0153 RMS -- above even the old floor
+# -- and still drops, because one window is fewer than two.
+#
+# KNOWN TRADE-OFF, stated rather than hidden: continuous noise whose RMS exceeds
+# this floor is now voiced in every window, and MIN_VOICED_WINDOWS guards only
+# against transients. On synthetic data, uniform noise at amplitude 400
+# (0.0072 RMS) was silent at 0.010 and voiced at 0.006. If phantom turns appear in
+# a noisy room, raise this back toward 0.01 -- the real fix is a louder capture.
+VOICED_RMS = 0.006
 MIN_VOICED_WINDOWS = 2
 BLOCK = 320  # 20 ms energy blocks for the envelope correlator
 MAX_LAG_BLOCKS = 50  # +-1 s of playback/mic misalignment

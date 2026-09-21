@@ -120,6 +120,11 @@ public class CoordinatorClient : MonoBehaviour
     internal CaptureGeometryCache Cache;
     internal DrawingStore Store;
     internal HonestyChip Chip;
+    /// <summary>
+    /// Item-queue overlay (demo.md beat 1). Recorded at the plant point
+    /// rather than at op arrival, so a refused placement never claims a chip.
+    /// </summary>
+    internal ItemQueueOverlay ItemQueue;
     internal Transform CenterEye;
     internal Func<int> GetStageEpoch = () => 1;
     internal Func<Ray, Vector3?> DelayedHit;
@@ -154,12 +159,35 @@ public class CoordinatorClient : MonoBehaviour
     int _trackingGeneration = -1;
     float _lastTrackFrameAt = -1000f;
     internal const float TrackFrameIntervalS = 0.2f;
+
+    /// <summary>
+    /// How long to wait for a reply before tearing the socket down.
+    ///
+    /// The Python side's turn budget is far larger than this: up to four tool
+    /// rounds plus a closing call, against an httpx timeout of 300 s and a 60 s
+    /// TTS leg. Measured live turns were 2.5 s and 28.2 s -- and once the model
+    /// began calling place_item, the extra tool round pushed a turn past the old
+    /// 45 s, so the headset killed the socket mid-turn and announced "Reply timed
+    /// out" while the coordinator was still working. That reads as the assistant
+    /// being unresponsive, and it threw away a reply that was already on its way.
+    ///
+    /// Keep this comfortably above the slowest observed turn while staying under
+    /// the point where a wearer assumes the thing is dead.
+    /// </summary>
+    internal const float ReplyTimeoutS = 120f;
     public bool PerceptionEnabled { get; private set; }
+    /// <summary>
+    /// The coordinator will accept a camera frame on this turn's tool path.
+    /// Separate from <see cref="PerceptionEnabled"/>: perception_qa identifies the
+    /// tool-less vision planner, while this says the tool planner wants a frame too.
+    /// Conflating the two is what left every frame-anchored tool call unplaceable.
+    /// </summary>
+    public bool AcceptsFrame { get; private set; }
     public string SessionId { get { return _sessionId; } }
     public bool AwaitingReply { get { return _pendingReplyId != null; } }
 
     [Serializable]
-    class HelloOptions { public bool perception_qa; }
+    class HelloOptions { public bool perception_qa; public bool accepts_frame; }
 
     /// <summary>Queue a hello + start supervision. No socket work happens here.</summary>
     internal void Begin(string ipv4)
@@ -205,7 +233,7 @@ public class CoordinatorClient : MonoBehaviour
         if (!_beginRequested || string.IsNullOrEmpty(_ipv4))
             return;
         float now = Time.realtimeSinceStartup;
-        if (AwaitingReply && now - _replyStartedAt >= 45f)
+        if (AwaitingReply && now - _replyStartedAt >= ReplyTimeoutS)
         {
             VoiceBootstrapLog.Log(VoiceBootstrapLog.ComponentCoordinator, "reply_timeout");
             CleanupSocket();
@@ -405,7 +433,9 @@ public class CoordinatorClient : MonoBehaviour
             string payload;
             if (ProtocolJson.TryGetPayloadObject(text, out payload))
             {
-                PerceptionEnabled = JsonUtility.FromJson<HelloOptions>(payload).perception_qa;
+                HelloOptions hello = JsonUtility.FromJson<HelloOptions>(payload);
+                PerceptionEnabled = hello.perception_qa;
+                AcceptsFrame = hello.accepts_frame;
                 // session_id lookup works on any object substring, payload included.
                 string session;
                 if (ProtocolJson.TryGetSessionId(payload, out session) && session != null)
@@ -809,7 +839,7 @@ public class CoordinatorClient : MonoBehaviour
     /// <summary>Queue the final JPEG in the SAME FIFO lane as audio and end.</summary>
     public bool EnqueuePerceptionFrame(string utteranceId, CaptureEnvelope env, byte[] jpeg)
     {
-        if (!IsConnected || !PerceptionEnabled || OpenUtteranceId != utteranceId
+        if (!IsConnected || !(PerceptionEnabled || AcceptsFrame) || OpenUtteranceId != utteranceId
             || env == null || jpeg == null || jpeg.Length == 0 || jpeg.Length > 65536)
             return false;
         _outbox.Enqueue(PriorityFrame,

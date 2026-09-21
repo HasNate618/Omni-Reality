@@ -152,6 +152,17 @@ def chat_completion(
         )
         return extract_text(response_json), response_json, record
     except Exception as exc:
+        # Record the gateway's OWN error message. Without it a 400 is opaque:
+        # the audit said only "HTTPStatusError: 400 Bad Request", which is how a
+        # malformed follow-up request stayed invisible in a live turn. The body is
+        # the API's explanation, not ours; append_audit_record redacts the key and
+        # caps the string.
+        detail = ""
+        if response_json:
+            try:
+                detail = " | body=" + json.dumps(response_json, ensure_ascii=False)[:800]
+            except (TypeError, ValueError):
+                detail = " | body=<unserialisable>"
         append_audit_record(
             model=model,
             api_key=api_key,
@@ -162,7 +173,7 @@ def chat_completion(
             status_code=status,
             latency_s=time.monotonic() - started,
             response_json=response_json,
-            error=f"{type(exc).__name__}: {exc}",
+            error=f"{type(exc).__name__}: {exc}{detail}",
             audit_log=audit_log,
         )
         raise

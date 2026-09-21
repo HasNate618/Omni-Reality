@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from coordinator import turn
-from coordinator.live_config import ensure_live_voice_only_config
+from coordinator.live_config import ensure_live_planner_config
 from coordinator.planner import StubPlanner, YibuPlanner
 from coordinator.server import make_planner
 from coordinator.session import CoordinatorState, UtteranceBuffer
@@ -134,7 +134,7 @@ class VoiceOnlyCliTests(unittest.TestCase):
         self.assertEqual(args.planner, "yibu")
 
 
-class LiveVoiceOnlyConfigTests(unittest.TestCase):
+class LivePlannerConfigTests(unittest.TestCase):
     def test_missing_yibu_api_key_raises_configuration_error(self) -> None:
         env = {k: v for k, v in os.environ.items() if k != "YIBU_API_KEY"}
         with patch.dict(os.environ, env, clear=True):
@@ -143,16 +143,16 @@ class LiveVoiceOnlyConfigTests(unittest.TestCase):
             self.assertEqual(ctx.exception.name, "YIBU_API_KEY")
             self.assertEqual(str(ctx.exception), "YIBU_API_KEY")
 
-    def test_voice_only_yibu_startup_requires_api_key(self) -> None:
+    def test_live_yibu_startup_requires_api_key(self) -> None:
         env = {k: v for k, v in os.environ.items() if k != "YIBU_API_KEY"}
         with patch.dict(os.environ, env, clear=True):
             with self.assertRaises(ApiKeyConfigurationError):
-                ensure_live_voice_only_config("yibu", voice_only=True)
+                ensure_live_planner_config("yibu")
 
-    def test_voice_only_yibu_startup_skipped_for_other_planners(self) -> None:
+    def test_live_startup_skipped_for_other_planners(self) -> None:
         env = {k: v for k, v in os.environ.items() if k != "YIBU_API_KEY"}
         with patch.dict(os.environ, env, clear=True):
-            ensure_live_voice_only_config("voice-stub", voice_only=False)
+            ensure_live_planner_config("voice-stub")
 
     def test_run_server_voice_only_missing_key_never_binds_websocket(self) -> None:
         env = {k: v for k, v in os.environ.items() if k != "YIBU_API_KEY"}
@@ -162,6 +162,20 @@ class LiveVoiceOnlyConfigTests(unittest.TestCase):
 
                 with self.assertRaises(ApiKeyConfigurationError):
                     asyncio.run(run_server(planner_kind="yibu", voice_only=True, port=9876))
+                serve_mock.assert_not_called()
+
+    def test_run_server_tool_planner_missing_key_never_binds_websocket(self) -> None:
+        # The tool planner is the demo's own mode (`--planner yibu`, no flags)
+        # and reaches the provider on its first turn. Without this check the
+        # server binds happily and then every turn fails behind a line that
+        # reads like a network fault instead of a missing key.
+        env = {k: v for k, v in os.environ.items() if k != "YIBU_API_KEY"}
+        with patch.dict(os.environ, env, clear=True):
+            with patch("websockets.serve") as serve_mock:
+                from coordinator.server import run_server
+
+                with self.assertRaises(ApiKeyConfigurationError):
+                    asyncio.run(run_server(planner_kind="yibu", port=9877))
                 serve_mock.assert_not_called()
 
 

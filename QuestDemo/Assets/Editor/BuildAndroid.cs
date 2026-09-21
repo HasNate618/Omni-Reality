@@ -83,6 +83,12 @@ public static class BuildAndroid
         PlayerSettings.Android.targetArchitectures = AndroidArchitecture.ARM64;
         PlayerSettings.runInBackground = true;
 
+        // UnityWebRequest refuses plain HTTP by default ("Not allowed"), and the
+        // generated-mesh fetch is http:// on the LAN. This is the request-level
+        // gate; ARCleartextFix handles the platform-level one (a network security
+        // config, when present, wins over android:usesCleartextTraffic).
+        PlayerSettings.insecureHttpOption = InsecureHttpOption.AlwaysAllowed;
+
         EditorUserBuildSettings.SwitchActiveBuildTarget(BuildTargetGroup.Android, BuildTarget.Android);
 
         // Runtime-created materials (rings, ghosts, labels, procedural,
@@ -92,6 +98,7 @@ public static class BuildAndroid
         EnsureAlwaysIncludedShader("Unlit/Color");
         EnsureAlwaysIncludedShader("Unlit/Transparent");
 
+        WriteLaptopIpAsset();
         System.IO.Directory.CreateDirectory("Builds");
         BuildPlayerOptions opts = new BuildPlayerOptions
         {
@@ -102,12 +109,82 @@ public static class BuildAndroid
             options = options,
         };
         var report = BuildPipeline.BuildPlayer(opts);
+        // Runs BEFORE the result check on purpose: a failed build can still have
+        // written the token, and that is exactly when nobody is looking.
+        BlankDebuggerAccessToken();
         if (report.summary.result != UnityEditor.Build.Reporting.BuildResult.Succeeded)
         {
             Debug.LogError("BUILD FAILED: " + report.summary.result);
             EditorApplication.Exit(1);
         }
         Debug.Log("BUILD SUCCEEDED: Builds/QuestDemo.apk");
+    }
+
+    /// <summary>
+    /// Re-blank the Meta Immersive Debugger access token that a build writes into
+    /// Assets/Resources/DevAgentSettings.asset.
+    ///
+    /// That asset is COMMITTED, so a token left behind sits in the working tree and
+    /// gets swept up by the next `git add -A` -- the secret-scanner trip that
+    /// docs/questdemo-build.md warns about ("the SDK-bundled default accessToken is
+    /// blanked"). Verified: a build with no other change turns `accessToken: ` into
+    /// `accessToken: <32 hex>`, so this has to run after every build, not once.
+    ///
+    /// Idempotent, and a no-op when the file or the field is absent, so it is safe
+    /// on any machine. Only the token is cleared; serverAddress is environment
+    /// configuration that HEAD already carries.
+    /// </summary>
+    static void BlankDebuggerAccessToken()
+    {
+        const string path = "Assets/Resources/DevAgentSettings.asset";
+        if (!System.IO.File.Exists(path))
+            return;
+        string text = System.IO.File.ReadAllText(path);
+        string blanked = System.Text.RegularExpressions.Regex.Replace(
+            text,
+            @"^(\s*accessToken:\s*).*$",
+            "$1",
+            System.Text.RegularExpressions.RegexOptions.Multiline);
+        if (blanked == text)
+            return;
+        System.IO.File.WriteAllText(path, blanked);
+        AssetDatabase.ImportAsset(path);
+        Debug.Log("BuildAndroid: blanked the Immersive Debugger accessToken in " + path);
+    }
+
+    /// <summary>
+    /// Bake OMNI_LAPTOP_IP into StreamingAssets so a non-debuggable build can
+    /// still be pointed at the demo laptop. Without this the address can only
+    /// come from the laptop_ipv4 pref, which needs `adb shell run-as` and so is
+    /// writeable only on a debuggable build. SpatialRuntime prefers the pref
+    /// when it is set, so this never overrides a device-side choice.
+    /// </summary>
+    static void WriteLaptopIpAsset()
+    {
+        const string dir = "Assets/StreamingAssets";
+        const string path = dir + "/laptop_ip.txt";
+        string ip = (System.Environment.GetEnvironmentVariable("OMNI_LAPTOP_IP") ?? "").Trim();
+        if (ip.Length == 0)
+        {
+            // Never ship a stale address from an earlier build.
+            if (System.IO.File.Exists(path))
+            {
+                System.IO.File.Delete(path);
+                AssetDatabase.Refresh();
+                Debug.Log("BuildAndroid: OMNI_LAPTOP_IP unset; removed stale " + path);
+            }
+            else
+            {
+                Debug.Log("BuildAndroid: OMNI_LAPTOP_IP unset; no laptop IP baked");
+            }
+            return;
+        }
+        System.IO.Directory.CreateDirectory(dir);
+        System.IO.File.WriteAllText(path, ip);
+        // The file is written mid-run, so import it before the build reads
+        // StreamingAssets; otherwise the bake may miss the player.
+        AssetDatabase.Refresh();
+        Debug.Log("BuildAndroid: baked laptop IP " + ip + " into " + path);
     }
 
     static void EnsureAlwaysIncludedShader(string shaderName)

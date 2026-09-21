@@ -39,7 +39,7 @@ async def run_tool_loop(
     collected_ops: list[dict] = []
     final_text = ""
 
-    for _ in range(max_rounds):
+    for round_index in range(max_rounds):
         response = await complete_fn(messages, True)
         tool_calls = extract_tool_calls(response)
         if not tool_calls:
@@ -47,10 +47,34 @@ async def run_tool_loop(
             break
 
         assistant_message = (response.get("choices") or [{}])[0].get("message") or {}
+        # Rebuild the tool_calls echo in canonical form with a GUARANTEED non-empty
+        # id, instead of echoing the raw structure back.
+        #
+        # extract_tool_calls coerces a missing id to "", and this used to re-send
+        # the raw tool_calls while the tool message used that coerced id -- so a
+        # gateway that omits ids got {"role":"tool","tool_call_id":""} and
+        # answered 400. That 400 lands on the SECOND call, i.e. AFTER the tool has
+        # already run: a placement got queued, no box was ever planted, and the
+        # wearer heard nothing. Observed live on turn 3 -- POST /jobs 200, then
+        # 400, then "turn background task failed ... ValueError".
+        canonical: list[dict[str, Any]] = []
+        for index, call in enumerate(tool_calls):
+            call_id = call.get("id") or f"call_{round_index}_{index}"
+            call["id"] = call_id
+            canonical.append({
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": call["name"],
+                    "arguments": json.dumps(call["arguments"], ensure_ascii=False),
+                },
+            })
         messages.append({
             "role": "assistant",
-            "content": assistant_message.get("content"),
-            "tool_calls": assistant_message.get("tool_calls"),
+            # Never an explicit null: some gateways reject content:null when
+            # tool_calls are present.
+            "content": assistant_message.get("content") or "",
+            "tool_calls": canonical,
         })
 
         for call in tool_calls:

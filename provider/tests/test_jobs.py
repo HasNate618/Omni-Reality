@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from coordinator.jobs import (
+    MAX_UNREACHABLE_SCANS,
     JobStore,
     clear_jobs,
     coordinator_may_place,
@@ -246,6 +247,37 @@ class JobPollerScanTests(unittest.TestCase):
         job_id = self._queue()
         settled = self._scan(status_fn=lambda *, job_id: None)
         self.assertEqual(settled, [])
+        self.assertEqual(self.store.jobs[job_id]["status"], "queued")
+
+    def test_persistently_unreachable_worker_settles_the_job_failed(self) -> None:
+        # One unreachable scan is a blip; MAX_UNREACHABLE_SCANS of them is a dead
+        # worker. A job parked in `queued` keeps session_generation_busy true,
+        # which refuses every later placement for the rest of the session -- the
+        # wedge this scan exists to prevent.
+        job_id = self._queue()
+        for _ in range(MAX_UNREACHABLE_SCANS - 1):
+            self.assertEqual(self._scan(status_fn=lambda *, job_id: None), [])
+            self.assertEqual(self.store.jobs[job_id]["status"], "queued")
+
+        settled = self._scan(status_fn=lambda *, job_id: None)
+
+        self.assertEqual(settled, [job_id])
+        self.assertEqual(self.store.jobs[job_id]["status"], "failed")
+        self.assertFalse(session_generation_busy(self.store))
+
+    def test_a_reachable_status_resets_the_unreachable_tolerance(self) -> None:
+        # A worker that is merely slow must never be settled early: one good
+        # status reply starts the count over.
+        job_id = self._queue()
+        for _ in range(MAX_UNREACHABLE_SCANS - 1):
+            self._scan(status_fn=lambda *, job_id: None)
+
+        self.assertEqual(self._scan(status_fn=lambda *, job_id: "running"), [])
+        self.assertEqual(self.store.jobs[job_id]["status"], "queued")
+        self.assertEqual(self.store.jobs[job_id]["unreachable_scans"], 0)
+
+        for _ in range(MAX_UNREACHABLE_SCANS - 1):
+            self.assertEqual(self._scan(status_fn=lambda *, job_id: None), [])
         self.assertEqual(self.store.jobs[job_id]["status"], "queued")
 
     def test_already_settled_jobs_are_not_rescanned(self) -> None:

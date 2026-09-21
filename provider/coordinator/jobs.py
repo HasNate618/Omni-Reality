@@ -19,6 +19,11 @@ StatusFn = Callable[..., Any]
 # queued | running | ready | failed. Only the terminal failure string is acted on.
 WORKER_FAILED = "failed"
 
+# Consecutive scans a queued job may report an unreachable worker before it is
+# settled failed. More than one, so a restart or a slow status reply is not read
+# as death; small enough that the session does not stay wedged.
+MAX_UNREACHABLE_SCANS = 10
+
 
 class JobStore:
     def __init__(self) -> None:
@@ -219,8 +224,11 @@ async def poll_queued_jobs(
     about a terminal failure, so a worker that dies cannot leave a job queued
     forever and block every later placement (spec §5.3 session_generation_busy).
 
-    Returns the job ids settled in this scan. A job whose worker is unreachable
-    stays queued, exactly as it did before this scan existed.
+    Returns the job ids settled in this scan. A job whose worker is briefly
+    unreachable stays queued, but once it has been unreachable for
+    MAX_UNREACHABLE_SCANS consecutive scans it is settled failed: "cannot reach
+    the worker" and "never coming" are indistinguishable to a wearer staring at
+    nothing, and a job parked in `queued` refuses every later placement.
     """
     # Local import: artifacts.py imports this module for JobStore/
     # coordinator_may_place, so a module-level import would be a cycle.
@@ -233,10 +241,24 @@ async def poll_queued_jobs(
         path = artifact_path(artifact_root, job_id)
         if path is not None and exists_fn(path):
             mark_ready(store, job_id)
-        elif status_fn is not None and (await _call_injected(status_fn, job_id=job_id)) == WORKER_FAILED:
-            mark_failed(store, job_id)
-        else:
+        elif status_fn is None:
             continue
+        else:
+            status = await _call_injected(status_fn, job_id=job_id)
+            if status == WORKER_FAILED:
+                mark_failed(store, job_id)
+            elif status is None:
+                # None is "could not tell": the worker is down or unreadable.
+                unreachable = int(job.get("unreachable_scans") or 0) + 1
+                job["unreachable_scans"] = unreachable
+                if unreachable < MAX_UNREACHABLE_SCANS:
+                    continue
+                mark_failed(store, job_id)
+            else:
+                # A reachable worker reporting queued/running/ready: reset the
+                # tolerance so a merely slow job is never settled early.
+                job["unreachable_scans"] = 0
+                continue
         settled.append(job_id)
         await on_terminal(job_id)
     return settled

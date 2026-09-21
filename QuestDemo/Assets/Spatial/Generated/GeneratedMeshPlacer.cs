@@ -152,6 +152,13 @@ public static class GeneratedMeshPlacer
             client.EnqueueAck(op, "rejected", null, "invalid", null);
             yield break;
         }
+        // The box is real at the listed size, so this is the honest moment to
+        // claim the item. Recorded here rather than at op arrival so a refusal
+        // (no_surface, too_close, stale) never puts a chip in the queue.
+        // Reaching here guarantees HasExtentM: PlaceGenerated refuses a
+        // placement with no size rather than inventing one.
+        if (client.ItemQueue != null)
+            client.ItemQueue.Record(drawingId, op.Name, op.ExtentM);
         // Plant and ACK the box BEFORE the artifact fetch. The coordinator
         // waits only ACK_TIMEOUT_S = 1.5 s before speaking SAY_UNCONFIRMED,
         // and the artifact 404s until the job is ready, so an ACK below the

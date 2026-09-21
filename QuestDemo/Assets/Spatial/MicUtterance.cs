@@ -490,7 +490,7 @@ public class MicUtterance : MonoBehaviour
             _client.ShowVoiceFeedback("That was too short. Please ask again.");
             FinishUtterance(id, null, null, null, false);
         }
-        else if (_client.PerceptionEnabled && Perception != null)
+        else if ((_client.PerceptionEnabled || _client.AcceptsFrame) && Perception != null)
         {
             // The question frame wins the capture gate over tracking streams.
             _client.CancelTrackCapture();
@@ -498,7 +498,7 @@ public class MicUtterance : MonoBehaviour
         }
         else
         {
-            FinishUtterance(id, null, null, _client.PerceptionEnabled ? "camera_down" : null, true);
+            FinishUtterance(id, null, null, (_client.PerceptionEnabled || _client.AcceptsFrame) ? "camera_down" : null, true);
         }
     }
 

@@ -9,14 +9,21 @@ the turn stays caption-only (degraded, never claimed as voice proof).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
+import subprocess  # noqa: F401  # patch anchor for voice.resample's ffmpeg call
 import tempfile
 from pathlib import Path
 from typing import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
+# What the headset plays (SpeakCloudPlayer.SampleRate). The live route emits
+# PROVIDER_SAMPLE_RATE, so its bytes are converted before being labelled with
+# this: relabelling 24 kHz as 16 kHz makes one second last 1.5 s, at the wrong
+# pitch.
 SAMPLE_RATE = 16000
+PROVIDER_SAMPLE_RATE = 24000
 CHANNELS = 1
 ENCODING = "pcm_s16le"
 
@@ -36,7 +43,9 @@ async def synthesize_line(
     if synth_fn is not None:
         try:
             result = synth_fn(text)
-            if asyncio.iscoroutine(result):
+            # isawaitable, not iscoroutine: a caller may hand back a Future, which
+            # is awaitable but is not a coroutine.
+            if inspect.isawaitable(result):
                 result = await result
             return result or None
         except Exception:
@@ -65,14 +74,32 @@ def _gemini_speech(text: str, purpose: str, timeout: float) -> bytes | None:
                 audit_log=None,
                 audio_out=out,
                 timeout=timeout,
+                # Declare the rate we actually expect, so a provider that changes
+                # format is rejected here instead of being mislabelled later.
+                expected_audio_sample_rate=PROVIDER_SAMPLE_RATE,
             )
-        except Exception:
-            logger.exception("gemini speech leg failed")
+        except Exception as exc:
+            # Type only. Provider errors can carry response text and the headset
+            # logs are not a safe place for it.
+            logger.warning("gemini speech leg failed: %s", type(exc).__name__)
             return None
         if not out.exists():
             return None
         data = out.read_bytes()
-        return data or None
+    if not data or len(data) % 2:
+        # Not whole s16le samples: refuse rather than hand the headset audio we
+        # cannot describe.
+        logger.warning("gemini speech leg returned malformed PCM")
+        return None
+    try:
+        from voice.resample import resample_24k_to_16k
+
+        return resample_24k_to_16k(data) or None
+    except Exception as exc:
+        # Type only, for the same reason as above: the converter raises with
+        # paths and ffmpeg stderr attached.
+        logger.warning("speech resample failed: %s", type(exc).__name__)
+        return None
 
 
 def audio_block(pcm: bytes) -> dict:

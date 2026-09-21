@@ -65,6 +65,68 @@ def fill_frame_id(op: dict, frame_id: str | None) -> dict:
     return op
 
 
+def _tool_declares(name: str, param: str) -> bool:
+    """Whether TOOL_DEFINITIONS declares parameter `param` for tool `name`."""
+    for tool in TOOL_DEFINITIONS:
+        fn = tool.get("function") or {}
+        if fn.get("name") == name:
+            props = (fn.get("parameters") or {}).get("properties") or {}
+            return param in props
+    return False
+
+
+def fill_tool_args(name: str, arguments: dict, frame_id: str | None) -> dict:
+    """Give tool arguments the capture frame_id the model cannot know.
+
+    The frame id is a 26-char ULID minted on Quest and never shown to the model, so
+    a frame-anchored tool call can only validate if the coordinator supplies it --
+    the same reason `fill_frame_id` exists for model-authored ops. Tools need their
+    own filler because the id arrives in two shapes here: a top-level `frame_id`
+    parameter (`inspect_objects` requires one) and a frame-space `target`.
+
+    Unlike `fill_frame_id` this OVERWRITES rather than setdefaulting: the model has
+    no way to know a real id, so anything it supplies is a guess, and the capture's
+    own id is the only correct answer.
+    """
+    args = dict(arguments)
+    if frame_id is None:
+        return args
+    if _tool_declares(name, "frame_id"):
+        args["frame_id"] = frame_id
+    target = args.get("target")
+    if isinstance(target, dict) and target.get("type") in _FRAME_TARGETS:
+        # Copy instead of mutating: `dict(arguments)` above is shallow, so this
+        # `target` is still the caller's object.
+        args["target"] = dict(target, frame_id=frame_id)
+    return args
+
+
+CONTEXT_DRAWING_TURNS = 4
+
+
+def _recent_drawing_ids(context: list[dict]) -> str:
+    """Recent placements as prompt lines, for `revise_procedural`.
+
+    A revision op is keyed on a drawing_id that Quest mints (a 26-char ULID), so
+    the model can neither invent one nor revise anything unless it is told the
+    ids it just created. Each id is paired with the turn it came from so the
+    model can pick the right object. Newest last, duplicates dropped.
+    """
+    lines: list[str] = []
+    seen: set[str] = set()
+    for entry in context[-CONTEXT_DRAWING_TURNS:]:
+        ids = [d for d in (entry.get("drawing_ids") or []) if isinstance(d, str)]
+        if not ids:
+            continue
+        said = str(entry.get("said") or "").strip()
+        for drawing_id in ids:
+            if drawing_id in seen:
+                continue
+            seen.add(drawing_id)
+            lines.append(f"- {drawing_id}  ({said})" if said else f"- {drawing_id}")
+    return "\n".join(lines)
+
+
 def accept_model_ops(raw_ops: object, frame_id: str | None) -> list[dict]:
     """Keep schema-valid ModelSceneOps (never repaired), capped at 3.
 
@@ -188,6 +250,57 @@ Rules:
   when the wearer wants one item to take on another item's size and shape; the
   target names that other drawing)}."""
 
+TOOLS_SYSTEM_PROMPT = """You are a spatial assistant on a mixed-reality headset.
+You hear the user's speech (audio) and see what their camera sees (image).
+You cannot move matter. You call tools; the headset does the placing.
+
+Call a tool by name. You never author geometry: no world coordinates, no poses, no
+distances, no object ids, no drawing ids you were not given.
+
+place_item -- place a real-size item in the room.
+  Use this whenever the wearer wants something from a listing, page, catalogue,
+  menu or price tag brought into the room: "bring this to life", "put this in the
+  corner", "how big would that be", "place the side table".
+  You MUST pass all three sizes in metres, READ FROM THE IMAGE or HEARD FROM THE
+  WEARER. Never estimate from memory, never infer from how large it looks in the
+  photo, never guess a missing axis. If you cannot read all three sizes, ASK THE
+  WEARER instead of calling the tool. A size you invented is a lie the wearer will
+  stand next to.
+  name is what the listing calls the item, verbatim. target is where to put it in
+  the current view -- use capture_hint for "in front of me" or an empty area.
+
+inspect_objects -- find objects in the current frame near a target.
+start_generation -- queue mesh generation for an object returned by inspect_objects.
+emit_scene_ops -- propose drawing ops (mark / label / ghost / connect /
+  place_procedural / revise_procedural). This CANNOT place a generated mesh; use
+  place_item for that.
+
+Drawing ops, for emit_scene_ops only:
+{"kind": "mark", "target": {"type": "image_point", "u": <0..1>, "v": <0..1>},
+ "motion": {"kind": "pulse", "period_s": 1.2}}
+u is left to right, v is top to bottom, both normalized to the image. Point at the
+centre of the object's visible surface.
+Procedural generation (at most one per turn): {"kind": "place_procedural",
+  "target": {...}, "elements": [1-6 of {"element": "arrow"|"pointer"|"panel"|
+  "cube"|"sphere"|"cylinder", "color": "cyan"|"amber"|"green"|"magenta"|
+  "white"|"slate", "size": "small"|"medium"|"large",
+  "material": "solid"|"translucent"|"glow", optional "text" (panel/pointer
+  only, max 40 chars)}]}. Revise a procedural drawing only by drawing_id:
+  {"kind": "revise_procedural", "drawing_id": "...", "action":
+  "enlarge"|"shrink"|"rotate_cw"|"rotate_ccw"|"nudge"|"remove"|"swap",
+  "direction": "left"|"right"|"up"|"down"|"forward"|"back" (nudge only),
+  "target": {"type": "drawing", "drawing_id": "..."} (swap only: the drawing
+  whose size and shape this one should take on)}.
+
+Rules:
+- Say one or two short sentences along with each tool call.
+- Only propose drawing ops when the user asks you to show, mark, point at or find
+  something.
+- If you cannot tell which object they mean, ask them to point or look closer.
+- Do not claim something was placed; the headset confirms placement after you.
+- Never guess safety-critical facts (live power, load ratings, food doneness).
+"""
+
 VOICE_ONLY_SYSTEM_PROMPT = """You are a voice assistant on a mixed-reality headset.
 Listen to the user's speech and reply with one or two short spoken sentences in plain text.
 Do not use JSON, markdown, drawing instructions, or spatial operations."""
@@ -281,6 +394,7 @@ class YibuPlanner:
 
     async def _dispatch_tool(self, name: str, arguments: dict) -> Any:
         """Route one model tool call to workers (never to Quest)."""
+        arguments = fill_tool_args(name, arguments, self._frame_id)
         if self._execute_fn is not None and name != "emit_scene_ops":
             result = self._execute_fn(name, arguments)
             if asyncio.iscoroutine(result):
@@ -358,13 +472,25 @@ class YibuPlanner:
         prompt = "Respond to the user's speech in the audio."
         if history:
             prompt += "\nRecent turns:\n" + history
+        placed = _recent_drawing_ids(context)
+        if placed:
+            prompt += (
+                "\nObjects already placed (revise these by their exact id; "
+                "never invent one):\n" + placed
+            )
         if jpeg is None:
             prompt += "\nNo camera image this turn: add no ops."
+        # The tool path must NOT be handed the legacy ops prompt. That prompt says
+        # "reply with ONLY one JSON object" and never names a tool, so the model
+        # has no instructed route to place_item -- it answers with prose ops, and
+        # accept_model_ops drops any place_generated it emits, by design. Verified
+        # that no prompt anywhere mentioned a tool before this.
+        tools_available = self._execute_fn is not None or self._jobs is not None
         messages = build_voice_messages(
             prompt,
             wav=pcm_to_wav_bytes(pcm),
             jpeg=jpeg,
-            system=SYSTEM_PROMPT,
+            system=TOOLS_SYSTEM_PROMPT if tools_available else SYSTEM_PROMPT,
             audio_as=self.audio_as,
         )
         started = time.monotonic()

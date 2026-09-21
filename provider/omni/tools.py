@@ -62,7 +62,27 @@ TOOL_DEFINITIONS: list[dict] = [
                         "maxItems": 3,
                         "items": {"type": "number", "minimum": 0.05, "maximum": 3.0},
                     },
-                    "target": {"type": "object"},
+                    "target": {
+                        "type": "object",
+                        "description": (
+                            "Where to place it, in image space of the current view. "
+                            "Use capture_hint when the wearer means 'in front of me' "
+                            "or an empty area you can see. Do not send a frame id; "
+                            "the coordinator fills it in."
+                        ),
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": [
+                                    "capture_hint",
+                                    "pointing",
+                                    "image_point",
+                                    "image_box",
+                                ],
+                            },
+                        },
+                        "required": ["type"],
+                    },
                 },
             },
         },

@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from coordinator.jobs import JobStore, session_generation_busy
+import httpx
+
+from coordinator.jobs import JobStore, mark_failed, session_generation_busy
 from coordinator.layout import pack_offsets, run_length
 from protocol.ids import new_ulid
 
@@ -57,6 +59,18 @@ class ListingMemory:
 
     def clear(self) -> None:
         self._rows.clear()
+
+
+def _source(jpeg_b64: str | None) -> str:
+    """Where a row's sizes came from, for the honesty rubric.
+
+    "page" only when a camera image actually arrived with this turn, which is
+    the only case where the model could have read the sizes off the listing.
+    Without an image the sizes were spoken (or invented), and the row must not
+    claim the page said so: the demo rubric rests on "scale comes from the
+    listings".
+    """
+    return "page" if jpeg_b64 else "spoken"
 
 
 def _valid_extents(value: Any) -> list[float] | None:
@@ -126,7 +140,9 @@ async def handle_place_item(
         # No worker is queued on this path, so the busy rule does not apply.
         # Build the result BEFORE creating the job: if it raises, no job is
         # left behind for session_generation_busy to trip over.
-        result = _place_result(listings, name, extents, target, current_frame_id, artifact_id)
+        result = _place_result(
+            listings, name, extents, target, current_frame_id, artifact_id, _source(jpeg_b64)
+        )
         store.jobs[artifact_id] = {
             "job_id": artifact_id,
             "frame_id": current_frame_id,
@@ -134,6 +150,7 @@ async def handle_place_item(
             "object_id": None,
             "status": "ready",
             "extent_m": extents,
+            "name": name,
             "planted": True,
             # Operator-owned artifact: session teardown must not unlink it
             # (spec §5.3), or one demo take deletes the night-before bake.
@@ -156,6 +173,7 @@ async def handle_place_item(
         "object_id": None,
         "status": "queued",
         "extent_m": extents,
+        "name": name,
         "planted": True,
     }
     # Everything from job creation onward is guarded: a job left behind as
@@ -172,12 +190,30 @@ async def handle_place_item(
                 prompt=name,
                 mask_png_b64=None,
             ))
-        return _place_result(listings, name, extents, target, current_frame_id, job_id)
+        return _place_result(
+            listings, name, extents, target, current_frame_id, job_id, _source(jpeg_b64)
+        )
     except BusyError:
         # The worker refused, so no placement happened. No row was recorded
         # yet, so there is nothing to roll back.
         store.jobs.pop(job_id, None)
         return {"error": "busy"}, None
+    except httpx.HTTPError:
+        # The worker is unreachable, but the placement is still TRUE: the box is
+        # sized from the listing and never waits on the mesh. demo.md's own
+        # fallback is "mesh fails -> boxes carry the demo", so record and emit
+        # the placement anyway instead of aborting the turn with a misleading
+        # "couldn't reach the model" and planting nothing at all.
+        #
+        # The job is settled failed rather than left queued, because a job stuck
+        # in `queued` makes session_generation_busy true for the rest of the
+        # session and would refuse every later placement.
+        mark_failed(store, job_id)
+        result, op = _place_result(
+            listings, name, extents, target, current_frame_id, job_id, _source(jpeg_b64)
+        )
+        result["error"] = "worker_unavailable"
+        return result, op
     except BaseException:
         store.jobs.pop(job_id, None)
         raise
@@ -190,6 +226,7 @@ def _place_result(
     target: dict,
     current_frame_id: str | None,
     job_id: str,
+    source: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Record the row and build (tool_result, coordinator_op) in one place.
 
@@ -197,7 +234,7 @@ def _place_result(
     never drift between them. Recording happens here, after every refusal
     point, which is what keeps a refused placement side-effect free.
     """
-    listings.record(name, extents, current_frame_id, "page")
+    listings.record(name, extents, current_frame_id, source)
     return (
         {
             "listed": name,
@@ -205,7 +242,7 @@ def _place_result(
             "job_id": job_id,
             "run_length_m": run_length([row["extent_m"] for row in listings.rows()]),
         },
-        _place_op(job_id, extents, target, _offset_for(listings, name)),
+        _place_op(job_id, extents, target, _offset_for(listings, name), name),
     )
 
 
@@ -226,9 +263,15 @@ def _offset_for(listings: "ListingMemory", name: str) -> float:
     return 0.0
 
 
-def _place_op(job_id: str, extents: list[float], target: dict, offset_m: float) -> dict[str, Any]:
+def _place_op(
+    job_id: str,
+    extents: list[float],
+    target: dict,
+    offset_m: float,
+    name: str | None = None,
+) -> dict[str, Any]:
     """Partial place_generated. _run_turn adds op_id, turn_id, stage_epoch."""
-    return {
+    op: dict[str, Any] = {
         "kind": "place_generated",
         "job_id": job_id,
         "extent_m": list(extents),
@@ -236,6 +279,12 @@ def _place_op(job_id: str, extents: list[float], target: dict, offset_m: float) 
         "target": dict(target),
         "drawing_id": None,
     }
+    if name:
+        # Quest labels the item chips and the take-home card from this. Optional
+        # by contract: an absent name degrades to a dims-only label rather than
+        # a blank one, so an older or future emit site cannot blank the overlay.
+        op["name"] = name
+    return op
 
 
 async def _maybe_await(value: Any) -> Any:

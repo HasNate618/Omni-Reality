@@ -73,3 +73,31 @@ class EchoGateTests(unittest.TestCase):
                                       speak_sent_at=100.0, utterance_end_at=120.0)
         self.assertFalse(drop)
         self.assertEqual(reason, "")
+
+    # --- calibration against measured Quest 3S levels -------------------------
+
+    def test_quiet_real_speech_still_passes(self):
+        """A measured live turn was dropped here: peak_rms 0.0135, voiced=1 of 12.
+
+        The synthetic fixture is a stand-in, not a replica: a smooth envelope at
+        amp=450 crosses the threshold the same way that capture did. What matters
+        is that it is BELOW 0.010 and ABOVE 0.006 -- verified by falsification,
+        since an amp that passes at both floors proves nothing.
+        """
+        quiet = tone(2.0, 300.0, amp=450.0, seed=99)
+        self.assertGreaterEqual(voiced_windows(quiet), 2)
+        drop, reason, _ = should_drop(utterance_pcm=quiet, last_speak_pcm=None,
+                                      speak_sent_at=None, utterance_end_at=120.0)
+        self.assertFalse(drop, f"quiet real speech must not be dropped ({reason})")
+
+    def test_a_quiet_room_still_reads_as_silence(self):
+        """The floor must stay above room tone, or every pause becomes a turn."""
+        self.assertLess(voiced_windows(noise(2.0, amp=200.0)), 2)
+        drop, reason, _ = should_drop(utterance_pcm=noise(2.0, amp=200.0), last_speak_pcm=None,
+                                      speak_sent_at=None, utterance_end_at=120.0)
+        self.assertTrue(drop)
+        self.assertEqual(reason, "no_speech")
+
+    def test_a_transient_click_is_still_not_speech(self):
+        """Unchanged by the recalibration: one spike is one window at any floor."""
+        self.assertLess(voiced_windows(CLICK), 2)

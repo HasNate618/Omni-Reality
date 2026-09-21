@@ -6,7 +6,10 @@
   <uses-feature android:name="android.hardware.vr.mode" android:required="false" />
   <uses-permission android:name="horizonos.permission.HEADSET_CAMERA" />
   <uses-permission android:name="android.permission.RECORD_AUDIO" />
-  <application>
+  <!-- usesCleartextTraffic is a belt to ARCleartextFix's brace: when the SDK's
+       networkSecurityConfig is present it takes precedence over this flag, so
+       the generated config must be rewritten too (see ARCleartextFix.cs). -->
+  <application android:usesCleartextTraffic="true">
     <activity android:name="com.unity3d.player.UnityPlayerGameActivity" android:theme="@style/BaseUnityGameActivityTheme">
       <intent-filter>
         <action android:name="android.intent.action.MAIN" />

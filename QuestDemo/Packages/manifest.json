@@ -30,6 +30,7 @@
     "com.unity.xr.legacyinputhelpers": "3.0.1",
     "com.unity.xr.management": "4.7.0",
     "com.unity.xr.openxr": "1.18.0",
+    "com.unity.xr.meta-openxr": "2.6.1",
     "com.unity.xr.interaction.toolkit": "3.6.1",
     "com.meta.xr.sdk.core": "205.0.0",
     "com.meta.xr.mrutilitykit": "205.0.0",

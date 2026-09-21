@@ -429,6 +429,14 @@ public static class ProtocolJson
         public int StageEpoch;
         public string Kind;
         public string JobId;
+        /// <summary>
+        /// The listing name a placement was recorded under (e.g. "oak side
+        /// table"). Optional on the wire by contract: the pre-baked path, an
+        /// older op, or a future emit site that omits it leaves this null and
+        /// the overlays fall back to a dims-only label rather than blanking.
+        /// It never carries geometry -- the model authors no coordinates.
+        /// </summary>
+        public string Name;
         public bool HasExtentM;
         public Vector3 ExtentM;
         public bool HasOffsetM;
@@ -502,6 +510,8 @@ public static class ProtocolJson
         parsed.Kind = s;
         if (TryGetStringOrNull(payloadJson, "job_id", out s, out found) && found)
             parsed.JobId = s;
+        if (TryGetStringOrNull(payloadJson, "name", out s, out found) && found)
+            parsed.Name = s;
         int extentAt = IndexOfKey(payloadJson, "extent_m", 0);
         if (extentAt >= 0)
         {

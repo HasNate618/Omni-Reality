@@ -48,6 +48,26 @@ REJECT_DEFAULT = "I couldn't place that."
 Send = Callable[..., Awaitable[None]]
 
 
+def planner_binds_tools(planner: Any) -> bool:
+    """Whether this planner is handed tool context for a turn.
+
+    Single source of truth for a two-sided contract: `server.py` advertises the
+    result as `accepts_frame` in hello_ok, and `_run_turn` gates the tool bind on
+    it. If those two ever disagree, Quest either withholds the camera frame from a
+    planner that needs one, or sends one to a planner that ignores it -- and on the
+    withholding side every frame-anchored tool call is rejected with
+    {"error": "invalid"} while the whole suite still passes, because the tests
+    author the frame themselves.
+    """
+    if planner is None:
+        return False
+    if getattr(planner, "voice_only", False):
+        return False
+    if getattr(planner, "perception_qa", False):
+        return False
+    return getattr(planner, "bind_tools", None) is not None
+
+
 def _turn_task_done(state: CoordinatorState, turn_id: int, task: asyncio.Task) -> None:
     """Pop turn registry; log unhandled failures (class + turn id only)."""
     state.turn_tasks.pop(turn_id, None)
@@ -99,7 +119,16 @@ def _to_scene_op(model_op: dict, turn_id: int, stage_epoch: int) -> dict | None:
     try:
         validate_instance("scene_op", op)
     except ValidationError as exc:
-        logger.info("dropping op that fails scene_op schema: %s", exc.message)
+        # Warning, not info: by this point model ops have already passed
+        # `model_scene_op`, so a drop here is usually a coordinator-authored op
+        # that the tool loop already reported to the model as placed. Silently
+        # dropping it means the wearer sees nothing where the model said there
+        # would be something.
+        logger.warning(
+            "dropping op that fails scene_op schema: kind=%s reason=%s",
+            model_op.get("kind"),
+            exc.message,
+        )
         return None
     return op
 
@@ -145,8 +174,7 @@ async def _run_turn(
     )
     await send("turn_started", turn_id, {"utterance_id": utterance_id, "turn_id": turn_id}, utterance_id)
     bind = getattr(state.planner, "bind_tools", None)
-    voice_only = getattr(state.planner, "voice_only", False)
-    if bind is not None and not voice_only and not getattr(state.planner, "perception_qa", False):
+    if bind is not None and planner_binds_tools(state.planner):
         try:
             bind(
                 jobs=state.jobs,
@@ -334,8 +362,9 @@ def build_place_generated(
     stage_epoch: int,
     target: dict,
     extent_m: list[float] | None = None,
+    name: str | None = None,
 ) -> dict:
-    op = {
+    op: dict = {
         "op_id": new_ulid(),
         "turn_id": turn_id,
         "stage_epoch": stage_epoch,
@@ -346,6 +375,10 @@ def build_place_generated(
     }
     if extent_m is not None:
         op["extent_m"] = [float(axis) for axis in extent_m]
+    if name:
+        # The same optional field the immediate listing op carries, so the
+        # job-completion op labels the chips too instead of degrading to dims.
+        op["name"] = name
     validate_instance("scene_op", op)
     return op
 
@@ -399,6 +432,7 @@ async def on_job_terminal(
         stage_epoch=stage_epoch,
         target=target,
         extent_m=job["extent_m"],
+        name=job.get("name"),
     )
     ack = await send(op)
     if ack is None:

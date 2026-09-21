@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from coordinator.jobs import JobStore
+import httpx
+
+from coordinator.jobs import JobStore, session_generation_busy
 from coordinator.listings import ListingMemory, handle_place_item, normalize_name
 
 
@@ -66,13 +68,16 @@ class HandlePlaceItemTests(unittest.TestCase):
         self.store = JobStore()
         self.memory = ListingMemory()
 
-    def _call(self, args, *, prebaked=None, current_frame_id=_FRAME):
+    def _call(self, args, *, prebaked=None, current_frame_id=_FRAME, jpeg_b64=None,
+              queue_fn=None):
         return asyncio.run(handle_place_item(
             self.store,
             listings=self.memory,
             args=args,
             current_frame_id=current_frame_id,
             prebaked=prebaked or {},
+            jpeg_b64=jpeg_b64,
+            queue_fn=queue_fn,
         ))
 
     def _good(self) -> dict:
@@ -89,8 +94,61 @@ class HandlePlaceItemTests(unittest.TestCase):
         self._call(self._good())
         row = self.memory.get("oak side table")
         self.assertEqual(row["extent_m"], [0.55, 0.40, 0.72])
-        self.assertEqual(row["source"], "page")
         self.assertEqual(row["source_frame_id"], _FRAME)
+
+    def test_sizes_with_no_image_are_recorded_as_spoken(self) -> None:
+        # No camera image arrived, so the model cannot have read these sizes off
+        # a listing. Labelling the row "page" here is exactly what the honesty
+        # rubric forbids.
+        self._call(self._good())
+        self.assertEqual(self.memory.get("oak side table")["source"], "spoken")
+
+    def test_sizes_with_an_image_are_recorded_as_page(self) -> None:
+        self._call(self._good(), jpeg_b64="qq==")
+        self.assertEqual(self.memory.get("oak side table")["source"], "page")
+
+    def test_unreachable_worker_still_plants_the_box(self) -> None:
+        # demo.md's fallback is "mesh fails -> boxes carry the demo", so a dead
+        # worker must not abort the turn: the box is sized from the listing and
+        # never waits on the mesh. It used to raise out of the tool loop, which
+        # spoke "Sorry, I couldn't reach the model" and planted nothing.
+        async def dead_worker(**kwargs):
+            raise httpx.ConnectError("worker down")
+
+        result, op = self._call(self._good(), jpeg_b64="qq==", queue_fn=dead_worker)
+
+        self.assertEqual(result["error"], "worker_unavailable")
+        self.assertEqual(result["listed"], "oak side table")
+        self.assertIsNotNone(op, "the true-scale box must still be emitted")
+        self.assertEqual(op["kind"], "place_generated")
+        self.assertEqual(self.memory.get("oak side table")["source"], "page")
+        # The job must not stay queued: a queued job keeps
+        # session_generation_busy true and refuses every later placement.
+        self.assertEqual(self.store.jobs[op["job_id"]]["status"], "failed")
+        self.assertFalse(session_generation_busy(self.store))
+
+    def test_worker_http_status_error_also_plants_the_box(self) -> None:
+        # A 500 is the same story as an unreachable worker: no mesh, but the
+        # placement is still true.
+        async def failing_worker(**kwargs):
+            raise httpx.ConnectError("refused")
+
+        result, op = self._call(self._good(), queue_fn=failing_worker)
+        self.assertEqual(result["error"], "worker_unavailable")
+        self.assertIsNotNone(op)
+
+    def test_worker_refusal_is_still_a_refusal(self) -> None:
+        # A busy worker is NOT a transport failure: nothing was queued, so no
+        # placement happened and no row may be recorded.
+        from workers.gen_client import BusyError
+
+        async def busy_worker(**kwargs):
+            raise BusyError("busy")
+
+        result, op = self._call(self._good(), queue_fn=busy_worker)
+        self.assertEqual(result["error"], "busy")
+        self.assertIsNone(op)
+        self.assertEqual(self.memory.rows(), [])
 
     def test_missing_extent_m_refused(self) -> None:
         result, op = self._call({"name": "table", "target": _TARGET})

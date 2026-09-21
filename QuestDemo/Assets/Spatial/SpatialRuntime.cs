@@ -34,6 +34,9 @@ public class SpatialRuntime : MonoBehaviour
     public const float MinCaptureDistanceM = 0.25f;
     public const float AimLineWidthM = 0.005f;
 
+    /// <summary>StreamingAssets file that BuildAndroid bakes OMNI_LAPTOP_IP into.</summary>
+    public const string BakedLaptopIpv4File = "laptop_ip.txt";
+
     static readonly Vector2 CentreViewport = new Vector2(0.5f, 0.5f);
     const string Crockford = "0123456789abcdefghjkmnpqrstvwxyz";
 
@@ -77,7 +80,61 @@ public class SpatialRuntime : MonoBehaviour
         // interaction manager and a controller interactor nothing can select
         // one, so the floor-plane grab would be unreachable on device.
         GrabRig.Ensure();
-        _laptopIpv4 = PlayerPrefs.GetString(CoordinatorClient.LaptopIpv4PrefKey, "");
+        _laptopIpv4 = ChooseLaptopIpv4(
+            PlayerPrefs.GetString(CoordinatorClient.LaptopIpv4PrefKey, ""), "");
+        // The baked address lives in StreamingAssets, which is inside the APK on
+        // Android and so can only be read asynchronously. TickCoordinator stays
+        // dormant until an address exists, so a late arrival needs no timer.
+        StartCoroutine(LoadBakedLaptopIpv4());
+    }
+
+    /// <summary>
+    /// Resolve the laptop address: the device-side laptop_ipv4 pref wins, then
+    /// the address baked at build time, else empty (slice-1 offline behavior).
+    /// Exposed for tests. An empty result is logged loudly by the caller, since
+    /// it silently disables voice, networking and placement together.
+    /// </summary>
+    public static string ChooseLaptopIpv4(string prefValue, string bakedValue)
+    {
+        if (!string.IsNullOrEmpty(prefValue))
+            return prefValue.Trim();
+        if (!string.IsNullOrEmpty(bakedValue))
+            return bakedValue.Trim();
+        return "";
+    }
+
+    System.Collections.IEnumerator LoadBakedLaptopIpv4()
+    {
+        string path = System.IO.Path.Combine(Application.streamingAssetsPath, BakedLaptopIpv4File);
+#if UNITY_ANDROID && !UNITY_EDITOR
+        using (var req = UnityEngine.Networking.UnityWebRequest.Get(path))
+        {
+            yield return req.SendWebRequest();
+            ApplyBakedLaptopIpv4(
+                req.result == UnityEngine.Networking.UnityWebRequest.Result.Success
+                    ? req.downloadHandler.text
+                    : null);
+        }
+#else
+        ApplyBakedLaptopIpv4(System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path) : null);
+        yield break;
+#endif
+    }
+
+    void ApplyBakedLaptopIpv4(string bakedValue)
+    {
+        if (!string.IsNullOrEmpty(_laptopIpv4))
+            return; // the pref answered first; never override a device-side choice
+        _laptopIpv4 = ChooseLaptopIpv4("", bakedValue);
+        if (string.IsNullOrEmpty(_laptopIpv4))
+        {
+            Debug.LogWarning("SpatialRuntime: laptop_ipv4 not configured - set the "
+                + CoordinatorClient.LaptopIpv4PrefKey + " pref on the device, or rebuild with "
+                + "OMNI_LAPTOP_IP=<laptop ip>. Voice, coordinator and placement stay off.");
+            return;
+        }
+        Debug.Log("SpatialRuntime: laptop_ipv4 from baked " + BakedLaptopIpv4File
+            + " = " + _laptopIpv4);
     }
 
     void OnEnable()
@@ -176,6 +233,14 @@ public class SpatialRuntime : MonoBehaviour
             _coord.Cache = _cache;
             _coord.Store = _store;
             _coord.Chip = _chip;
+            // Demo overlays (demo.md beats 1 and 5). The queue is fed from the
+            // ops that actually plant boxes; the card reads the queue's own
+            // log, so the two cannot disagree about what was placed.
+            var itemQueue = go.AddComponent<ItemQueueOverlay>();
+            itemQueue.Bind(_centerEye);
+            _coord.ItemQueue = itemQueue;
+            var takeHomeCard = go.AddComponent<TakeHomeCard>();
+            takeHomeCard.Bind(_centerEye, itemQueue);
             _coord.CenterEye = _centerEye;
             _coord.GetStageEpoch = () => _stageEpoch;
             _coord.DelayedHit = DelayedHitPoint;
