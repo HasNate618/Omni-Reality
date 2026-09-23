@@ -60,6 +60,8 @@ public class SpatialRuntime : MonoBehaviour
     string _laptopIpv4 = "";
     DrawingStore _store;
     HonestyChip _chip;
+    QuestTrackingSettings _trackingSettings;
+    public CoordinatorClient Coordinator { get { return _coord; } }
 
     void Awake()
     {
@@ -82,6 +84,10 @@ public class SpatialRuntime : MonoBehaviour
         GrabRig.Ensure();
         _laptopIpv4 = ChooseLaptopIpv4(
             PlayerPrefs.GetString(CoordinatorClient.LaptopIpv4PrefKey, ""), "");
+        _trackingSettings = QuestTrackingSettings.Load();
+        if (_trackingSettings != null && _trackingSettings.enableTracking
+            && !string.IsNullOrEmpty(_trackingSettings.laptopIpv4))
+            _laptopIpv4 = _trackingSettings.laptopIpv4.Trim();
         // The baked address lives in StreamingAssets, which is inside the APK on
         // Android and so can only be read asynchronously. TickCoordinator stays
         // dormant until an address exists, so a late arrival needs no timer.
@@ -90,9 +96,10 @@ public class SpatialRuntime : MonoBehaviour
 
     /// <summary>
     /// Resolve the laptop address: the device-side laptop_ipv4 pref wins, then
-    /// the address baked at build time, else empty (slice-1 offline behavior).
-    /// Exposed for tests. An empty result is logged loudly by the caller, since
-    /// it silently disables voice, networking and placement together.
+    /// QuestTrackingSettings, then the address baked at build time, else empty
+    /// (slice-1 offline behavior). Exposed for tests. An empty result is logged
+    /// loudly by the caller, since it silently disables voice, networking and
+    /// placement together.
     /// </summary>
     public static string ChooseLaptopIpv4(string prefValue, string bakedValue)
     {
@@ -155,6 +162,8 @@ public class SpatialRuntime : MonoBehaviour
     void Update()
     {
         TickCoordinator();
+        if (_trackingSettings != null && _trackingSettings.enableTracking)
+            return; // QuestStreamInput owns capture/buttons in tracking mode.
         // Perception is Q&A only, including when developer controllers are held.
         if (_coord != null && _coord.PerceptionEnabled)
         {
@@ -210,9 +219,26 @@ public class SpatialRuntime : MonoBehaviour
     /// laptop_ipv4 is empty (no connect); otherwise create the client once
     /// and tick it every frame while the IP is configured.
     /// </summary>
+    /// <summary>
+    /// Drop the coordinator so the next tick rebuilds it. Switching modes
+    /// needs a fresh socket: the laptop picks its planner from the `hello`,
+    /// and the hello is only sent once per connection.
+    /// </summary>
+    internal void RestartCoordinator()
+    {
+        if (_coord == null)
+            return;
+        Destroy(_coord.gameObject);
+        _coord = null;
+    }
+
     void TickCoordinator()
     {
         if (string.IsNullOrEmpty(_laptopIpv4))
+            return;
+        // The mode decides what goes in the hello and who owns the mic, and
+        // both are read once at construction. Wait for the launcher.
+        if (!ModeLauncher.HasChosen)
             return;
         if (_coord == null)
         {
@@ -230,6 +256,12 @@ public class SpatialRuntime : MonoBehaviour
             _coord.TrackCapture = capture;
             var mic = go.AddComponent<MicUtterance>();
             mic.Perception = capture;
+            // QuestStreamInput's push-to-talk owns the microphone; B hands it
+            // to the conversation loop. MicUtterance also binds A for its
+            // listening toggle, so leaving it enabled in Layout mode stole A
+            // from the furniture menu -- pressing A said "listening" instead.
+            if (_trackingSettings != null && _trackingSettings.enableTracking)
+                mic.enabled = false;
             _coord.Cache = _cache;
             _coord.Store = _store;
             _coord.Chip = _chip;
@@ -477,7 +509,7 @@ public class SpatialRuntime : MonoBehaviour
 
         // Every valid capture is cached, including misses and too-close
         // frames; availability is cache existence, not hit success.
-        _cache.Store(frameId, new CaptureGeometryCache.Entry
+        if (requireDepth) _cache.Store(frameId, new CaptureGeometryCache.Entry
         {
             CameraPose = cameraPose,
             FocalLength = new Vector2(fx, fy),

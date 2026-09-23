@@ -36,7 +36,11 @@ public static class BuildAndroid
     {
         const string scenePath = "Assets/Scenes/SampleScene.unity";
         Scene scene = EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Single);
+
+        // The old smoke-test cube is gone: passthrough plus the tracking
+        // overlay are the scene now. Delete it from scenes that still have it.
         RemoveBootstrapDemoObjects(scene);
+        EditorSceneManager.SaveScene(scene);
 
         XRSetup.EnsureXR();
 

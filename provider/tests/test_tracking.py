@@ -1,29 +1,21 @@
-"""SAM2 highlight tool: bridge, highlight args, tool-call handling, schemas.
-
-The model calls highlight_object(label, u, v); the server validates and
-seeds SAM2 video tracking on the question frame. No GPU or cloud needed:
-a fake SAM2 socket double and stub bridges cover the seams.
-"""
+"""Offline exact-frame handoff tests, including a real local SAM 2 socket double."""
 import asyncio
 import base64
 import io
 import json
-import unittest
-from unittest import mock
-
-from PIL import Image
-import websockets
-
-from coordinator.live_turn import (
-    HIGHLIGHT_DECL,
-    handle_highlight_tool,
-    parse_highlight_args,
+from coordinator.planner import (
+    MAX_TRACKED_OBJECTS,
+    PlanResult,
+    YibuPlanner,
+    parse_tracking_reply,
 )
 from coordinator.sam2_bridge import FrameHistory, Sam2Bridge, TrackingError, point_click
-from coordinator.server import _feed_tracking_frame, _note_tracking_epoch, _sendable
-from protocol.validate import load_fixture
+from coordinator.server import CoordinatorState, _turn_sender, handle_connection
+from coordinator.turn import SAY_TRACKING_MANY
 from protocol.ids import new_ulid
-from voice.live_session import LiveSession
+from protocol.validate import load_fixture
+from tests.test_coordinator import DummyWs, make_hello, wait_for
+from tests.test_turn import ONE_SECOND, UTT, audio_chunk, msg
 
 
 def picture(index=1, size=(80, 60)):
@@ -34,185 +26,225 @@ def picture(index=1, size=(80, 60)):
     return envelope, out.getvalue()
 
 
-class FakeLive:
-    def __init__(self):
-        self.responses = []
-
-    async def send_tool_response(self, call_id, name, result):
-        self.responses.append((call_id, name, result))
+def frame_message(envelope, jpeg):
+    return msg("frame", {"envelope": envelope, "jpeg_b64": base64.b64encode(jpeg).decode()}, None)
 
 
-class FakeTurn:
-    def __init__(self, tombstoned=False):
-        self.turn_id = 7
-        self.utterance_id = "u7"
-        self.tombstoned = tombstoned
+LAPTOP = {"type": "image_point", "u": .25, "v": .75, "label": "laptop"}
+MUG = {"type": "image_point", "u": .5, "v": .5, "label": "mug"}
 
 
-class FakeBridge:
-    def __init__(self, history=None, seed_error=None):
-        self.history = history or FrameHistory()
-        self.seed_error = seed_error
-        self.begun = []
-        self.seeded = []
-        self.epoch = None
-        self.task = None
+class DelayedPlanner:
+    def __init__(self, targets=(LAPTOP,)):
+        self.entered, self.release = asyncio.Event(), asyncio.Event()
+        self.input = None
+        self.targets = list(targets)
 
-    async def begin(self, turn_id, utterance_id):
-        self.begun.append((turn_id, utterance_id))
-        return 0
-
-    async def seed(self, frame, target, generation):
-        self.seeded.append((frame, target, generation))
-        if self.seed_error is not None:
-            raise self.seed_error
-
-    async def stop(self):
-        pass
-
-    async def reset(self):
-        pass
-
-    async def status(self, state, text, **extra):
-        pass
+    async def plan(self, **kwargs):
+        self.input = kwargs
+        self.entered.set()
+        await self.release.wait()
+        return PlanResult([], "", tracking_targets=list(self.targets))
 
 
-class FakeState:
-    def __init__(self, live=None, turn=None, tracking=None, framed=None):
-        self.live = live
-        self._live_turn = turn
-        self.tracking = tracking
-        self._live_frame = framed
+def sam_double(requests, *, drop_after_first=False):
+    """Stand-in for sam2_ws_server: remember which obj_ids were clicked and
+    return a mask per tracked object on every later frame, as the real server
+    does. `drop_after_first` never starts anything past obj_id 1."""
+    tracked: list[int] = []
+
+    async def handler(ws):
+        async for raw in ws:
+            request = json.loads(raw)
+            requests.append(request)
+            for click in request.get("clicks") or []:
+                if click["obj_id"] not in tracked:
+                    tracked.append(click["obj_id"])
+            started = tracked[:1] if drop_after_first else tracked
+            await ws.send(json.dumps({
+                "type": "result", "frame_id": request["frame_id"],
+                "objects": [{"obj_id": i, "mask_b64": f"mask-{i}"} for i in started],
+            }))
+
+    return handler
 
 
-class HighlightArgsTests(unittest.TestCase):
-    def test_fractions_accepted(self):
-        target = parse_highlight_args({"label": "the red mug", "u": 0.25, "v": 0.75}, 640, 480)
-        self.assertEqual(target, {"type": "image_point", "u": 0.25, "v": 0.75,
-                                  "label": "the red mug"})
+class TrackingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_voice_frame_before_or_after_end_then_replay_and_live(self):
+        requests = []
 
-    def test_pixels_normalized_when_size_known(self):
-        target = parse_highlight_args({"label": "x", "u": 492, "v": 351}, 640, 480)
-        self.assertAlmostEqual(target["u"], 492 / 640)
-        self.assertAlmostEqual(target["v"], 351 / 480)
+        async with websockets.serve(sam_double(requests), "127.0.0.1", 0) as server:
+            url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+            planner, ws = DelayedPlanner(), DummyWs()
+            state = CoordinatorState(planner)
+            bridge = state.tracking = Sam2Bridge(url, _turn_sender(ws, state))
+            task = asyncio.create_task(handle_connection(ws, state))
+            try:
+                await ws.inject(make_hello())
+                await wait_for(ws, lambda m: m["type"] == "hello_ok")
+                selected, jpeg = picture(1)
+                await ws.inject(audio_chunk(ONE_SECOND))
+                # The control message deliberately overtakes the pinned JPEG.
+                await ws.inject(msg("utterance_end", {"frame_id": selected["frame_id"]}))
+                await wait_for(ws, lambda m: m["type"] == "turn_started")
+                await ws.inject(frame_message(selected, jpeg))
+                await asyncio.wait_for(planner.entered.wait(), 1)
+                successors = [picture(i) for i in (2, 3, 4)]
+                for env, image in successors:
+                    await ws.inject(frame_message(env, image))
+                await asyncio.sleep(.02)
+                planner.release.set()
+                first = await wait_for(ws, lambda m: m["type"] == "tracking_result")
+                # The seed mask is published before the backlog is replayed, so
+                # the wearer sees it as soon as the point lands rather than one
+                # catch-up later.
+                self.assertEqual(first["payload"]["frame_id"], selected["frame_id"])
+                self.assertEqual(first["payload"]["seed_frame_id"], selected["frame_id"])
+                result = await wait_for(ws, lambda m: m["type"] == "tracking_result"
+                                        and m["payload"]["frame_id"] == successors[-1][0]["frame_id"])
+                self.assertEqual(planner.input["jpeg"], jpeg)
+                self.assertEqual(planner.input["pcm"], ONE_SECOND)
+                self.assertEqual(planner.input["envelope"]["frame_id"], selected["frame_id"])
+                self.assertEqual(base64.b64decode(requests[0]["jpeg_b64"]), jpeg)
+                self.assertEqual(requests[0]["clicks"], [{"x": 19.5, "y": 44.5, "obj_id": 1}])
+                self.assertEqual([r["frame_id"] for r in requests],
+                                 [selected["frame_id"]] + [e["frame_id"] for e, _ in successors])
+                self.assertTrue(all(r["clicks"] == [] for r in requests[1:]))
+                self.assertEqual(result["payload"]["frame_id"], successors[-1][0]["frame_id"])
+                live, live_jpeg = picture(5)
+                await ws.inject(frame_message(live, live_jpeg))
+                await wait_for(ws, lambda m: m["type"] == "tracking_result"
+                               and m["payload"]["frame_id"] == live["frame_id"])
+                self.assertFalse(any(m["type"] == "scene_op" for m in ws.sent))
+                await ws.inject(msg("cancel", {"turn_id": 1}, turn_id=1))
+                await wait_for(ws, lambda m: m["type"] == "tracking_status" and m["payload"]["state"] == "stopped")
+                count = len(requests)
+                e, j = picture(6)
+                await ws.inject(frame_message(e, j))
+                await asyncio.sleep(.03)
+                self.assertEqual(len(requests), count)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                for t in list(state.turn_tasks.values()):
+                    t.cancel()
+                await asyncio.gather(*list(state.turn_tasks.values()), return_exceptions=True)
+                await bridge.stop()
 
-    def test_mixed_frames_normalize_per_axis(self):
-        target = parse_highlight_args({"label": "x", "u": 0.5, "v": 351}, 640, 480)
-        self.assertEqual(target["u"], 0.5)
-        self.assertAlmostEqual(target["v"], 351 / 480)
+    async def test_two_objects_seed_together_on_the_one_selected_frame(self):
+        requests = []
 
-    def test_pixels_rejected_without_size(self):
-        self.assertIsNone(parse_highlight_args({"label": "x", "u": 492, "v": 351}))
+        async with websockets.serve(sam_double(requests), "127.0.0.1", 0) as server:
+            url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+            planner, ws = DelayedPlanner([LAPTOP, MUG]), DummyWs()
+            state = CoordinatorState(planner)
+            bridge = state.tracking = Sam2Bridge(url, _turn_sender(ws, state))
+            task = asyncio.create_task(handle_connection(ws, state))
+            try:
+                await ws.inject(make_hello())
+                await wait_for(ws, lambda m: m["type"] == "hello_ok")
+                selected, jpeg = picture(1)
+                await ws.inject(frame_message(selected, jpeg))
+                await ws.inject(audio_chunk(ONE_SECOND))
+                await ws.inject(msg("utterance_end", {"frame_id": selected["frame_id"]}))
+                await asyncio.wait_for(planner.entered.wait(), 1)
+                planner.release.set()
+                result = await wait_for(ws, lambda m: m["type"] == "tracking_result")
+                # Both points are clicked on the same frame, which is what lets
+                # SAM 2 open one session holding both objects.
+                self.assertEqual(requests[0]["clicks"], [
+                    {"x": 19.5, "y": 44.5, "obj_id": 1},
+                    {"x": 39.5, "y": 29.5, "obj_id": 2},
+                ])
+                objects = result["payload"]["objects"]
+                self.assertEqual([o["obj_id"] for o in objects], [1, 2])
+                # The model's names ride along so the headset can label a mask.
+                self.assertEqual([o["label"] for o in objects], ["laptop", "mug"])
 
-    def test_rejects_bad_args(self):
-        good = {"label": "x", "u": 0.5, "v": 0.5}
-        for broken in (
-            None, [], "highlight",
-            {**good, "label": ""}, {**good, "label": "   "}, {**good, "label": 3},
-            {**good, "u": True}, {**good, "u": float("nan")},
-            {**good, "u": float("inf")}, {**good, "u": "0.5"},
-            {**good, "u": -0.1},
-            {"label": "x", "u": 900, "v": 10},
-            {"label": "x", "u": 0.5},
-        ):
-            self.assertIsNone(parse_highlight_args(broken, 640, 480), broken)
+                follow, follow_jpeg = picture(2)
+                await ws.inject(frame_message(follow, follow_jpeg))
+                later = await wait_for(ws, lambda m: m["type"] == "tracking_result"
+                                       and m["payload"]["frame_id"] == follow["frame_id"])
+                # Tracking continues for both without re-clicking either.
+                self.assertEqual([o["obj_id"] for o in later["payload"]["objects"]], [1, 2])
+                self.assertTrue(all(r["clicks"] == [] for r in requests[1:]))
+                # Plural copy: the wearer asked for more than one thing.
+                spoken = await wait_for(ws, lambda m: m["type"] == "speak")
+                self.assertEqual(spoken["payload"]["text"], SAY_TRACKING_MANY)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                for t in list(state.turn_tasks.values()):
+                    t.cancel()
+                await asyncio.gather(*list(state.turn_tasks.values()), return_exceptions=True)
+                await bridge.stop()
 
-    def test_label_trimmed_and_capped(self):
-        target = parse_highlight_args({"label": "  mug  ", "u": 0.1, "v": 0.1})
-        self.assertEqual(target["label"], "mug")
-        target = parse_highlight_args({"label": "y" * 100, "u": 0.1, "v": 0.1})
-        self.assertEqual(len(target["label"]), 64)
+    async def test_seed_fails_when_sam2_starts_only_some_objects(self):
+        """A half-started selection is an error, not a silently smaller set."""
+        history = FrameHistory()
+        frame = history.add(*picture())
+        bridge = Sam2Bridge("unused", mock.AsyncMock(), history=history)
+        socket = mock.Mock(send=mock.AsyncMock(), recv=mock.AsyncMock())
+        socket.recv.return_value = json.dumps({
+            "type": "result", "frame_id": frame.id,
+            "objects": [{"obj_id": 1, "mask_b64": "mask-1"}],
+        })
+        clicks = [{"x": 1, "y": 1, "obj_id": 1}, {"x": 2, "y": 2, "obj_id": 2}]
+        with self.assertRaisesRegex(TrackingError, "did not initialize 1 of the 2"):
+            await bridge._exchange(socket, frame, clicks)
+        # All of them back: accepted.
+        socket.recv.return_value = json.dumps({
+            "type": "result", "frame_id": frame.id,
+            "objects": [{"obj_id": 1, "mask_b64": "mask-1"}, {"obj_id": 2, "mask_b64": "mask-2"}],
+        })
+        self.assertEqual(len((await bridge._exchange(socket, frame, clicks))["objects"]), 2)
 
+    async def test_expired_history_never_seeds_latest_instead(self):
+        history = FrameHistory(max_frames=2)
+        selected = history.add(*picture(1))
+        for i in range(2, 5):
+            history.add(*picture(i))
+        bridge = Sam2Bridge("unused", mock.AsyncMock(), history=history)
+        bridge.epoch = selected.envelope["stage_epoch"]
+        with self.assertRaisesRegex(TrackingError, "history expired"):
+            await bridge.seed(selected, [{"type": "image_point", "u": .5, "v": .5}], 0)
+        self.assertIsNone(bridge.task)
+        with self.assertRaisesRegex(TrackingError, "No object was selected"):
+            await bridge.seed(selected, [], 0)
+        self.assertIsNone(bridge.task)
 
-class HighlightToolTests(unittest.IsolatedAsyncioTestCase):
-    def make_state(self, **overrides):
-        envelope, jpeg = picture()
-        live, turn = FakeLive(), FakeTurn()
-        bridge = FakeBridge()
-        kwargs = dict(live=live, turn=turn, tracking=bridge, framed=(envelope, jpeg))
-        kwargs.update(overrides)
-        return FakeState(**kwargs), live, bridge
+    async def test_cancel_or_reset_suppresses_late_model_selection(self):
+        planner, ws = DelayedPlanner(), DummyWs()
+        state = CoordinatorState(planner)
+        bridge = state.tracking = Sam2Bridge("unused", _turn_sender(ws, state))
+        task = asyncio.create_task(handle_connection(ws, state))
+        try:
+            e, j = picture(1)
+            await ws.inject(frame_message(e, j))
+            await ws.inject(audio_chunk(ONE_SECOND))
+            await ws.inject(msg("utterance_end", {"frame_id": e["frame_id"]}))
+            await asyncio.wait_for(planner.entered.wait(), 1)
+            await ws.inject(msg("cancel", {"turn_id": 1}, turn_id=1))
+            await wait_for(ws, lambda m: m["type"] == "tracking_status" and m["payload"]["state"] == "stopped")
+            planner.release.set()
+            await asyncio.sleep(.03)
+            self.assertIsNone(bridge.task)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await bridge.stop()
 
-    async def test_success_seeds_and_answers_ok(self):
-        state, live, bridge = self.make_state()
-        await handle_highlight_tool(state, {"label": "mug", "u": 0.25, "v": 0.75}, "call-1")
-        self.assertEqual(bridge.begun, [(7, "u7")])
-        self.assertEqual(len(bridge.seeded), 1)
-        frame, target, generation = bridge.seeded[0]
-        self.assertEqual(target["u"], 0.25)
-        self.assertEqual(live.responses,
-                         [("call-1", "highlight_object", {"ok": True, "message": "Selecting mug…"})])
+    async def test_wrong_frame_response_rejected_and_legacy_accepted(self):
+        history = FrameHistory()
+        frame = history.add(*picture())
+        bridge = Sam2Bridge("unused", mock.AsyncMock())
+        socket = mock.Mock(send=mock.AsyncMock(), recv=mock.AsyncMock())
+        socket.recv.return_value = json.dumps({"type": "result", "objects": [], "frame_id": "wrong"})
+        with self.assertRaisesRegex(TrackingError, "wrong frame"):
+            await bridge._exchange(socket, frame, [])
+        socket.recv.return_value = '{"type":"result","objects":[]}'
+        self.assertEqual((await bridge._exchange(socket, frame, []))["objects"], [])
 
-    async def test_preempted_mid_seed_stops_and_answers_interrupted(self):
-        state, live, _ = self.make_state()
-        turn = state._live_turn
-
-        class PreemptingBridge(FakeBridge):
-            async def seed(self, frame, target, generation):
-                turn.tombstoned = True
-                await super().seed(frame, target, generation)
-
-        bridge = PreemptingBridge()
-        state.tracking = bridge
-        stopped = []
-        bridge.stop = lambda: stopped.append(True) or asyncio.sleep(0)
-        await handle_highlight_tool(state, {"label": "mug", "u": 0.5, "v": 0.5}, "c7")
-        self.assertTrue(stopped)
-        self.assertEqual(live.responses[0][2], {"ok": False, "message": "Interrupted."})
-
-    async def test_honest_failures_answer_unseeded(self):
-        state, live, _ = self.make_state(tracking=None)
-        await handle_highlight_tool(state, {"label": "mug", "u": 0.5, "v": 0.5}, "c1")
-        self.assertFalse(live.responses[0][2]["ok"])
-        state, live, _ = self.make_state(turn=FakeTurn(tombstoned=True))
-        await handle_highlight_tool(state, {"label": "mug", "u": 0.5, "v": 0.5}, "c2")
-        self.assertFalse(live.responses[0][2]["ok"])
-        state, live, _ = self.make_state(framed=None)
-        await handle_highlight_tool(state, {"label": "mug", "u": 0.5, "v": 0.5}, "c3")
-        self.assertFalse(live.responses[0][2]["ok"])
-        state, live, bridge = self.make_state()
-        await handle_highlight_tool(state, {"label": "", "u": 0.5, "v": 0.5}, "c4")
-        self.assertFalse(live.responses[0][2]["ok"])
-        self.assertEqual(bridge.seeded, [])
-
-    async def test_seed_error_returns_model_message(self):
-        state, live, _ = self.make_state()
-        state.tracking = FakeBridge(seed_error=TrackingError("No unambiguous image point."))
-        await handle_highlight_tool(state, {"label": "mug", "u": 0.5, "v": 0.5}, "c5")
-        self.assertEqual(live.responses[0][2],
-                         {"ok": False, "message": "No unambiguous image point."})
-
-    async def test_no_live_session_still_safe(self):
-        state, _, _ = self.make_state(live=None)
-        await handle_highlight_tool(state, {"label": "mug", "u": 0.5, "v": 0.5}, "c6")
-
-
-class ToolCallDispatchTests(unittest.TestCase):
-    def test_tool_call_event_reaches_callback(self):
-        seen = []
-        session = LiveSession(on_tool_call=lambda n, a, c: seen.append((n, a, c)))
-        session._dispatch({"toolCall": {"functionCalls": [
-            {"name": "highlight_object", "args": {"label": "mug", "u": 0.1, "v": 0.2},
-             "id": "call-9"}]}})
-        self.assertEqual(seen, [("highlight_object", {"label": "mug", "u": 0.1, "v": 0.2},
-                                 "call-9")])
-
-    def test_malformed_tool_calls_ignored(self):
-        seen = []
-        session = LiveSession(on_tool_call=lambda n, a, c: seen.append((n, a, c)))
-        session._dispatch({"toolCall": {"functionCalls": ["nope", None, {"name": "x"}]}})
-        self.assertEqual(seen, [("x", {}, "")])
-        session._dispatch({"toolCall": {}})
-        session._dispatch({})
-        self.assertEqual(len(seen), 1)
-
-    def test_declaration_shape(self):
-        self.assertEqual(HIGHLIGHT_DECL["name"], "highlight_object")
-        required = HIGHLIGHT_DECL["parameters"]["required"]
-        self.assertEqual(sorted(required), ["label", "u", "v"])
-
-
-class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_frame_validation_and_bounded_storage(self):
         history = FrameHistory(max_frames=2)
         env, jpeg = picture()
@@ -236,123 +268,80 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 point_click({"type": "image_point", "u": value, "v": .5}, frame)
         self.assertEqual(point_click({"type": "image_point", "u": 0, "v": 1}, frame),
                          {"x": 0, "y": 59, "obj_id": 1})
+        # Each selected object gets its own obj_id on the same seed frame.
+        self.assertEqual(point_click({"type": "image_point", "u": 1, "v": 0}, frame, 3),
+                         {"x": 79, "y": 0, "obj_id": 3})
 
-    async def test_track_auto_stops_at_ttl(self):
-        requests = []
+    async def test_tracking_planner_uses_audio_image_and_ignores_model_frame_id(self):
+        planner = YibuPlanner(tracking=True, purpose="track-object")
+        e, j = picture()
+        reply = '{"heard":"track the laptop","track":{"type":"image_point","u":0.2,"v":0.3,"frame_id":"invented"}}'
+        with mock.patch.object(planner, "_call", return_value=(reply, {"call_id": "audit"})) as call:
+            result = await planner.plan(pcm=ONE_SECOND, jpeg=j, envelope=e, context=[])
+        self.assertEqual(result.tracking_targets,
+                         [{"type": "image_point", "u": .2, "v": .3, "label": None}])
+        self.assertEqual(result.ops, [])
+        body = call.call_args.args[0]
+        self.assertIn("image_url", str(body))
+        self.assertIn("input_audio", str(body))
+        self.assertEqual(result.audit_id, "audit")
+        with mock.patch.object(planner, "_call", return_value=(reply, {})):
+            missing = await planner.plan(pcm=ONE_SECOND, jpeg=None, envelope=e, context=[])
+        self.assertEqual(missing.tracking_targets, [])
+        for text in ('{}', '{"track":null}', '{"track":[]}',
+                     '{"track":{"type":"image_point","u":NaN,"v":0.5}}'):
+            self.assertEqual(parse_tracking_reply(text)[2], [])
 
-        async def sam(ws):
-            async for raw in ws:
-                request = json.loads(raw)
-                requests.append(request)
-                await ws.send(json.dumps({"type": "result", "frame_id": request["frame_id"],
-                                          "objects": [{"obj_id": 1, "mask_b64": "existing-mask"}]}))
+    def test_pixel_coordinates_are_normalised(self) -> None:
+        """The model answers in pixels despite the prompt; don't drop the target."""
+        pixels = '{"heard":"track it","say":"","track":{"type":"image_point","u":492,"v":351}}'
+        self.assertEqual(
+            parse_tracking_reply(pixels, 640, 480)[2],
+            [{"type": "image_point", "u": 492 / 640, "v": 351 / 480, "label": None}],
+        )
+        # Fractions still win when both readings are possible.
+        fraction = '{"track":{"type":"image_point","u":0.5,"v":0.25}}'
+        self.assertEqual(
+            parse_tracking_reply(fraction, 640, 480)[2],
+            [{"type": "image_point", "u": 0.5, "v": 0.25, "label": None}],
+        )
+        # Pixels inside a multi-object list are normalised the same way.
+        listed = '{"track":[{"type":"image_point","u":492,"v":351},{"type":"image_point","u":64,"v":48}]}'
+        self.assertEqual([(t["u"], t["v"]) for t in parse_tracking_reply(listed, 640, 480)[2]],
+                         [(492 / 640, 351 / 480), (0.1, 0.1)])
+        # Outside the image, or no size to work with: no target.
+        self.assertEqual(parse_tracking_reply(pixels)[2], [])
+        self.assertEqual(
+            parse_tracking_reply('{"track":{"type":"image_point","u":900,"v":10}}', 640, 480)[2], [])
 
-        async with websockets.serve(sam, "127.0.0.1", 0) as server:
-            url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
-            sent = []
-
-            async def send(mtype, turn_id, payload, uid):
-                sent.append((mtype, payload))
-
-            bridge = Sam2Bridge(url, send, ttl=0.15)
-            self.assertEqual(bridge.ttl, 0.15)
-            envelope, jpeg = picture(1)
-            bridge.epoch = envelope["stage_epoch"]
-            frame = bridge.history.add(envelope, jpeg)
-            generation = await bridge.begin(1, "u1")
-            await bridge.seed(frame, {"type": "image_point", "u": .25, "v": .75}, generation)
-            for _ in range(100):
-                if any(t == "tracking_result" for t, _ in sent):
-                    break
-                await asyncio.sleep(0.02)
-            self.assertTrue(any(t == "tracking_result" for t, _ in sent))
-            stopped = None
-            for _ in range(100):
-                stopped = next((p for t, p in sent
-                                if t == "tracking_status" and p["state"] == "stopped"), None)
-                if stopped is not None:
-                    break
-                await asyncio.sleep(0.02)
-            self.assertIsNotNone(stopped)
-            count = len(requests)
-            await asyncio.sleep(0.1)
-            self.assertEqual(len(requests), count)
-            await bridge.stop()
-
-    async def test_default_ttl_is_ten_seconds(self):
-        bridge = Sam2Bridge("unused", mock.AsyncMock())
-        self.assertEqual(bridge.ttl, 10.0)
-
-    async def test_begin_starts_a_fresh_history(self):
-        bridge = Sam2Bridge("unused", mock.AsyncMock())
-        envelope, jpeg = picture(1)
-        bridge.history.add(envelope, jpeg)
-        await bridge.begin(1, "u1")
-        self.assertEqual(len(bridge.history.frames), 0)
-        frame = bridge.history.add(*picture(2))
-        self.assertEqual(len(bridge.history.frames), 1)
-
-    async def test_expired_history_never_seeds_latest_instead(self):
-        history = FrameHistory(max_frames=2)
-        selected = history.add(*picture(1))
-        for i in range(2, 5):
-            history.add(*picture(i))
-        bridge = Sam2Bridge("unused", mock.AsyncMock(), history=history)
-        bridge.epoch = selected.envelope["stage_epoch"]
-        with self.assertRaisesRegex(TrackingError, "history expired"):
-            await bridge.seed(selected, {"type": "image_point", "u": .5, "v": .5}, 0)
-        self.assertIsNone(bridge.task)
-
-    async def test_cancel_or_reset_suppresses_late_seed(self):
-        history = FrameHistory()
-        frame = history.add(*picture())
-        bridge = Sam2Bridge("unused", mock.AsyncMock(), history=history)
-        await bridge.begin(1, "u1")
-        await bridge.reset()
-        await bridge.seed(frame, {"type": "image_point", "u": .5, "v": .5}, 0)
-        self.assertIsNone(bridge.task)
-
-    async def test_wrong_frame_response_rejected_and_legacy_accepted(self):
-        history = FrameHistory()
-        frame = history.add(*picture())
-        bridge = Sam2Bridge("unused", mock.AsyncMock())
-        socket = mock.Mock(send=mock.AsyncMock(), recv=mock.AsyncMock())
-        socket.recv.return_value = json.dumps({"type": "result", "objects": [], "frame_id": "wrong"})
-        with self.assertRaisesRegex(TrackingError, "wrong frame"):
-            await bridge._exchange(socket, frame, [])
-        socket.recv.return_value = '{"type":"result","objects":[]}'
-        self.assertEqual((await bridge._exchange(socket, frame, []))["objects"], [])
-
-    async def test_tracking_frames_feed_and_stage_change_resets(self):
-        envelope, jpeg = picture(1)
-        bridge = FakeBridge()
-        state = FakeState(tracking=bridge)
-        message = {"payload": {"jpeg_b64": base64.b64encode(jpeg).decode(), "tracking": True},
-                   "utterance_id": None}
-        await _note_tracking_epoch(state, envelope)
-        self.assertEqual(bridge.epoch, envelope["stage_epoch"])
-        await _feed_tracking_frame(state, message, envelope)
-        self.assertEqual(len(bridge.history.frames), 1)
-        envelope2, jpeg2 = picture(2)
-        envelope2["stage_epoch"] = envelope["stage_epoch"] + 1
-        statuses = []
-        bridge.status = lambda s, t, **e: statuses.append((s, t)) or asyncio.sleep(0)
-        await _note_tracking_epoch(state, envelope2)
-        stopped = [s for s in statuses if s[0] == "stopped"]
-        self.assertTrue(stopped)
-
-
-class TrackingSchemaTests(unittest.TestCase):
-    def test_tracking_messages_validate(self) -> None:
-        status = json.loads(_sendable("tracking_status", "s", 1,
-                                      {"state": "selecting", "text": "x", "generation": 0}, "u"))
-        self.assertEqual(status["type"], "tracking_status")
-        result = json.loads(_sendable("tracking_result", "s", 1,
-                                      {"frame_id": "f", "seed_frame_id": "f", "generation": 0,
-                                       "stage_epoch": 1, "width": 80, "height": 60,
-                                       "objects": [], "envelope": {}}, "u"))
-        self.assertEqual(result["type"], "tracking_result")
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_multiple_points_parsed_deduped_and_capped(self) -> None:
+        reply = ('{"heard":"track the laptop and the mug","say":"On it.","track":['
+                 '{"label":"laptop","type":"image_point","u":0.2,"v":0.3},'
+                 '{"label":"mug","type":"image_point","u":0.8,"v":0.6}]}')
+        say, heard, targets = parse_tracking_reply(reply)
+        self.assertEqual((say, heard), ("On it.", "track the laptop and the mug"))
+        self.assertEqual(targets, [
+            {"type": "image_point", "u": 0.2, "v": 0.3, "label": "laptop"},
+            {"type": "image_point", "u": 0.8, "v": 0.6, "label": "mug"},
+        ])
+        # One unusable entry never costs the objects listed beside it.
+        mixed = ('{"track":[{"type":"image_point","u":0.2,"v":0.3},'
+                 '{"type":"image_box","u":0.5,"v":0.5},'
+                 '{"type":"image_point","u":NaN,"v":0.5},'
+                 '{"type":"image_point","u":0.9,"v":0.9}]}')
+        self.assertEqual([(t["u"], t["v"]) for t in parse_tracking_reply(mixed)[2]],
+                         [(0.2, 0.3), (0.9, 0.9)])
+        # The same object named twice takes one tracker slot, not two.
+        duplicate = ('{"track":[{"type":"image_point","u":0.50,"v":0.50},'
+                     '{"type":"image_point","u":0.52,"v":0.51},'
+                     '{"type":"image_point","u":0.90,"v":0.10}]}')
+        self.assertEqual([(t["u"], t["v"]) for t in parse_tracking_reply(duplicate)[2]],
+                         [(0.5, 0.5), (0.9, 0.1)])
+        # Never more trackers than SAM 2's per-frame budget allows.
+        many = '{"track":[%s]}' % ",".join(
+            '{"type":"image_point","u":%.2f,"v":0.5}' % (0.1 * i) for i in range(1, 8))
+        self.assertEqual(len(parse_tracking_reply(many)[2]), MAX_TRACKED_OBJECTS)
+        # The older single-object shape still parses, top-level label included.
+        self.assertEqual(
+            parse_tracking_reply('{"label":"mug","track":{"type":"image_point","u":0.4,"v":0.4}}')[2],
+            [{"type": "image_point", "u": 0.4, "v": 0.4, "label": "mug"}])

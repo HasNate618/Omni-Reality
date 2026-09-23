@@ -14,6 +14,7 @@ QuestDemo/.utmp/
 *.csproj
 *.unityproj
 *.sln
+*.slnx
 *.suo
 *.tmp
 *.user
@@ -38,7 +39,15 @@ Recordings/
 # Python provider — never commit secrets, ledgers, or venvs
 .env
 .venv/
+venv/
 __pycache__/
 *.pyc
 provider/artifacts/
 provider/summary/
+
+# Accidental local venvs from mistyped `python -m venv` names
+provider/#/
+provider/first/
+provider/only/
+provider/setup/
+logs/

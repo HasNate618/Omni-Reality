@@ -32,6 +32,7 @@ class UtteranceBuffer:
     pcm: bytearray = field(default_factory=bytearray)
     jpeg: bytes | None = None
     envelope: dict | None = None
+    selected_frame_id: str | None = None
     frame_received: bool = False
 
 
@@ -61,6 +62,12 @@ class CoordinatorState:
         self.completed_ops: dict[str, dict] = {}
         self.cancelled_op_ids: list[str] = []
         self.mark_sent: bool = False
+        # Optional Sam2Bridge; existing mark/voice paths stay default.
+        self.tracking: Any = None
+        self.guide: Any = None
+        self.guide_lock = asyncio.Lock()
+        # Test seam: injected LiveSession factory (None = construct directly).
+        self.live_factory: Any = None
         self.last_clock_skew_ns: int | None = None
         self.jobs = jobs if jobs is not None else JobStore()
         self.listings = ListingMemory()
@@ -70,7 +77,8 @@ class CoordinatorState:
         self.synthesizer: Any | None = None
         # Persistent Live session for the realtime voice loop (None until
         # hello warms it). _live_turn is the in-flight turn, if any.
-        self.live: Any | None = None
+        # Any (not Optional): the live session or a test fake; None until warmed.
+        self.live: Any = None
         self._live_turn: Any | None = None
         self._live_last_totals: dict[str, int] = {}
         # Last audio actually played on Quest (16 kHz mono s16le) + send time.
@@ -85,6 +93,10 @@ class CoordinatorState:
         self.sam2_url: str | None = None
         self._live_frame: tuple | None = None
         self.artifact_port: int = ARTIFACT_PORT
+        # Set by run_server so `hello` can rebuild the planner for the mode
+        # the headset's launcher picked. None in tests and headset-free tools,
+        # where the CLI choice is the whole story.
+        self.configure_mode: Any = None
         self.artifact_root: Path = DEFAULT_ARTIFACT_ROOT
         self.clear_generation: int = 1
 
@@ -102,6 +114,11 @@ class CoordinatorState:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.turn_tasks.clear()
+        if self.guide is not None:
+            self.guide.stop()
+            self.guide = None
+        if self.tracking is not None:
+            await self.tracking.reset()
         self.closed_utterances.update(self.utterances)
         self.utterances.clear()
         self.context.clear()

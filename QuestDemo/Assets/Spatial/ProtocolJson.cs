@@ -220,7 +220,7 @@ public static class ProtocolJson
         }
     }
 
-    static string WrapMessage(string type, string sessionId, int turnId, string payloadJson)
+    static string WrapMessage(string type, string sessionId, int turnId, string payloadJson, string utteranceId = null)
     {
         var sb = new StringBuilder(payloadJson.Length + 96);
         sb.Append("{\"v\":1,\"type\":\"");
@@ -229,7 +229,9 @@ public static class ProtocolJson
         AppendSessionId(sb, sessionId);
         sb.Append(",\"turn_id\":");
         sb.Append(turnId);
-        sb.Append(",\"utterance_id\":null,\"payload\":");
+        sb.Append(",\"utterance_id\":");
+        AppendNullable(sb, utteranceId);
+        sb.Append(",\"payload\":");
         sb.Append(payloadJson);
         sb.Append('}');
         return sb.ToString();
@@ -239,6 +241,30 @@ public static class ProtocolJson
     public static string BuildHello(string sessionId)
     {
         return WrapMessage("hello", sessionId, 0, HelloPayload);
+    }
+
+    public static string BuildTrackingHello(string osVersion)
+    {
+        return BuildTrackingHello(osVersion, null);
+    }
+
+    /// <summary>
+    /// Hello with the chosen mode. The laptop builds its planner from this,
+    /// so it has to travel on the first message of the connection. `payload`
+    /// is unconstrained by the schema, so this needs no protocol change.
+    /// </summary>
+    public static string BuildTrackingHello(string osVersion, string mode)
+    {
+        var sb = new StringBuilder("{\"device\":\"quest\",\"app\":\"QuestDemo\",\"os_version\":");
+        AppendNullable(sb, osVersion);
+        sb.Append(",\"capabilities\":{\"pca\":true,\"depth\":false,\"tts\":true}");
+        if (!string.IsNullOrEmpty(mode))
+        {
+            sb.Append(",\"mode\":");
+            AppendNullable(sb, mode);
+        }
+        sb.Append('}');
+        return WrapMessage("hello", null, 0, sb.ToString());
     }
 
     /// <summary>Quest ping wrapper (server replies pong).</summary>
@@ -295,6 +321,33 @@ public static class ProtocolJson
         if (string.IsNullOrEmpty(utteranceId))
             return WrapMessage("frame", sessionId, 0, sb.ToString());
         return WrapUtteranceMessage("frame", sessionId, utteranceId, sb.ToString());
+    }
+
+    public static string BuildVideoFrame(string sessionId, CaptureEnvelope env, byte[] jpeg)
+    {
+        return WrapMessage("frame", sessionId, 0, "{\"envelope\":" + ToSpecJson(env)
+            + ",\"jpeg_b64\":\"" + Convert.ToBase64String(jpeg) + "\"}");
+    }
+
+    public static string BuildAudioChunk(string sessionId, string utteranceId, byte[] pcm, int offset, int count)
+    {
+        return WrapMessage("audio_chunk", sessionId, 0,
+            "{\"audio\":{\"encoding\":\"pcm_s16le\",\"sample_rate\":16000,\"channels\":1,\"data_b64\":\""
+            + Convert.ToBase64String(pcm, offset, count) + "\"}}", utteranceId);
+    }
+
+    /// <summary>A-mode (push-to-talk): pinned snapshot, tracking turn.</summary>
+    public static string BuildUtteranceEnd(string sessionId, string utteranceId, string frameId)
+    {
+        var sb = new StringBuilder("{\"mode\":\"ptt\",\"frame_id\":");
+        AppendNullable(sb, frameId);
+        sb.Append('}');
+        return WrapMessage("utterance_end", sessionId, 0, sb.ToString(), utteranceId);
+    }
+
+    public static string BuildTrackingCancel(string sessionId, int turnId)
+    {
+        return WrapMessage("cancel", sessionId, turnId, "{\"turn_id\":" + turnId + "}");
     }
 
     /// <summary>
@@ -354,11 +407,12 @@ public static class ProtocolJson
         return WrapUtteranceMessage("audio_chunk", sessionId, utteranceId, sb.ToString());
     }
 
-    /// <summary>Close an utterance; the coordinator then runs the turn.</summary>
+    /// <summary>B-mode (live conversation): close an utterance; the
+    /// coordinator then runs the turn on the persistent Live session.</summary>
     public static string BuildUtteranceEnd(string sessionId, string utteranceId)
     {
-        var sb = new StringBuilder(64);
-        sb.Append("{\"utterance_id\":\"");
+        var sb = new StringBuilder(80);
+        sb.Append("{\"mode\":\"live\",\"utterance_id\":\"");
         AppendEscaped(sb, utteranceId);
         sb.Append("\"}");
         return WrapUtteranceMessage("utterance_end", sessionId, utteranceId, sb.ToString());
@@ -457,6 +511,18 @@ public static class ProtocolJson
         public float MotionDistanceM;
         public bool HasMotion;
         public float MotionPeriodS;
+        // place_box: true-size footprint plus its corner-relative slot.
+        public bool HasSize;
+        public float SizeW;
+        public float SizeD;
+        public float SizeH;
+        public bool HasSlot;
+        public float SlotDx;
+        public float SlotDz;
+        public float SlotYawDeg;
+        public string StyleColor;
+        public string StyleLabel;
+        public string Furniture;
     }
 
     /// <summary>One closed-grammar procedural element (voice spec §3.1).</summary>
@@ -594,8 +660,58 @@ public static class ProtocolJson
                 }
             }
         }
+        ReadObject(payloadJson, "size_m", delegate(string sizeJson)
+        {
+            double w, d, h;
+            if (TryGetDouble(sizeJson, "w", out w) && TryGetDouble(sizeJson, "d", out d)
+                && TryGetDouble(sizeJson, "h", out h))
+            {
+                parsed.HasSize = true;
+                parsed.SizeW = (float)w;
+                parsed.SizeD = (float)d;
+                parsed.SizeH = (float)h;
+            }
+        });
+        ReadObject(payloadJson, "target", delegate(string targetJson)
+        {
+            double dx, dz, yaw;
+            if (TryGetDouble(targetJson, "dx", out dx) && TryGetDouble(targetJson, "dz", out dz)
+                && TryGetDouble(targetJson, "yaw_deg", out yaw))
+            {
+                parsed.HasSlot = true;
+                parsed.SlotDx = (float)dx;
+                parsed.SlotDz = (float)dz;
+                parsed.SlotYawDeg = (float)yaw;
+            }
+        });
+        if (TryGetStringOrNull(payloadJson, "furniture", out s, out found) && found)
+            parsed.Furniture = s;
+        ReadObject(payloadJson, "style", delegate(string styleJson)
+        {
+            string value;
+            bool has;
+            if (TryGetStringOrNull(styleJson, "color", out value, out has) && has)
+                parsed.StyleColor = value;
+            if (TryGetStringOrNull(styleJson, "label", out value, out has) && has)
+                parsed.StyleLabel = value;
+        });
         op = parsed;
         return true;
+    }
+
+    /// <summary>Run `read` over the braced value of `key`, if there is one.</summary>
+    static void ReadObject(string json, string key, System.Action<string> read)
+    {
+        int keyAt = IndexOfKey(json, key, 0);
+        if (keyAt < 0)
+            return;
+        int valueAt = SkipValueStart(json, keyAt);
+        if (valueAt < 0 || valueAt >= json.Length || json[valueAt] != '{')
+            return;
+        string obj;
+        int endAt;
+        if (ExtractBraced(json, valueAt, out obj, out endAt))
+            read(obj);
     }
 
     static void TryGetTargetFrameId(string payloadJson, string key, out string frameId)

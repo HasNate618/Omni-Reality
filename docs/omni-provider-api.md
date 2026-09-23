@@ -49,6 +49,7 @@ Everything an agent needs to use the sponsor model gateway. Code lives in `provi
 - Normalization covers OpenAI HTTP (`prompt_tokens`/`completion_tokens`/`total_tokens`), OpenAI realtime nested `response.usage` (`input_tokens`/`output_tokens`), and Gemini (`promptTokenCount`/`responseTokenCount`/`totalTokenCount`, incl. `inputTokenCount` variants). Total is derived only when both parts exist and is flagged.
 - **Missing stays `null`: unknown, never zero.** Summaries sum reported values and carry `*_missing_calls` counters.
 - Summarize: `python summarize_usage.py [--log <ledger> --out-dir <dir>]` → `usage_summary.json` + `usage_by_model_key_purpose.csv` (grouped by model/key/purpose, ok/failed splits). Identical duplicate call IDs are ignored; conflicting duplicates raise.
+- Quick human-readable view (offline, no credit): `python show_usage.py [--log <ledger>]` — per-call table plus totals; missing prints as `?`.
 - Before reporting: inspect both files. `usage_raw`, `error`, `source.path` (absolute local path), purpose labels, and endpoints can leak details — redact a sharing copy, keep the original ledger private.
 
 ## Observed live numbers (2026-09-19 smoke, minimal prompts)
@@ -81,6 +82,66 @@ Takeaways:
 - `qwen3.8-omni-flash` does hidden reasoning that dominates latency (up to ~765 reasoning tokens) and `max_tokens` did not cap it (64 requested, 523 returned). Trying to disable thinking is the next latency lever.
 - With no image the model may invent one. The planner adds no ops when no JPEG was sent, whatever the model says.
 - The model said "I've marked…" despite the prompt. The coordinator only speaks that line after an ACK `placed`, so the claim stays honest.
+
+### Object tracking selection
+
+With coordinator `--sam2-url`, `YibuPlanner(tracking=True)` reuses the same
+audited audio + JPEG HTTP call, with purpose `track-object`. The tracking prompt
+requests `{"heard":"...","say":"...","track":[{"label":"laptop","type":"image_point","u":0.5,"v":0.5}]}`
+or `track:[]`. It asks for one point inside each visible foreground object the
+wearer named, one point per distinct object; coordinates are normalized top-left
+in the exact submitted JPEG. The parser
+rejects nonfinite, boolean, out-of-range, and non-point coordinates, strips
+model-supplied frame IDs, and accepts no target without an image and envelope.
+
+`PlanResult.tracking_targets` is a list. An unusable entry is dropped rather
+than failing the whole reply, so one bad point does not cost the objects listed
+beside it. A point within `MIN_TARGET_SEPARATION` (0.05 normalized) of an
+already-accepted one is the same object named twice and is dropped. The list is
+capped at `MAX_TRACKED_OBJECTS` (3), which is a SAM 2 frame-budget limit rather
+than a model one — see
+[object count sets the frame budget](omni-sam2-streaming.md#object-count-sets-the-frame-budget).
+A bare `track` object (the older single-object reply) is still accepted, and
+`PlanResult.tracking_target` still returns the first point for callers that
+handle only one. Each point's `label` is carried through to the headset so a
+mask can be named; it is never used to pick pixels.
+
+The coordinator owns snapshot identity and converts UVs to the existing SAM 2
+pixel-click protocol, assigning `obj_id` 1..N and clicking all of them on the
+one selected frame. Selection is called once per utterance, not per tracked
+frame. This path emits tracking status/masks, not placement ACKs or success
+speech. The model remains `qwen3.8-omni-flash` with the same env-only key/audit
+handling; the tutorial-capable budget is described below. See [Quest camera + push-to-talk setup](quest-audio-setup.md).
+
+### Structured tutorials in tracking mode
+
+The same `YibuPlanner(tracking=True)` multimodal call also recognizes requests
+for step-by-step physical help. It returns `guide` instead of `track`, containing
+`title`, `objects` (`id`, `label`, normalized image `u`/`v`) and ordered `steps`
+(`index`, `instruction`, `highlight` IDs). Ordinary object selection retains the
+existing `track` response. Tracking-mode calls request at least 1536 output
+tokens so a complete bounded tutorial fits; other planner budgets are unchanged.
+
+`coordinator/guide.py` rejects the entire guide unless it has 1–3 distinct
+objects, 1–8 contiguous steps, instructions of at most 240 characters, valid
+highlight references, and finite normalized coordinates. Extra fields, including
+world coordinates, are rejected. There must be a captured JPEG and envelope.
+`PlanResult.guide_plan` carries the validated plan; its tracking targets preserve
+object order for SAM 2 IDs 1..N. The session controller advances or repeats these
+stored steps without regenerating a plan or changing object identities.
+
+While a guide is active, `YibuPlanner.guide_command(pcm=...)` uses an audio-only,
+tools-disabled transcription call with purpose `guide-command` and a 128-token
+budget. It returns only the transcript; deterministic full-utterance matching
+handles `next`/`done`, `repeat`, and `stop`/`cancel`. Questions containing these
+words do not advance the guide. The call uses the existing env-only API key and
+`chat_completion` audit ledger, including failure logging. It sends no camera
+image or tutorial history and cannot create new guide steps.
+
+Offline verification: from `provider/`, run
+`python -m unittest tests.test_guide tests.test_tracking tests.test_voice_turn -v`.
+Live model grounding, cloud speech, SAM 2 tracking, and Quest rendering still
+require device verification.
 
 ## LAN coordinator voice planners (`coordinator/server.py`)
 

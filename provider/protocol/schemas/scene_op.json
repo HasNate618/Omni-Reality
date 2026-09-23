@@ -7,7 +7,7 @@
     "op_id": { "$ref": "#/$defs/ulid" },
     "turn_id": { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 },
     "stage_epoch": { "type": "integer", "minimum": 0 },
-    "kind": { "enum": ["mark", "label", "connect", "ghost", "place_known", "place_generated", "remove", "undo", "place_procedural", "revise_procedural"] },
+    "kind": { "enum": ["mark", "label", "connect", "ghost", "place_known", "place_generated", "place_box", "remove", "undo", "place_procedural", "revise_procedural"] },
     "drawing_id": { "anyOf": [{ "$ref": "#/$defs/ulid" }, { "type": "null" }] },
     "target": { "$ref": "#/$defs/target" },
     "from": { "$ref": "#/$defs/target" },
@@ -46,11 +46,22 @@
       "minLength": 1,
       "maxLength": 40,
       "description": "Listing name this placement was recorded under. Optional on the wire by contract: consumers fall back to a dims-only label rather than blanking."
-    }
+    },
+    "size_m": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["w", "d", "h"],
+      "properties": {
+        "w": { "$ref": "#/$defs/extent_m" },
+        "d": { "$ref": "#/$defs/extent_m" },
+        "h": { "$ref": "#/$defs/extent_m" }
+      }
+    },
+    "furniture": { "enum": ["sofa", "armchair", "coffee_table", "side_table", "bookshelf", "floor_lamp"] }
   },
   "allOf": [
     {
-      "if": { "properties": { "kind": { "enum": ["mark", "label", "ghost", "place_known", "place_generated", "remove", "place_procedural"] } }, "required": ["kind"] },
+      "if": { "properties": { "kind": { "enum": ["mark", "label", "ghost", "place_known", "place_generated", "place_box", "remove", "place_procedural"] } }, "required": ["kind"] },
       "then": { "required": ["target"] }
     },
     {
@@ -96,6 +107,13 @@
       "then": { "required": ["job_id"] }
     },
     {
+      "if": { "properties": { "kind": { "const": "place_box" } }, "required": ["kind"] },
+      "then": {
+        "required": ["target", "size_m"],
+        "properties": { "target": { "properties": { "type": { "const": "layout_slot" } } } }
+      }
+    },
+    {
       "if": { "properties": { "kind": { "const": "remove" } }, "required": ["kind"] },
       "then": { "properties": { "target": { "properties": { "type": { "const": "drawing" } } } } }
     }
@@ -131,6 +149,7 @@
       ]
     },
     "unit_pixel": { "type": "number", "minimum": 0, "maximum": 1 },
+    "extent_m": { "type": "number", "exclusiveMinimum": 0, "maximum": 4 },
     "target": {
       "oneOf": [
         {
@@ -182,6 +201,17 @@
             "frame": { "const": "openxr_floor_stage" },
             "nx": { "type": "number" }, "ny": { "type": "number" }, "nz": { "type": "number" },
             "frame_id": { "$ref": "#/$defs/ulid" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "dx", "dz", "yaw_deg"],
+          "properties": {
+            "type": { "const": "layout_slot" },
+            "dx": { "type": "number", "minimum": -8, "maximum": 8 },
+            "dz": { "type": "number", "minimum": -8, "maximum": 8 },
+            "yaw_deg": { "type": "number", "minimum": -180, "maximum": 180 }
           }
         }
       ]

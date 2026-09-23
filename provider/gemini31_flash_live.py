@@ -15,6 +15,8 @@ from typing import Any, Mapping
 
 from websockets.sync.client import connect
 
+from ws_tls import gateway_ssl_context
+
 from yibu_audit import append_audit_record, require_env_api_key
 
 
@@ -44,6 +46,7 @@ def gemini_live_call(
         with connect(
             endpoint,
             additional_headers={"Authorization": f"Bearer {api_key}"},
+            ssl=gateway_ssl_context(),
             proxy=None,
             open_timeout=min(timeout, 30),
             close_timeout=5,

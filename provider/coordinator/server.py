@@ -10,6 +10,10 @@ turn (coordinator/turn.py). Only the yibu planner calls a model.
 first and a real frame later, and only the frame carries a resolvable
 frame_id/stage_epoch for the mark target.
 
+--sam2-url opts into voice-seeded tracking: frame JPEGs feed a bounded history,
+utterance_end names the selected frame, and tracking results return on the
+same Quest socket. The receive loop stays active while selection/tracking run.
+
 This module never imports yibuapi or reads an API key itself; the
 default (no planner) path never invokes a model or produces speech. Outbound
 frames are always v1 JSON text. Inbound frames are validated defensively;
@@ -193,6 +197,59 @@ def _extract_envelope(payload: object) -> dict | None:
     return candidate
 
 
+HEADSET_MODES = ("tracking", "tutorial", "layout")
+
+
+def apply_headset_mode(state: CoordinatorState, ws: Any, mode: str | None, *,
+                       planner_kind: str, model: str | None, sam2_url: str | None,
+                       voice_only: bool, perception_qa: bool) -> str | None:
+    """Rebuild this connection's planner for the mode the headset asked for.
+
+    The launcher picks on the headset, so the laptop cannot know the mode until
+    `hello` arrives. Everything mode-dependent lives here: the planner, the SAM 2
+    bridge, and the synthesizer. Returns the mode applied, or None when the
+    headset did not ask for one (an older build) and the CLI choice stands.
+
+    "tutorial" is deliberately the same configuration as "tracking": the guided
+    tutorial is a branch inside the tracking planner, not a separate mode.
+    """
+    if mode not in HEADSET_MODES:
+        if mode is not None:
+            logger.info("ignoring unknown headset mode %r", str(mode)[:32])
+        return None
+
+    if mode == "layout":
+        state.planner = make_planner("layout", model)
+        state.tracking = None
+        from voice.audio import say_to_pcm
+
+        async def _layout_synth(text: str) -> bytes | None:
+            return await asyncio.to_thread(say_to_pcm, text)
+
+        state.synthesizer = _layout_synth
+        logger.info("headset chose layout: canned cart, no SAM 2")
+        return mode
+
+    # tracking and tutorial share one configuration.
+    state.planner = make_planner(planner_kind, model, tracking=bool(sam2_url),
+                                 voice_only=voice_only, perception_qa=perception_qa)
+    if sam2_url and state.tracking is None:
+        from coordinator.sam2_bridge import Sam2Bridge
+        state.tracking = Sam2Bridge(sam2_url, _turn_sender(ws, state))
+    if planner_kind == "yibu":
+        from voice.cloud_speech import synthesize_line
+
+        speak_purpose = ("perception-qa-speak" if perception_qa
+                         else ("voice-only-speak" if voice_only else "voice-speak"))
+
+        async def _live_synth(text: str) -> bytes | None:
+            return await synthesize_line(text=text, purpose=speak_purpose)
+
+        state.synthesizer = _live_synth
+    logger.info("headset chose %s: planner=%s sam2=%s", mode, planner_kind, bool(sam2_url))
+    return mode
+
+
 async def _handle_hello(ws: Any, state: CoordinatorState, message: dict) -> None:
     incoming = message["session_id"]
     if incoming is not None and incoming == state.session_id:
@@ -200,6 +257,10 @@ async def _handle_hello(ws: Any, state: CoordinatorState, message: dict) -> None
     else:
         session_id = new_ulid()
         state.session_id = session_id
+    configure = getattr(state, "configure_mode", None)
+    if callable(configure):
+        # Before hello_ok: that reply advertises the planner we ended up with.
+        configure(ws, message.get("payload", {}).get("mode"))
     await ws.send(
         _sendable(
             "hello_ok",
@@ -251,13 +312,24 @@ async def _handle_frame(ws: Any, state: CoordinatorState, message: dict) -> None
         return
     state.accept_envelope(envelope)
     if state.tracking is not None:
-        await _note_tracking_epoch(state, envelope)
-        payload = message["payload"]
-        if (payload.get("tracking") is True
-                and not payload.get("utterance_id")
-                and not message.get("utterance_id")):
-            await _feed_tracking_frame(state, message, envelope)
-            return
+        bridge = state.tracking
+        if bridge.epoch != envelope["stage_epoch"]:
+            if bridge.epoch is not None:
+                for turn_id in list(state.turn_tasks):
+                    cancel_turn(state, turn_id)
+                from coordinator.turn import finish_guide
+                await finish_guide(state, _turn_sender(ws, state), state.turn_id, reason="error")
+                await bridge.reset()
+                await bridge.status("stopped", "Tracking origin changed; select the object again.")
+            bridge.epoch = envelope["stage_epoch"]
+        await _feed_tracking_frame(state, message, envelope)
+        # A frame tagged with an utterance is the snapshot for a B-mode turn,
+        # not just tracker input: the live turn sends buf.jpeg to the model.
+        # Streamed A-mode frames carry no utterance_id and stop at the tracker.
+        if state.planner is not None and (
+                message["payload"].get("utterance_id") or message.get("utterance_id")):
+            _attach_frame_to_utterance(state, message, envelope)
+        return
     _check_clock_skew(state, envelope.get("t_unix_ns"))
     if state.planner is not None:
         _attach_frame_to_utterance(state, message, envelope)
@@ -304,16 +376,44 @@ def _attach_frame_to_utterance(state: CoordinatorState, message: dict, envelope:
             perception_frame("frame_accepted", jpeg_bytes=len(jpeg))
     buf.envelope = envelope
     buf.jpeg = jpeg
+    logger.debug(
+        "frame pinned to utterance %s: frame_id=%s jpeg=%s bytes",
+        utterance_id, envelope["frame_id"], len(jpeg) if jpeg else 0,
+    )
 
 
 def _turn_sender(ws: Any, state: CoordinatorState):
     async def send(msg_type: str, turn_id: int, payload: dict, utterance_id: str | None = None) -> None:
+        logger.debug("-> %s turn=%s", msg_type, turn_id)
+        if msg_type == "tracking_status" and payload.get("state") == "error" and state.guide is not None:
+            from coordinator.turn import finish_guide
+            await finish_guide(state, send, state.turn_id, reason="error", stop_tracking=False)
         try:
             await ws.send(_sendable(msg_type, state.session_id, turn_id, payload, utterance_id))
         except Exception:  # socket gone: drawings stay on Quest, nothing to retry
             logger.info("send %s failed; connection closed?", msg_type)
 
     return send
+
+
+async def _warm_speech(purpose: str) -> None:
+    """Pre-synthesize the canned lines; failures are not worth a turn."""
+    from coordinator.turn import (
+        SAY_MODEL_ERROR,
+        SAY_NO_TARGET,
+        SAY_TRACKING_DEFAULT,
+        SAY_TRACKING_MANY,
+    )
+    from voice.cloud_speech import warm_line
+
+    lines = (SAY_TRACKING_DEFAULT, SAY_TRACKING_MANY, SAY_NO_TARGET, SAY_MODEL_ERROR)
+    for line in lines:
+        try:
+            await warm_line(line, purpose=purpose)
+        except Exception as exc:
+            logger.info("speech warm failed exception_class=%s", type(exc).__name__)
+            return
+    logger.info("canned speech warmed (%d lines)", len(lines))
 
 
 async def _warm_live_session(state: CoordinatorState) -> None:
@@ -342,11 +442,25 @@ async def _handle_utterance_end(ws: Any, state: CoordinatorState, message: dict)
     if not isinstance(utterance_id, str):
         logger.info("ignoring utterance_end without utterance_id")
         return
+    # A-mode (push-to-talk) and B-mode (live conversation) share one session,
+    # so the route is chosen per utterance, not by a startup flag. Older
+    # headset builds omit `mode`; they mean push-to-talk.
+    mode = message["payload"].get("mode")
+    if mode not in ("ptt", "live"):
+        # No mode: an older headset build, or one started in a fixed mode by
+        # --perception-qa. Otherwise push-to-talk.
+        mode = "live" if _live_mode(state) else "ptt"
+
     from voice.bootstrap_diagnostics import utterance_end_accepted
 
     buf = state.utterances.get(utterance_id)
     pcm_bytes = len(buf.pcm) if buf is not None else 0
     utterance_end_accepted(pcm_bytes)
+    logger.info(
+        "utterance_end %s: mode=%s audio=%d bytes (%.2f s), selected frame_id=%s",
+        utterance_id, mode, pcm_bytes, pcm_bytes / 32000,
+        message["payload"].get("frame_id"),
+    )
     if buf is not None and pcm_bytes:
         from voice.echo_gate import peak_rms, voiced_windows
         import struct as _struct
@@ -365,9 +479,14 @@ async def _handle_utterance_end(ws: Any, state: CoordinatorState, message: dict)
         return
     if buf is not None and _drop_phantom(state, _turn_sender(ws, state), utterance_id, buf):
         return
-    if _live_mode(state):
+    if mode == "live" and not (state.guide is not None and state.guide.active):
         _start_live_utterance(state, _turn_sender(ws, state), utterance_id)
         return
+    if state.tracking is not None:
+        frame_id = message["payload"].get("frame_id")
+        state.utterances.setdefault(utterance_id, UtteranceBuffer()).selected_frame_id = (
+            frame_id if isinstance(frame_id, str) else None
+        )
     start_turn(state, _turn_sender(ws, state), utterance_id)
 
 
@@ -382,12 +501,22 @@ def _start_live_utterance(state: CoordinatorState, send: Any, utterance_id: str)
     if len(buf.pcm) < MIN_UTTERANCE_S * BYTES_PER_SECOND:
         logger.info("utterance %s too short (%d bytes); no turn", utterance_id, len(buf.pcm))
         return
+    # B-mode is reached by the per-utterance `mode`, not a startup flag, so the
+    # session may not be warmed yet. Connect on first use; only report it down
+    # if that fails.
+    task = asyncio.create_task(_live_turn_or_down(state, send, utterance_id, buf))
+    task.add_done_callback(_log_live_task_done)
+
+
+async def _live_turn_or_down(state: CoordinatorState, send: Any,
+                             utterance_id: str, buf: Any) -> None:
+    from coordinator import live_turn as live_mod
     live = getattr(state, "live", None)
     if live is None or not live.is_open:
-        task = asyncio.create_task(_live_down(state, send, utterance_id))
-    else:
-        task = asyncio.create_task(live_mod.start_live_turn(state, send, utterance_id, buf))
-    task.add_done_callback(_log_live_task_done)
+        if not await live_mod.ensure_live_session(state):
+            await _live_down(state, send, utterance_id)
+            return
+    await live_mod.start_live_turn(state, send, utterance_id, buf)
 
 
 async def _live_down(state: CoordinatorState, send: Any, utterance_id: str) -> None:
@@ -434,6 +563,16 @@ async def _handle_cancel(ws: Any, state: CoordinatorState, message: dict) -> Non
     turn_id = payload.get("turn_id")
     if isinstance(turn_id, int) and not isinstance(turn_id, bool) and "op_id" not in payload:
         cancel_turn(state, turn_id)
+        if state.guide is not None and (turn_id == state.tracking.turn_id
+                                        or turn_id == state.turn_id
+                                        or turn_id in state.turn_tasks):
+            from coordinator.turn import finish_guide
+            for pending_id in list(state.turn_tasks):
+                cancel_turn(state, pending_id)
+            await finish_guide(state, _turn_sender(ws, state), turn_id)
+        if state.tracking is not None and state.tracking.turn_id == turn_id:
+            await state.tracking.stop()
+            await state.tracking.status("stopped", "Tracking stopped.")
         logger.info("cancel turn=%d", turn_id)
         return
     op_id = payload.get("op_id")
@@ -664,6 +803,11 @@ async def handle_text(ws: Any, state: CoordinatorState, raw: object) -> None:
         logger.info("ignoring message from foreign session")
         return
     msg_type = message["type"]
+    logger.debug(
+        "<- %s %d bytes utt=%s payload=%s",
+        msg_type, len(raw_text), message["utterance_id"],
+        ",".join(sorted(message["payload"])) if isinstance(message["payload"], dict) else "?",
+    )
     if msg_type == "hello":
         await _handle_hello(ws, state, message)
     elif msg_type == "ping":
@@ -688,6 +832,8 @@ async def _handle_clear_session(ws: Any, state: CoordinatorState, message: dict)
     from coordinator.jobs import clear_jobs
 
     clear_jobs(state.jobs, state.artifact_root)
+    from coordinator.turn import finish_guide
+    await finish_guide(state, _turn_sender(ws, state), state.turn_id)
     await state.clear_voice()
     await _close_live(state)
     payload = {"session_id": state.session_id, "generation": state.clear_generation}
@@ -733,6 +879,13 @@ async def handle_connection(ws: Any, state: CoordinatorState) -> None:
         clear_jobs(state.jobs, state.artifact_root)
 
 
+def _has_api_key() -> bool:
+    """True when a live call could work. Layout mode degrades, never dies."""
+    import os
+
+    return bool(os.environ.get("YIBU_API_KEY", "").strip())
+
+
 def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if getattr(args, "voice_only", False) and args.planner != "yibu":
         parser.error("--voice-only requires --planner yibu")
@@ -747,6 +900,7 @@ def make_planner(
     kind: str,
     model: str | None = None,
     *,
+    tracking: bool = False,
     voice_only: bool = False,
     perception_qa: bool = False,
 ):
@@ -758,12 +912,37 @@ def make_planner(
     from coordinator.planner import StubPlanner, VoiceStubPlanner, YibuPlanner
 
     if kind == "stub":
+        if tracking:
+            from coordinator.planner import PlanResult
+
+            class TrackingStub(StubPlanner):
+                async def plan(self, **kwargs):
+                    return PlanResult(ops=[], text="", tracking_targets=[
+                        {"type": "image_point", "u": 0.5, "v": 0.5, "label": "centre"}])
+            return TrackingStub()
         return StubPlanner()
     if kind == "voice-stub":
         return VoiceStubPlanner(perception_qa=perception_qa)
+    if kind == "layout":
+        from coordinator.layout import LayoutPlanner
+
+        # Canned unless a key is present: the demo must survive the key dying.
+        complete_fn = None
+        if _has_api_key():
+            from coordinator.planner import make_live_complete_fn
+
+            holder = YibuPlanner(model=model or "qwen3.8-omni-flash", purpose="layout-turn")
+            complete_fn = make_live_complete_fn(holder)
+        return LayoutPlanner(complete_fn=complete_fn,
+                             **({"model": model} if model else {}))
     if perception_qa:
         from coordinator.perception import PerceptionQaPlanner
         return PerceptionQaPlanner(**({"model": model} if model else {}))
+    if tracking:
+        options = {"tracking": True, "purpose": "track-object"}
+        if model:
+            options["model"] = model
+        return YibuPlanner(**options)
     purpose = "voice-only-turn" if voice_only else "voice-turn"
     if model:
         return YibuPlanner(model=model, voice_only=voice_only, purpose=purpose)
@@ -775,9 +954,9 @@ async def run_server(
     port: int = 8765,
     planner_kind: str = "mark",
     model: str | None = None,
+    sam2_url: str | None = None,
     voice_only: bool = False,
     perception_qa: bool = False,
-    sam2_url: str | None = None,
 ) -> None:
     """Bind the coordinator WebSocket server (CLI: python -m coordinator.server)."""
     _validate_cli_args(argparse.ArgumentParser(), argparse.Namespace(
@@ -796,11 +975,27 @@ async def run_server(
             planner_kind, model, voice_only=voice_only, perception_qa=perception_qa,
             jobs=jobs,
         )
+        # The headset's launcher picks the mode and sends it in `hello`; this
+        # closure lets _handle_hello rebuild the planner for that choice.
+        def _configure(socket, mode):
+            return apply_headset_mode(
+                state, socket, mode, planner_kind=planner_kind, model=model,
+                sam2_url=sam2_url, voice_only=voice_only, perception_qa=perception_qa)
+
+        state.configure_mode = _configure
         if sam2_url:
             from coordinator.sam2_bridge import Sam2Bridge
             state.sam2_url = sam2_url
             state.tracking = Sam2Bridge(sam2_url, _turn_sender(ws, state))
-        if planner_kind == "voice-stub":
+        if planner_kind == "layout":
+            # macOS `say` on the laptop: ~750 ms, no key, no gateway.
+            from voice.audio import say_to_pcm
+
+            async def _layout_synth(text: str) -> bytes | None:
+                return await asyncio.to_thread(say_to_pcm, text)
+
+            state.synthesizer = _layout_synth
+        elif planner_kind == "voice-stub":
             from voice.test_tone import make_test_tone
 
             async def _tone_synth(_text: str) -> bytes:
@@ -809,6 +1004,7 @@ async def run_server(
             state.synthesizer = _tone_synth
         elif planner_kind == "yibu":
             # Live cloud speech for speak.audio (spends credit per turn).
+            # A-mode replies carry audio: null and are spoken by Android TTS.
             from voice.cloud_speech import synthesize_line
 
             speak_purpose = "perception-qa-speak" if perception_qa else ("voice-only-speak" if voice_only else "voice-speak")
@@ -817,7 +1013,17 @@ async def run_server(
                 return await synthesize_line(text=text, purpose=speak_purpose)
 
             state.synthesizer = _live_synth
-        await handle_connection(ws, state)
+            # Warm the fixed lines so the first turn does not pay for them.
+            asyncio.create_task(_warm_speech(speak_purpose))
+        try:
+            await handle_connection(ws, state)
+        finally:
+            tasks = list(state.turn_tasks.values())
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if state.tracking:
+                await state.tracking.stop()
 
     async with websockets.serve(_serve_one, host, port):
         logger.info("coordinator listening on %s:%d (planner=%s)", host, port, planner_kind)
@@ -830,7 +1036,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
         "--planner",
-        choices=["mark", "stub", "yibu", "voice-stub"],
+        choices=["mark", "stub", "yibu", "voice-stub", "layout"],
         default="mark",
         help=(
             "mark: slice-2 hardcoded mark (default); stub: offline voice turns; "
@@ -838,6 +1044,11 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument("--model", help="yibu model id (default qwen3.8-omni-flash)")
+    parser.add_argument("--sam2-url", help="enable object tracking, e.g. ws://127.0.0.1:8766")
+    parser.add_argument(
+        "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING"],
+        help="DEBUG traces every message, frame and model call",
+    )
     parser.add_argument(
         "--voice-only",
         action="store_true",
@@ -854,6 +1065,8 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     _validate_cli_args(parser, args)
+    if args.sam2_url and args.planner == "mark":
+        parser.error("--sam2-url requires --planner stub or --planner yibu")
     try:
         ensure_live_planner_config(args.planner)
     except ApiKeyConfigurationError as exc:
@@ -861,15 +1074,22 @@ if __name__ == "__main__":
             f"Live coordinator requires environment variable {exc.name} "
             "(set on the laptop only; no API call is made when it is missing)."
         )
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    # Third-party debug logs bury ours (httpx prints every HTTP chunk).
+    for noisy in ("websockets", "httpx", "httpcore", "asyncio"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     asyncio.run(
         run_server(
             args.host,
             args.port,
             args.planner,
             args.model,
+            sam2_url=args.sam2_url,
             voice_only=args.voice_only,
             perception_qa=args.perception_qa,
-            sam2_url=args.sam2_url,
         )
     )

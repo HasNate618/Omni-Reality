@@ -116,4 +116,6 @@ def planner_mode_label(planner: Any) -> str:
         return "stub"
     if class_name == "YibuPlanner":
         return "yibu"
+    if class_name == "LayoutPlanner":
+        return "layout"
     return "unknown"

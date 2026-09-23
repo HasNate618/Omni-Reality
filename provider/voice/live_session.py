@@ -67,6 +67,8 @@ class LiveSession:
 
     async def _default_connector(self) -> Any:
         import websockets
+
+        from ws_tls import gateway_ssl_context
         key = self._api_key
         if not key:
             from yibu_audit import require_env_api_key
@@ -74,6 +76,7 @@ class LiveSession:
         return await websockets.connect(
             self._endpoint,
             additional_headers={"Authorization": f"Bearer {key}"},
+            ssl=gateway_ssl_context(),
             proxy=None, open_timeout=30, max_size=None)
 
     async def connect(self, timeout: float = 20.0) -> None:

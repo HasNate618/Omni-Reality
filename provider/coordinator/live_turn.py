@@ -43,14 +43,45 @@ HIGHLIGHT_DECL = {
     },
 }
 
-IMAGE_TURN_PROMPT = ("You are the wearer's assistant standing here with them. "
-                     "Answer what I just asked directly in one or two short sentences. "
-                     "Never ask me what I want to know, and never mention images, "
-                     "photos, or length limits. Describe only what is visible; "
-                     "never invent details. If I ask you to show, highlight, find, "
-                     "or point out something visible, call highlight_object with a "
-                     "short label and its u v position, and say briefly what you "
-                     "are highlighting.")
+IMAGE_TURN_PROMPT = (
+    "You are the wearer's assistant standing here with them. "
+    "Answer what I just asked directly in one or two short sentences. "
+    "Never ask me what I want to know, and never mention images, "
+    "photos, or length limits. Describe only what is visible; "
+    "never invent details. If I asked you to track, highlight, follow, "
+    "or find something visible, the app is already outlining it for me "
+    "on its own, so just confirm briefly and naturally. Never say you "
+    "are unable to track or follow something."
+)
+
+# B-mode can start an overlay mid-conversation. The Live session returns
+# speech, not coordinates, and the gateway never sends inputTranscription --
+# we ask for it, but only outputTranscription ever arrives -- so there is no
+# transcript of the wearer to trigger on. Instead each conversation turn runs
+# A-mode's tracking planner in the background over the same audio and frame:
+# it answers track:null unless an object was actually asked for, which is a
+# better arbiter than phrase matching. OMNI_LIVE_TRACK=0 turns it off and
+# spends one model call per turn instead of two.
+TRACK_PHRASES = (
+    "track the", "track that", "track my", "track this",
+    "highlight the", "highlight that", "highlight this",
+    "outline the", "outline that",
+    "follow the", "follow that",
+    "what's that", "what is that", "whats that",
+)
+
+
+def live_tracking_enabled() -> bool:
+    """False when OMNI_LIVE_TRACK is set to 0/false/no."""
+    import os
+
+    return os.environ.get("OMNI_LIVE_TRACK", "1").strip().lower() not in ("0", "false", "no")
+
+
+def wants_tracking(text: str) -> bool:
+    """True when the wearer asked for an object to be tracked."""
+    low = (text or "").lower()
+    return any(phrase in low for phrase in TRACK_PHRASES)
 
 
 class _Turn:
@@ -69,13 +100,20 @@ class _Turn:
         self.started = time.monotonic()
         self.last_usage: dict[str, int] = {}
         self.usage_delta: dict[str, int] = {}
+        # Media for this utterance, kept so a tracking seed can reuse exactly
+        # what the model was asked about (see _maybe_seed_tracking).
+        self.jpeg: bytes | None = None
+        self.envelope: dict | None = None
+        self.pcm: bytes = b""
+        self.heard: list[str] = []
+        self.seed_started = False
 
 
-def _callbacks(state: CoordinatorState):
+def _callbacks(state: CoordinatorState) -> dict[str, Any]:
     return dict(
         on_audio=lambda data: _on_audio(state, data),
         on_output_transcript=lambda t: _on_said(state, t),
-        on_input_transcript=lambda t: None,
+        on_input_transcript=lambda t: _on_heard(state, t),
         on_interrupted=lambda: _on_interrupted(state),
         on_usage=lambda u: _on_usage(state, u),
         on_turn_end=lambda: _on_turn_end(state),
@@ -250,6 +288,9 @@ async def start_live_turn(state: CoordinatorState, send: Any,
                {"utterance_id": utterance_id, "turn_id": turn_id}, utterance_id)
     turn = _Turn(turn_id, utterance_id, send)
     turn.baseline = dict(getattr(state, "_live_last_totals", {}))
+    turn.jpeg = bytes(buf.jpeg) if buf.jpeg else None
+    turn.envelope = buf.envelope
+    turn.pcm = bytes(buf.pcm)
     state._live_turn = turn
     try:
         reason = validate_jpeg(buf.jpeg, buf.envelope)
@@ -259,7 +300,11 @@ async def start_live_turn(state: CoordinatorState, send: Any,
             await speak_recovery(state, send, turn_id, utterance_id, NO_IMAGE_RECOVERY)
             return turn_id
         state._live_frame = (buf.envelope, bytes(buf.jpeg))
-        await state.live.start_image_turn(bytes(buf.jpeg), bytes(buf.pcm), IMAGE_TURN_PROMPT)
+        live_session = state.live
+        if live_session is None:
+            raise LiveSessionError("live session missing")
+        await live_session.start_image_turn(bytes(buf.jpeg), bytes(buf.pcm), IMAGE_TURN_PROMPT)
+        _maybe_seed_tracking(state, turn)
         try:
             await asyncio.wait_for(turn.event.wait(), LIVE_TURN_TIMEOUT_S)
         except asyncio.TimeoutError:
@@ -327,6 +372,63 @@ async def _emit_chunk(turn: _Turn, window24k: bytes) -> None:
         await turn.send("speak_chunk", turn.turn_id, payload, turn.utterance_id)
     except Exception:
         pass
+
+
+def _maybe_seed_tracking(state: CoordinatorState, turn: _Turn) -> None:
+    """Start one background tracking selection for this turn, at most once."""
+    if turn.seed_started or state.tracking is None or not turn.jpeg:
+        return
+    if not live_tracking_enabled():
+        return
+    turn.seed_started = True
+    # Background: the conversation must never block on the seed.
+    task = asyncio.create_task(_seed_tracking(state, turn))
+    task.add_done_callback(_log_seed_done)
+
+
+def _on_heard(state: CoordinatorState, text: str) -> None:
+    """Wearer transcript, when the gateway sends one. Today it does not, so
+    the per-turn attempt in start_live_turn is what actually seeds."""
+    turn = _current(state)
+    if turn is None or not text:
+        return
+    turn.heard.append(text)
+    if wants_tracking("".join(turn.heard)):
+        _maybe_seed_tracking(state, turn)
+
+
+def _log_seed_done(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.info("live tracking seed failed exception_class=%s", type(exc).__name__)
+
+
+async def _seed_tracking(state: CoordinatorState, turn: _Turn) -> None:
+    """Pick a point from this utterance's frame and seed SAM 2.
+
+    Reuses A-mode's tracking planner and Sam2Bridge untouched. Stays silent on
+    failure: B-mode should never talk over a live reply.
+    """
+    bridge = state.tracking
+    if bridge is None or not turn.jpeg or not turn.envelope:
+        return
+    from coordinator.planner import YibuPlanner
+
+    generation = await bridge.begin(turn.turn_id, turn.utterance_id)
+    planner = YibuPlanner(tracking=True, purpose="track-object")
+    plan = await planner.plan(pcm=turn.pcm, jpeg=turn.jpeg,
+                              envelope=turn.envelope, context=[])
+    if turn.tombstoned or generation != bridge.generation:
+        return
+    if not plan.tracking_targets:
+        logger.info("live tracking seed: no target for turn %d", turn.turn_id)
+        return
+    frame = await bridge.history.wait_for(turn.envelope.get("frame_id"))
+    await bridge.seed(frame, plan.tracking_targets, generation)
+    logger.info("live tracking seed: turn %d seeded %d objects from frame %s",
+                turn.turn_id, len(plan.tracking_targets), turn.envelope.get("frame_id"))
 
 
 def _on_said(state: CoordinatorState, text: str) -> None:

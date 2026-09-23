@@ -1,0 +1,57 @@
+{
+  "note": "Three items for the corner demo. Dimensions are approximate, in millimetres, and are not measurements we made. Edit this file when the props change; nothing else needs to change.",
+  "corner_extent_m": {
+    "x": 2.4,
+    "z": 2.4
+  },
+  "items": [
+    {
+      "id": "sofa",
+      "label": "2-seat sofa",
+      "size_mm": {
+        "w": 1800,
+        "d": 900,
+        "h": 830
+      },
+      "color": "#3DDCFF",
+      "slot": {
+        "dx": 1.05,
+        "dz": 0.5,
+        "yaw_deg": 0
+      },
+      "furniture": "sofa"
+    },
+    {
+      "id": "armchair",
+      "label": "armchair",
+      "size_mm": {
+        "w": 780,
+        "d": 820,
+        "h": 1000
+      },
+      "color": "#FFC24D",
+      "slot": {
+        "dx": 0.46,
+        "dz": 1.6,
+        "yaw_deg": -90
+      },
+      "furniture": "armchair"
+    },
+    {
+      "id": "side_table",
+      "label": "side table",
+      "size_mm": {
+        "w": 550,
+        "d": 550,
+        "h": 450
+      },
+      "color": "#7BE38B",
+      "slot": {
+        "dx": 1.4,
+        "dz": 1.35,
+        "yaw_deg": 0
+      },
+      "furniture": "side_table"
+    }
+  ]
+}

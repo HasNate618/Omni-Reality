@@ -62,6 +62,19 @@ generated furniture — the listed size is the claim.
 
 ## Voice turn (slice 3, laptop side)
 
+**Tracking integration:** `--sam2-url ws://127.0.0.1:8766` with `--planner
+stub|yibu` opts into a separate object-tracking turn. Quest's
+`QuestStreamInput` sends real JPEGs and A-button push-to-talk PCM. The selected
+frame and Huawei's points (up to 3) seed the existing SAM 2 click protocol;
+results return as `tracking_result` instead of spatial `scene_op`s. Follow
+[Quest camera + push-to-talk setup](quest-audio-setup.md); the frame contract
+lives in [omni-sam2-streaming.md](omni-sam2-streaming.md#quest--voice-automatic-initialization).
+The existing placement/ACK turn below remains the default without that flag.
+
+- Coordinator runs voice turns only with a planner:
+  `python -m coordinator.server --planner stub` (offline) or `--planner yibu`
+  (live `qwen3.8-omni-flash`, spends credit). Default `--planner mark` keeps
+  the slice-2 hardcoded mark above.
 - Coordinator runs voice turns only with a planner. Default `--planner mark`
   keeps the slice-2 hardcoded mark above. Spatial voice (JPEG + tools + scene
   ops) uses `--planner yibu` without `--voice-only` (see
@@ -130,6 +143,85 @@ Coordinator events: `connection_open`, `connection_close`,
   plus cloud-PCM `speak` playback with caption (`QuestDemo/Assets/Voice/`,
   `Spatial/Procedural/`). Generated GLBs import via glTFast into the
   listed-size box; when import never lands, the box stays at its stated size.
+
+Tracking uses status/result events rather than the placement-ACK speech path.
+Its Unity source does not implement speech playback or a new passthrough renderer.
+
+## Two modes: A push-to-talk, B conversation
+
+One coordinator session serves both. The route is picked **per utterance** from
+`payload.mode` on `utterance_end` (`"ptt"` or `"live"`), not from a startup
+flag; a payload without `mode` falls back to `--perception-qa` if set, else
+push-to-talk, so an older headset build still works.
+
+| | **A — push to talk** | **B — conversation** |
+| --- | --- | --- |
+| Mic | `QuestStreamInput` (hold A) | `MicUtterance`, continuous VAD |
+| Model | `qwen3.8-omni-flash` per turn | `gemini-3.1-flash-live-preview` Live session |
+| Speech out | Android TTS (`QuestSpeech`), no credit | cloud PCM `speak_chunk`/`speak_final` |
+| Overlay | seeds SAM 2 from the pinned frame | seeds on a tracking phrase (below) |
+
+Both reach yibuapi with the same `YIBU_API_KEY`; only the model differs.
+
+- **Mic ownership is exclusive, frame streaming is not.** B hands the
+  microphone to `MicUtterance` (`CoordinatorClient.SetLiveConversation`, which
+  toggles the component so `OnDisable` calls `Microphone.End`).
+  `QuestStreamInput` keeps streaming JPEGs in both modes, so a seeded mask
+  keeps tracking while you talk.
+- **Buttons:** right **A** = push-to-talk, right **B** = conversation toggle,
+  left **X** = stop tracking (moved off B).
+- **Overlays mid-conversation:** the Live session returns speech, not
+  coordinates, and the gateway **never sends `inputTranscription`** — the
+  setup asks for it, but only `outputTranscription` arrives — so there is no
+  transcript of the wearer to trigger on. Each conversation turn instead runs
+  A-mode's `YibuPlanner(tracking=True)` in the background over the same audio
+  and frame; it answers `track:null` unless an object was actually asked for,
+  which is a better arbiter than phrase matching. `parse_tracking_reply` gives
+  the point and `Sam2Bridge.seed` takes it unchanged. Fenced by
+  `bridge.generation`, silent on failure rather than talking over a live reply.
+  Costs a second model call per turn: `OMNI_LIVE_TRACK=0` disables it.
+  `wants_tracking` remains for the day the gateway does send a transcript.
+- **Prerequisite:** B-mode needs `ffmpeg` on the laptop (`brew install
+  ffmpeg`) — model audio arrives at 24 kHz and is resampled to 16 kHz for
+  Quest. Without it the conversation is silent and `test_resample` /
+  `test_live_turn` / `test_perception` fail.
+- Not yet: tool-calling in the Live session would let the model return the
+  point itself and save the second call.
+
+## Running it (one command)
+
+`./start-demo.sh` from the repo root starts the SAM 2 server (reusing a loaded
+one), replaces any leftover coordinator, loads `provider/.env`, re-creates the
+`adb reverse tcp:8765` tunnel, launches the app, and tails the interesting log
+lines. `--stub` skips the model call (seeds the frame centre); `--no-app`
+leaves the headset app alone. Ctrl+C stops what it started; logs in `logs/`.
+
+Only one coordinator may run at a time: a leftover process keeps the headset's
+socket through the USB tunnel and silently swallows everything it sends, which
+looks exactly like a dead pipeline. The tunnel also disappears whenever adb
+restarts or the cable is unplugged, so re-run the script.
+
+## Seeing the masks in the headset
+
+`QuestDemo/Assets/Spatial/TrackingMaskOverlay.cs` is the renderer that
+`TrackingResult.cs` expects. It creates itself at startup (no scene wiring) and
+subscribes to `CoordinatorClient.TrackingResultReceived`.
+
+Each tracked object gets its own layer, keyed by `obj_id`: its `mask_b64` is
+tinted into its own RGBA texture and drawn on its own quad, built from the
+capture frame's intrinsics and pose. Colours come from `Palette` in the same
+order as `COLORS` in `sam2/sam2_ws_client.py`, so the webcam demo and the
+headset give one object the same colour. Depth is measured per object from that
+mask's own centroid, which is why the layers are separate: a laptop at 0.8 m and
+a poster at 3 m cannot share one plane. The model's `label`, when it gave one,
+floats over the mask.
+
+Each quad is world-locked to the capture pose, so it holds still while the
+wearer moves; it is a flat projection, exact along the capture ray and
+approximate off-axis. A layer hides when its object stops coming back, and all
+of them hide on `tracking_status` `stopped`/`error` or after 2 s with no result.
+Without this component the masks arrive and are only logged
+(`QUEST_TRACKING first mask ...`), which is what "nothing renders" looked like.
 
 ## How to verify
 

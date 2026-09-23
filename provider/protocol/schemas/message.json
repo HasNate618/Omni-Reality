@@ -11,7 +11,7 @@
         "hello", "hello_ok", "audio_chunk", "utterance_end", "frame", "ack",
         "cancel", "clear_session", "ping", "pong", "turn_started", "scene_op",
         "speak", "speak_chunk", "speak_final", "stop_speak", "request_frame",
-        "honesty", "session_cleared", "tracking_status", "tracking_result"
+        "honesty", "session_cleared", "tracking_status", "tracking_result", "guide_step", "guide_finished"
       ]
     },
     "session_id": { "type": ["string", "null"] },
